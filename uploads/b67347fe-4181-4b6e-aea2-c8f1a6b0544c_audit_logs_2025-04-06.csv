@@ -1,0 +1,11 @@
+ID,Action,Utilisateur,Adresse IP,Type de ressource,ID ressource,Description,Statut,Date
+23,LOGIN_SUCCESS,admin,0:0:0:0:0:0:0:1,AUTH,,"Authentification réussie pour accéder à /api/audit/logs",SUCCÈS,06/04/2025 18:49:22
+22,LOGIN_SUCCESS,admin,0:0:0:0:0:0:0:1,AUTH,,"Authentification réussie pour accéder à /api/audit/logs",SUCCÈS,06/04/2025 18:49:22
+21,LOGIN_SUCCESS,admin,0:0:0:0:0:0:0:1,AUTH,,"Authentification réussie pour accéder à /api/departments",SUCCÈS,06/04/2025 18:49:15
+20,LOGIN_SUCCESS,admin,0:0:0:0:0:0:0:1,AUTH,,"Authentification réussie pour accéder à /api/departments",SUCCÈS,06/04/2025 18:49:15
+19,LOGIN_SUCCESS,admin,0:0:0:0:0:0:0:1,AUTH,,"Authentification réussie pour accéder à /api/users",SUCCÈS,06/04/2025 18:49:15
+18,LOGIN_SUCCESS,admin,0:0:0:0:0:0:0:1,AUTH,,"Authentification réussie pour accéder à /api/users",SUCCÈS,06/04/2025 18:49:15
+17,LOGIN_SUCCESS,admin,0:0:0:0:0:0:0:1,AUTH,,"Authentification réussie pour accéder à /api/audit/logs",SUCCÈS,06/04/2025 18:49:07
+16,LOGIN_SUCCESS,admin,0:0:0:0:0:0:0:1,AUTH,,"Authentification réussie pour accéder à /api/audit/logs",SUCCÈS,06/04/2025 18:49:07
+15,LOGIN_SUCCESS,admin,0:0:0:0:0:0:0:1,AUTH,,"Authentification réussie pour accéder à /api/users/profile",SUCCÈS,06/04/2025 18:49:06
+14,LOGIN_SUCCESS,admin,0:0:0:0:0:0:0:1,AUTH,,"Authentification réussie pour accéder à /api/users/profile",SUCCÈS,06/04/2025 18:49:06
