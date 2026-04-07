@@ -24,14 +24,14 @@ jobs:
       - name: Build with Maven
         run: ./mvnw clean compile -B --no-transfer-progress
 
-      - name: Trivy Vulnerability Scan (HIGH + CRITICAL)
+      - name: Trivy Vulnerability Scan
         uses: aquasecurity/trivy-action@master
         with:
           scan-type: 'fs'
           scan-ref: '.'
           format: 'table'
           severity: 'HIGH,CRITICAL'
-          exit-code: '0'        # Ne pas faire échouer le build pour l'instant
+          exit-code: '0'     # Ne pas faire échouer le build pour l'instant
 
       - name: Generate Trivy HTML Report
         uses: aquasecurity/trivy-action@master
