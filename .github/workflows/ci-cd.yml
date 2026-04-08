@@ -21,27 +21,29 @@ jobs:
           distribution: 'temurin'
           cache: 'maven'
 
+      # 👇 مهم (حل مشكل permission)
+      - name: Make mvnw executable
+        run: chmod +x mvnw
+
       - name: Build with Maven
         run: ./mvnw clean compile -B --no-transfer-progress
 
-      - name: Trivy Vulnerability Scan
-        uses: aquasecurity/trivy-action@master
-        with:
-          scan-type: 'fs'
-          scan-ref: '.'
-          format: 'table'
-          severity: 'HIGH,CRITICAL'
-          exit-code: '0'     # Ne pas faire échouer le build pour l'instant
+      # ✅ Install Trivy (بدل action)
+      - name: Install Trivy
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget
+          wget https://github.com/aquasecurity/trivy/releases/latest/download/trivy_0.49.1_Linux-64bit.deb
+          sudo dpkg -i trivy_0.49.1_Linux-64bit.deb
 
+      # ✅ Scan المشروع ديالك
+      - name: Run Trivy Scan
+        run: trivy fs . --format table --severity HIGH,CRITICAL || true
+
+      # ✅ Generate HTML Report
       - name: Generate Trivy HTML Report
-        uses: aquasecurity/trivy-action@master
-        with:
-          scan-type: 'fs'
-          scan-ref: '.'
-          format: 'template'
-          template: '@/contrib/html.tpl'
-          output: 'trivy-report.html'
-          severity: 'HIGH,CRITICAL,LOW,MEDIUM'
+        run: |
+          trivy fs . --format template --template "@/usr/local/share/trivy/templates/html.tpl" -o trivy-report.html || true
 
       - name: Archive Trivy Report
         uses: actions/upload-artifact@v4
