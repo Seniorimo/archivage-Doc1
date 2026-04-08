@@ -1,52 +1,407 @@
-name: CI/CD Pipeline
+name: CI/CD Pipeline (Spring Boot DevSecOps)
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
   pull_request:
-    branches: [ main ]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      enable_sonar:
+        description: "Enable SonarQube SAST (requires SONAR_TOKEN + SONAR_HOST_URL)"
+        type: boolean
+        required: false
+        default: true
+      enable_zap:
+        description: "Enable OWASP ZAP DAST (optional, slower)"
+        type: boolean
+        required: false
+        default: false
+      enable_opa:
+        description: "Enable OPA/Conftest policy checks (optional)"
+        type: boolean
+        required: false
+        default: false
+      enable_trivy_image:
+        description: "Enable Trivy container image scan (requires Dockerfile)"
+        type: boolean
+        required: false
+        default: false
 
 jobs:
-  build:
+  security-pipeline:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - name: Checkout source
+        uses: actions/checkout@v4.2.2
 
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
+      - name: Set up Java 17 + Maven cache
+        uses: actions/setup-java@v4.7.1
         with:
-          java-version: '17'
-          distribution: 'temurin'
-          cache: 'maven'
+          distribution: temurin
+          java-version: "17"
+          cache: maven
 
-      # 👇 مهم (حل مشكل permission)
-      - name: Make mvnw executable
-        run: chmod +x mvnw
-
-      - name: Build with Maven
-        run: ./mvnw clean compile -B --no-transfer-progress
-
-      # ✅ Install Trivy (بدل action)
-      - name: Install Trivy
+      - name: Prepare report directories
+        shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install -y wget
-          wget https://github.com/aquasecurity/trivy/releases/latest/download/trivy_0.49.1_Linux-64bit.deb
-          sudo dpkg -i trivy_0.49.1_Linux-64bit.deb
+          set -euo pipefail
+          mkdir -p reports/{meta,build,sonar,dependency-check,sbom,gitleaks,zap,opa,trivy}
 
-      # ✅ Scan المشروع ديالك
-      - name: Run Trivy Scan
-        run: trivy fs . --format table --severity HIGH,CRITICAL || true
-
-      # ✅ Generate HTML Report
-      - name: Generate Trivy HTML Report
+      - name: Preflight checks (project structure + tooling)
+        shell: bash
         run: |
-          trivy fs . --format template --template "@/usr/local/share/trivy/templates/html.tpl" -o trivy-report.html || true
+          set -euo pipefail
 
-      - name: Archive Trivy Report
-        uses: actions/upload-artifact@v4
+          if [ ! -f "pom.xml" ]; then
+            echo "Missing pom.xml at repository root." | tee reports/meta/preflight-error.txt
+            exit 1
+          fi
+
+          if [ -f "mvnw" ]; then
+            chmod +x mvnw
+            echo "MVN_CMD=./mvnw" >> "$GITHUB_ENV"
+            echo "Using Maven Wrapper" | tee reports/meta/maven-command.txt
+          else
+            if ! command -v mvn >/dev/null 2>&1; then
+              sudo apt-get update
+              sudo apt-get install -y maven
+            fi
+            echo "MVN_CMD=mvn" >> "$GITHUB_ENV"
+            echo "Using system Maven" | tee reports/meta/maven-command.txt
+          fi
+
+          java -version 2>&1 | tee reports/meta/java-version.txt
+
+      - name: Build package (Spring Boot / Maven)
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o pipefail
+          ${MVN_CMD} -B --no-transfer-progress clean package -DskipTests \
+            | tee reports/build/maven-build.txt
+
+      - name: Validate built artifact (jar existence)
+        shell: bash
+        run: |
+          set -euo pipefail
+          JAR_PATH="$(ls -1 target/*.jar 2>/dev/null | head -n 1 || true)"
+          if [ -z "${JAR_PATH}" ]; then
+            echo "No JAR produced in target/ after build." | tee reports/build/jar-check.txt
+            exit 1
+          fi
+          echo "Detected JAR: ${JAR_PATH}" | tee reports/build/jar-check.txt
+          echo "APP_JAR=${JAR_PATH}" >> "$GITHUB_ENV"
+
+      - name: SAST - SonarQube analysis
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.enable_sonar }}
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o pipefail
+
+          if [ -z "${SONAR_TOKEN:-}" ] || [ -z "${SONAR_HOST_URL:-}" ]; then
+            echo "SonarQube skipped: missing SONAR_TOKEN and/or SONAR_HOST_URL." \
+              | tee reports/sonar/sonar-skip.txt
+            exit 0
+          fi
+
+          ${MVN_CMD} -B --no-transfer-progress -DskipTests sonar:sonar \
+            -Dsonar.host.url="${SONAR_HOST_URL}" \
+            -Dsonar.login="${SONAR_TOKEN}" \
+            | tee reports/sonar/sonar-output.txt
+
+      - name: SCA - Dependency-Check
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o pipefail
+
+          ${MVN_CMD} -B --no-transfer-progress org.owasp:dependency-check-maven:check \
+            -Dformat=ALL \
+            -DoutputDirectory=reports/dependency-check \
+            | tee reports/dependency-check/dependency-check-output.txt
+
+          if [ -f reports/dependency-check/dependency-check-report.html ]; then
+            echo "dependency-check HTML report found." | tee reports/dependency-check/report-check.txt
+          else
+            echo "Missing dependency-check-report.html." | tee reports/dependency-check/report-check.txt
+            exit 1
+          fi
+
+      - name: SBOM - CycloneDX generation
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o pipefail
+
+          ${MVN_CMD} -B --no-transfer-progress org.cyclonedx:cyclonedx-maven-plugin:makeAggregateBom \
+            -Dcyclonedx.outputFormat=all \
+            -Dcyclonedx.outputName=sbom \
+            -Dcyclonedx.schemaVersion=1.5 \
+            | tee reports/sbom/cyclonedx-output.txt
+
+          if [ -f target/sbom.xml ]; then cp -f target/sbom.xml reports/sbom/sbom.xml; fi
+          if [ -f target/sbom.json ]; then cp -f target/sbom.json reports/sbom/sbom.json; fi
+
+          if [ ! -f reports/sbom/sbom.xml ] || [ ! -f reports/sbom/sbom.json ]; then
+            echo "SBOM files missing after CycloneDX execution." | tee reports/sbom/sbom-check.txt
+            exit 1
+          fi
+          echo "SBOM XML+JSON generated successfully." | tee reports/sbom/sbom-check.txt
+
+      - name: Install Gitleaks (fixed version)
+        shell: bash
+        run: |
+          set -euo pipefail
+          GITLEAKS_VERSION="8.21.2"
+          curl -fsSL \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            | tar -xz gitleaks
+          sudo mv gitleaks /usr/local/bin/gitleaks
+          gitleaks version | tee reports/gitleaks/gitleaks-version.txt
+
+      - name: Secrets scan - Gitleaks JSON report
+        shell: bash
+        run: |
+          set -euo pipefail
+          gitleaks detect \
+            --source . \
+            --report-format json \
+            --report-path reports/gitleaks/gitleaks-report.json \
+            --redact \
+            --no-git \
+            --exit-code 0
+
+          if [ ! -f reports/gitleaks/gitleaks-report.json ]; then
+            echo "Missing gitleaks-report.json." | tee reports/gitleaks/report-check.txt
+            exit 1
+          fi
+          echo "Gitleaks JSON report generated." | tee reports/gitleaks/report-check.txt
+
+      - name: Start Spring Boot app for ZAP
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.enable_zap }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          nohup java -jar "${APP_JAR}" --server.port=8080 > reports/zap/app.log 2>&1 &
+          echo $! > reports/zap/app.pid
+
+      - name: Wait for app readiness
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.enable_zap }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          ready="false"
+          for _ in {1..60}; do
+            if curl -fsS "http://127.0.0.1:8080/actuator/health" >/dev/null 2>&1 || \
+               curl -fsS "http://127.0.0.1:8080/" >/dev/null 2>&1; then
+              ready="true"
+              break
+            fi
+            sleep 2
+          done
+          echo "ZAP readiness=${ready}" | tee reports/zap/readiness.txt
+          if [ "${ready}" != "true" ]; then
+            exit 1
+          fi
+
+      - name: DAST - OWASP ZAP baseline
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.enable_zap }}
+        continue-on-error: true
+        uses: zaproxy/action-baseline@v0.14.0
         with:
-          name: trivy-report
-          path: trivy-report.html
+          target: "http://127.0.0.1:8080"
+          allow_issue_writing: false
+          cmd_options: "-a -j -m 5 -T 10"
+          artifact_name: "zap-baseline"
+
+      - name: Collect ZAP reports
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.enable_zap }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ -f report_html.html ] && mv -f report_html.html reports/zap/zap-report.html || true
+          [ -f report_md.md ] && mv -f report_md.md reports/zap/zap-report.md || true
+          [ -f report_json.json ] && mv -f report_json.json reports/zap/zap-report.json || true
+
+      - name: Stop Spring Boot app after ZAP
+        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.enable_zap }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f reports/zap/app.pid ]; then
+            kill "$(cat reports/zap/app.pid)" 2>/dev/null || true
+          fi
+
+      - name: Install Conftest (fixed version)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.enable_opa }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          CONFTEST_VERSION="0.56.0"
+          curl -fsSL \
+            "https://github.com/open-policy-agent/conftest/releases/download/v${CONFTEST_VERSION}/conftest_${CONFTEST_VERSION}_Linux_x86_64.tar.gz" \
+            | tar -xz conftest
+          sudo mv conftest /usr/local/bin/conftest
+          conftest --version | tee reports/opa/conftest-version.txt
+
+      - name: OPA policy checks on SBOM and DC reports
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.enable_opa }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p policy
+
+          cat > policy/sbom.rego << 'EOF'
+          package security.sbom
+
+          deny[msg] {
+            not input.metadata
+            msg := "SBOM metadata missing"
+          }
+
+          deny[msg] {
+            count(input.components) == 0
+            msg := "SBOM has no components"
+          }
+          EOF
+
+          cat > policy/dependency_check.rego << 'EOF'
+          package security.dependencycheck
+
+          deny[msg] {
+            vuln := input.dependencies[_].vulnerabilities[_]
+            vuln.cvssv3.baseScore >= 9.0
+            msg := sprintf("Critical dependency vuln found: %s (CVSS %.1f)", [vuln.name, vuln.cvssv3.baseScore])
+          }
+          EOF
+
+          {
+            echo "OPA checks on SBOM and Dependency-Check reports"
+            if [ -f reports/sbom/sbom.json ]; then
+              conftest test reports/sbom/sbom.json -p policy --output table
+            else
+              echo "Missing reports/sbom/sbom.json"
+            fi
+            if [ -f reports/dependency-check/dependency-check-report.json ]; then
+              conftest test reports/dependency-check/dependency-check-report.json -p policy --output table
+            else
+              echo "Missing reports/dependency-check/dependency-check-report.json"
+            fi
+          } | tee reports/opa/opa-output.txt
+
+      - name: Trivy filesystem scan (table)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: table
+          output: reports/trivy/trivy-fs.txt
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+
+      - name: Trivy filesystem scan (json)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: json
+          output: reports/trivy/trivy-fs.json
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+
+      - name: Build image for Trivy (optional)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.enable_trivy_image }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f Dockerfile ]; then
+            echo "Dockerfile missing; skipping image build." | tee reports/trivy/image-build-skip.txt
+            exit 0
+          fi
+          docker build -t springboot-app:ci .
+          echo "springboot-app:ci built." | tee reports/trivy/image-build.txt
+
+      - name: Trivy image scan (optional)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.enable_trivy_image }}
+        continue-on-error: true
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: springboot-app:ci
+          format: table
+          output: reports/trivy/trivy-image.txt
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+
+      - name: Validate reports and write final summary
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "## DevSecOps CI summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          required_files=(
+            "reports/build/maven-build.txt"
+            "reports/build/jar-check.txt"
+            "reports/dependency-check/dependency-check-output.txt"
+            "reports/dependency-check/dependency-check-report.html"
+            "reports/sbom/sbom.xml"
+            "reports/sbom/sbom.json"
+            "reports/gitleaks/gitleaks-report.json"
+            "reports/trivy/trivy-fs.txt"
+            "reports/trivy/trivy-fs.json"
+          )
+
+          missing=0
+          echo "### Required report files" >> "$GITHUB_STEP_SUMMARY"
+          for file in "${required_files[@]}"; do
+            if [ -f "${file}" ]; then
+              echo "- ✅ \`${file}\`" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "- ❌ missing \`${file}\`" >> "$GITHUB_STEP_SUMMARY"
+              missing=$((missing + 1))
+            fi
+          done
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Optional extensions" >> "$GITHUB_STEP_SUMMARY"
+          echo "- ZAP reports: \`reports/zap/\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- OPA report: \`reports/opa/opa-output.txt\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Trivy image report: \`reports/trivy/trivy-image.txt\`" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "${missing}" -gt 0 ]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "**Result:** core pipeline is not valid (${missing} required file(s) missing)." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Result:** core pipeline validation passed." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload security artifacts
+        if: always()
+        uses: actions/upload-artifact@v4.3.4
+        with:
+          name: devsecops-reports
+          if-no-files-found: warn
+          path: |
+            reports/**
+            target/surefire-reports/**
+            target/failsafe-reports/**
