@@ -305,7 +305,7 @@ jobs:
           } | tee reports/opa/opa-output.txt
 
       - name: Trivy filesystem scan (table)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@d43c1f16c00cfd3978dde6c07f4bbcf9eb6993ca
         with:
           scan-type: fs
           scan-ref: .
@@ -315,7 +315,7 @@ jobs:
           ignore-unfixed: true
 
       - name: Trivy filesystem scan (json)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@d43c1f16c00cfd3978dde6c07f4bbcf9eb6993ca
         with:
           scan-type: fs
           scan-ref: .
@@ -340,7 +340,7 @@ jobs:
       - name: Trivy image scan (optional)
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.enable_trivy_image }}
         continue-on-error: true
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@d43c1f16c00cfd3978dde6c07f4bbcf9eb6993ca
         with:
           image-ref: springboot-app:ci
           format: table
