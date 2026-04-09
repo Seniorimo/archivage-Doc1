@@ -105,11 +105,31 @@ pipeline {
                         -Dspring-boot.run.arguments='--server.port=$APP_PORT --spring.datasource.url=jdbc:mysql://$MYSQL_CONTAINER:3306/$MYSQL_DATABASE --spring.datasource.username=$MYSQL_USER --spring.datasource.password=$MYSQL_PASS'"
 
                     echo "Waiting for Spring Boot..."
-                    sleep 35
+                    sleep 10
 
-                    STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:$APP_PORT/ || true)
-                    echo "HTTP status: $STATUS"
-                    echo "$STATUS" | grep -qE "200|302"
+                    READY=0
+                    for i in $(seq 1 12); do
+                      STATUS=$(docker run --rm \
+                        --network $DOCKER_NETWORK \
+                        curlimages/curl:8.7.1 \
+                        -s -o /dev/null -w "%{http_code}" \
+                        http://$APP_CONTAINER:$APP_PORT/ || true)
+
+                      echo "Attempt $i/12 -> HTTP status: $STATUS"
+
+                      if echo "$STATUS" | grep -qE "200|302"; then
+                        READY=1
+                        break
+                      fi
+
+                      sleep 10
+                    done
+
+                    if [ "$READY" -ne 1 ]; then
+                      echo "Application did not become ready. Container logs:"
+                      docker logs $APP_CONTAINER --tail 200 || true
+                      exit 1
+                    fi
                 '''
             }
         }
