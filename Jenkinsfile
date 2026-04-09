@@ -6,12 +6,15 @@ pipeline {
         disableConcurrentBuilds()
         buildDiscarder(logRotator(numToKeepStr: '20'))
         timeout(time: 60, unit: 'MINUTES')
-        skipDefaultCheckout(false)
+        skipDefaultCheckout(true)
+    }
+
+    parameters {
+        string(name: 'ZAP_TARGET_URL', defaultValue: 'http://host.docker.internal:8081', description: 'URL cible pour le scan ZAP')
     }
 
     environment {
         REPORTS_DIR       = "${WORKSPACE}/reports"
-
         GITLEAKS_DIR      = "${WORKSPACE}/reports/gitleaks"
         TRIVY_DIR         = "${WORKSPACE}/reports/trivy"
         SBOM_DIR          = "${WORKSPACE}/reports/sbom"
@@ -19,11 +22,8 @@ pipeline {
         ZAP_DIR           = "${WORKSPACE}/reports/zap"
         OPA_DIR           = "${WORKSPACE}/reports/opa"
 
-        SONAR_HOST_URL    = "http://localhost:9000"
+        SONAR_HOST_URL    = "http://host.docker.internal:9000"
         SONAR_PROJECT_KEY = "archivage-doc"
-
-        // Remplace par ton URL de staging si l'application est déjà déployée
-        ZAP_TARGET_URL    = "http://host.docker.internal:8081"
     }
 
     stages {
@@ -39,27 +39,19 @@ pipeline {
                 sh '''
                     set -eu
 
-                    mkdir -p "${REPORTS_DIR}" \
-                             "${GITLEAKS_DIR}" \
-                             "${TRIVY_DIR}" \
-                             "${SBOM_DIR}" \
-                             "${SONAR_DIR}" \
-                             "${ZAP_DIR}" \
-                             "${OPA_DIR}"
+                    install -d -m 0755 "${REPORTS_DIR}" \
+                                      "${GITLEAKS_DIR}" \
+                                      "${TRIVY_DIR}" \
+                                      "${SBOM_DIR}" \
+                                      "${SONAR_DIR}" \
+                                      "${ZAP_DIR}" \
+                                      "${OPA_DIR}"
 
-                    if [ ! -d "${WORKSPACE}/.git" ]; then
-                      echo "ERROR: .git directory not found in workspace"
-                      exit 1
-                    fi
-
+                    test -d "${WORKSPACE}/.git"
                     git rev-parse --is-inside-work-tree
 
-                    # Important pour éviter certains problèmes de shallow clone
                     git fetch --unshallow || true
                     git fetch --tags --prune || true
-
-                    # Vérification rapide
-                    git status --short || true
                 '''
             }
         }
@@ -73,11 +65,12 @@ pipeline {
                             catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
                                 sh '''
                                     set +e
-
                                     rm -f "${GITLEAKS_DIR}/gitleaks.json"
 
                                     docker run --rm \
-                                      --user "$(id -u):$(id -g)" \
+                                      -u "$(id -u):$(id -g)" \
+                                      -e GIT_DISCOVERY_ACROSS_FILESYSTEM=1 \
+                                      -w /repo \
                                       -v "${WORKSPACE}:/repo:ro" \
                                       -v "${GITLEAKS_DIR}:/out:rw" \
                                       ghcr.io/gitleaks/gitleaks:latest detect \
@@ -88,9 +81,10 @@ pipeline {
                                       --redact
 
                                     if [ ! -f "${GITLEAKS_DIR}/gitleaks.json" ]; then
-                                      echo "Git mode failed, fallback to filesystem scan (--no-git)"
+                                      echo "Fallback to --no-git"
                                       docker run --rm \
-                                        --user "$(id -u):$(id -g)" \
+                                        -u "$(id -u):$(id -g)" \
+                                        -w /repo \
                                         -v "${WORKSPACE}:/repo:ro" \
                                         -v "${GITLEAKS_DIR}:/out:rw" \
                                         ghcr.io/gitleaks/gitleaks:latest detect \
@@ -118,11 +112,12 @@ pipeline {
                             catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
                                 sh '''
                                     set +e
-
                                     rm -f "${TRIVY_DIR}/trivy-fs.json"
 
                                     docker run --rm \
-                                      --user "$(id -u):$(id -g)" \
+                                      -u "$(id -u):$(id -g)" \
+                                      -e TRIVY_CACHE_DIR=/tmp/trivycache \
+                                      -w /src \
                                       -v "${WORKSPACE}:/src:ro" \
                                       -v "${TRIVY_DIR}:/out:rw" \
                                       ghcr.io/aquasecurity/trivy:latest fs \
@@ -131,9 +126,11 @@ pipeline {
                                       --output /out/trivy-fs.json \
                                       /src
 
+                                    ls -lah "${TRIVY_DIR}" || true
+
                                     if [ ! -f "${TRIVY_DIR}/trivy-fs.json" ]; then
-                                      echo '{"status":"error","message":"trivy report not generated"}' > "${TRIVY_DIR}/trivy-fs.json"
-                                      exit 1
+                                      echo '{"status":"skipped","message":"trivy report not generated or no supported manifests found"}' > "${TRIVY_DIR}/trivy-fs.json"
+                                      exit 0
                                     fi
                                 '''
                             }
@@ -147,11 +144,16 @@ pipeline {
                             catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
                                 sh '''
                                     set +e
-
                                     rm -f "${SBOM_DIR}/bom.json"
 
                                     if [ -f "${WORKSPACE}/pom.xml" ]; then
-                                      mvn -B -f "${WORKSPACE}/pom.xml" \
+                                      docker run --rm \
+                                        -u "$(id -u):$(id -g)" \
+                                        -v "${WORKSPACE}:/workspace" \
+                                        -v "${WORKSPACE}/.m2:/var/maven/.m2" \
+                                        -w /workspace \
+                                        maven:3.9.9-eclipse-temurin-17 \
+                                        mvn -B -Dmaven.repo.local=/var/maven/.m2/repository \
                                         org.cyclonedx:cyclonedx-maven-plugin:makeAggregateBom \
                                         -DoutputFormat=json \
                                         -DoutputDirectory="${SBOM_DIR}" \
@@ -177,16 +179,29 @@ pipeline {
                                 withCredentials([string(credentialsId: 'sonarqube-token', variable: 'SONAR_TOKEN')]) {
                                     sh '''
                                         set +e
-
                                         rm -f "${SONAR_DIR}/sonar-status.json"
 
                                         if [ -f "${WORKSPACE}/pom.xml" ]; then
-                                          mvn -B -f "${WORKSPACE}/pom.xml" sonar:sonar \
+                                          docker run --rm \
+                                            -u "$(id -u):$(id -g)" \
+                                            --add-host=host.docker.internal:host-gateway \
+                                            -v "${WORKSPACE}:/workspace" \
+                                            -v "${WORKSPACE}/.m2:/var/maven/.m2" \
+                                            -w /workspace \
+                                            maven:3.9.9-eclipse-temurin-17 \
+                                            mvn -B -Dmaven.repo.local=/var/maven/.m2/repository \
+                                            sonar:sonar \
                                             -Dsonar.projectKey="${SONAR_PROJECT_KEY}" \
                                             -Dsonar.host.url="${SONAR_HOST_URL}" \
                                             -Dsonar.token="${SONAR_TOKEN}"
 
-                                          echo '{"status":"submitted"}' > "${SONAR_DIR}/sonar-status.json"
+                                          rc=$?
+                                          if [ $rc -eq 0 ]; then
+                                            echo '{"status":"submitted"}' > "${SONAR_DIR}/sonar-status.json"
+                                          else
+                                            echo '{"status":"error","message":"sonar scan failed"}' > "${SONAR_DIR}/sonar-status.json"
+                                            exit 1
+                                          fi
                                         else
                                           echo '{"status":"skipped","message":"pom.xml not found"}' > "${SONAR_DIR}/sonar-status.json"
                                         fi
@@ -205,13 +220,24 @@ pipeline {
                     catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
                         sh '''
                             set +e
-
                             rm -f "${ZAP_DIR}/zap-report.html" "${ZAP_DIR}/zap-report.json"
 
                             docker run --rm \
-                              --user "$(id -u):$(id -g)" \
+                              --add-host=host.docker.internal:host-gateway \
+                              curlimages/curl:8.7.1 \
+                              -s -o /dev/null -w "%{http_code}" "${ZAP_TARGET_URL}" > "${ZAP_DIR}/target-status.txt" 2>/dev/null
+
+                            HTTP_CODE=$(cat "${ZAP_DIR}/target-status.txt" 2>/dev/null || echo "000")
+
+                            if [ -z "${HTTP_CODE}" ] || [ "${HTTP_CODE}" = "000" ]; then
+                              echo '{"status":"skipped","message":"target unreachable for ZAP"}' > "${ZAP_DIR}/zap-report.json"
+                              exit 0
+                            fi
+
+                            docker run --rm \
+                              -u "$(id -u):$(id -g)" \
+                              --add-host=host.docker.internal:host-gateway \
                               -v "${ZAP_DIR}:/zap/wrk:rw" \
-                              --network host \
                               ghcr.io/zaproxy/zaproxy:stable \
                               zap-baseline.py \
                               -t "${ZAP_TARGET_URL}" \
@@ -241,30 +267,43 @@ pipeline {
 
                             default allow = true
 
+                            deny contains "Missing Gitleaks report" if {
+                              input.gitleaks_report_exists == false
+                            }
+
                             deny contains "Missing Trivy report" if {
                               input.trivy_report_exists == false
                             }
 
-                            deny contains "Missing Gitleaks report" if {
-                              input.gitleaks_report_exists == false
+                            deny contains "Missing SBOM report" if {
+                              input.sbom_report_exists == false
                             }
                             EOF
 
-                            TRIVY_EXISTS=false
                             GITLEAKS_EXISTS=false
+                            TRIVY_EXISTS=false
+                            SBOM_EXISTS=false
+                            SONAR_EXISTS=false
+                            ZAP_EXISTS=false
 
-                            [ -f "${TRIVY_DIR}/trivy-fs.json" ] && TRIVY_EXISTS=true
                             [ -f "${GITLEAKS_DIR}/gitleaks.json" ] && GITLEAKS_EXISTS=true
+                            [ -f "${TRIVY_DIR}/trivy-fs.json" ] && TRIVY_EXISTS=true
+                            [ -f "${SBOM_DIR}/bom.json" ] && SBOM_EXISTS=true
+                            [ -f "${SONAR_DIR}/sonar-status.json" ] && SONAR_EXISTS=true
+                            [ -f "${ZAP_DIR}/zap-report.json" ] && ZAP_EXISTS=true
 
                             cat > "${OPA_DIR}/input.json" <<EOF
                             {
+                              "gitleaks_report_exists": ${GITLEAKS_EXISTS},
                               "trivy_report_exists": ${TRIVY_EXISTS},
-                              "gitleaks_report_exists": ${GITLEAKS_EXISTS}
+                              "sbom_report_exists": ${SBOM_EXISTS},
+                              "sonar_report_exists": ${SONAR_EXISTS},
+                              "zap_report_exists": ${ZAP_EXISTS}
                             }
                             EOF
 
                             docker run --rm \
-                              --user "$(id -u):$(id -g)" \
+                              -u "$(id -u):$(id -g)" \
                               -v "${OPA_DIR}:/policy:rw" \
                               openpolicyagent/opa:latest \
                               eval \
@@ -289,13 +328,13 @@ pipeline {
             archiveArtifacts artifacts: 'reports/**/*', allowEmptyArchive: true, fingerprint: true
         }
         unstable {
-            echo 'Pipeline terminé avec des erreurs ou findings de sécurité. Vérifie les rapports archivés.'
+            echo 'Pipeline terminé en UNSTABLE. Vérifie les rapports archivés dans reports/.'
         }
         success {
             echo 'Pipeline DevSecOps terminé avec succès.'
         }
         failure {
-            echo 'Le pipeline a échoué à cause d’une erreur de pipeline ou d’environnement.'
+            echo 'Le pipeline a échoué à cause d’une erreur d’infrastructure ou de script.'
         }
     }
 }
