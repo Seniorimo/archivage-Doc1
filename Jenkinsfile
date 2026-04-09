@@ -1,6 +1,11 @@
 pipeline {
     agent any
 
+    options {
+        skipDefaultCheckout(true)
+        timestamps()
+    }
+
     environment {
         APP_PORT        = '8081'
         MYSQL_ROOT_PASS = 'root'
@@ -49,7 +54,7 @@ pipeline {
                               -Dmaven.repo.local=/var/jenkins_home/.m2/repository \
                               clean compile \
                               org.sonarsource.scanner.maven:sonar-maven-plugin:4.0.0.4121:sonar \
-                              -Dsonar.projectKey=archivage-doc \
+                              -Dsonar.projectKey=archivage-Doc \
                               -Dsonar.host.url=http://host.docker.internal:9000 \
                               -Dsonar.login=$SONAR_TOKEN \
                               -Dsonar.java.binaries=target/classes
@@ -128,21 +133,18 @@ pipeline {
                 '''
             }
         }
+    }
 
-        stage('Cleanup') {
-            steps {
+    post {
+        always {
+            node {
+                archiveArtifacts artifacts: 'reports/zap/**', allowEmptyArchive: true
                 sh '''
                     docker rm -f $APP_CONTAINER 2>/dev/null || true
                     docker rm -f $MYSQL_CONTAINER 2>/dev/null || true
                     docker network rm $DOCKER_NETWORK 2>/dev/null || true
                 '''
             }
-        }
-    }
-
-    post {
-        always {
-            archiveArtifacts artifacts: 'reports/zap/**', allowEmptyArchive: true
         }
         success {
             echo '✅ Pipeline DevSecOps terminé avec succès'
