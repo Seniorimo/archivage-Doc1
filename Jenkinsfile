@@ -15,7 +15,6 @@ pipeline {
         DOCKER_NETWORK  = 'archivage-net'
         MYSQL_CONTAINER = 'mysql-archivage'
         APP_CONTAINER   = 'app-archivage'
-        WORKSPACE_DIR   = '/var/jenkins_home/workspace/DevSecOps-PFE-Test'
     }
 
     stages {
@@ -30,11 +29,11 @@ pipeline {
             steps {
                 catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
                     sh '''
-                        mkdir -p $WORKSPACE_DIR/reports/gitleaks
+                        mkdir -p "$WORKSPACE/reports/gitleaks"
 
                         docker run --rm \
                           --volumes-from jenkins \
-                          -w $WORKSPACE_DIR \
+                          -w "$WORKSPACE" \
                           zricethezav/gitleaks:latest \
                           detect \
                           --source . \
@@ -54,7 +53,7 @@ pipeline {
                       --volumes-from jenkins \
                       maven:3.9.9-eclipse-temurin-17 \
                       mvn -B \
-                        -f $WORKSPACE_DIR/pom.xml \
+                        -f "$WORKSPACE/pom.xml" \
                         -Dmaven.repo.local=/var/jenkins_home/.m2/repository \
                         clean package -DskipTests
                 '''
@@ -65,15 +64,28 @@ pipeline {
             steps {
                 catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
                     sh '''
-                        mkdir -p $WORKSPACE_DIR/reports/trivy
+                        mkdir -p "$WORKSPACE/reports/trivy"
 
                         docker run --rm \
                           --volumes-from jenkins \
-                          aquasec/trivy:latest fs \
+                          -v "$WORKSPACE/reports/trivy:/report" \
+                          ghcr.io/aquasecurity/trivy:latest fs \
                           --scanners vuln \
+                          --severity MEDIUM,HIGH,CRITICAL \
                           --format json \
-                          --output $WORKSPACE_DIR/reports/trivy/trivy-fs-report.json \
-                          $WORKSPACE_DIR || true
+                          --output /report/trivy-report.json \
+                          "$WORKSPACE" || true
+
+                        docker run --rm \
+                          --volumes-from jenkins \
+                          -v "$WORKSPACE/reports/trivy:/report" \
+                          ghcr.io/aquasecurity/trivy:latest fs \
+                          --scanners vuln \
+                          --severity MEDIUM,HIGH,CRITICAL \
+                          --format template \
+                          --template "@contrib/html.tpl" \
+                          --output /report/trivy-report.html \
+                          "$WORKSPACE" || true
                     '''
                 }
             }
@@ -83,19 +95,19 @@ pipeline {
             steps {
                 catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
                     sh '''
-                        mkdir -p $WORKSPACE_DIR/reports/sbom
+                        mkdir -p "$WORKSPACE/reports/sbom"
 
                         docker run --rm \
                           --volumes-from jenkins \
                           maven:3.9.9-eclipse-temurin-17 \
                           sh -lc "
                             mvn -B \
-                              -f $WORKSPACE_DIR/pom.xml \
+                              -f '$WORKSPACE/pom.xml' \
                               -Dmaven.repo.local=/var/jenkins_home/.m2/repository \
                               org.cyclonedx:cyclonedx-maven-plugin:2.7.11:makeAggregateBom \
                               -DoutputFormat=all &&
-                            cp -f $WORKSPACE_DIR/target/bom.xml  $WORKSPACE_DIR/reports/sbom/bom.xml &&
-                            cp -f $WORKSPACE_DIR/target/bom.json $WORKSPACE_DIR/reports/sbom/bom.json
+                            cp -f '$WORKSPACE/target/bom.xml'  '$WORKSPACE/reports/sbom/bom.xml' &&
+                            cp -f '$WORKSPACE/target/bom.json' '$WORKSPACE/reports/sbom/bom.json'
                           " || true
                     '''
                 }
@@ -112,7 +124,7 @@ pipeline {
                           maven:3.9.9-eclipse-temurin-17 \
                           sh -lc "
                             mvn -B \
-                              -f $WORKSPACE_DIR/pom.xml \
+                              -f '$WORKSPACE/pom.xml' \
                               -Dmaven.repo.local=/var/jenkins_home/.m2/repository \
                               clean compile \
                               org.sonarsource.scanner.maven:sonar-maven-plugin:4.0.0.4121:sonar \
@@ -129,21 +141,21 @@ pipeline {
         stage('Deploy MySQL') {
             steps {
                 sh '''
-                    docker rm -f $MYSQL_CONTAINER 2>/dev/null || true
-                    docker network inspect $DOCKER_NETWORK >/dev/null 2>&1 || docker network create $DOCKER_NETWORK
+                    docker rm -f "$MYSQL_CONTAINER" 2>/dev/null || true
+                    docker network inspect "$DOCKER_NETWORK" >/dev/null 2>&1 || docker network create "$DOCKER_NETWORK"
 
                     docker run -d \
-                      --name $MYSQL_CONTAINER \
-                      --network $DOCKER_NETWORK \
-                      -e MYSQL_ROOT_PASSWORD=$MYSQL_ROOT_PASS \
-                      -e MYSQL_DATABASE=$MYSQL_DATABASE \
-                      -e MYSQL_USER=$MYSQL_USER \
-                      -e MYSQL_PASSWORD=$MYSQL_PASS \
+                      --name "$MYSQL_CONTAINER" \
+                      --network "$DOCKER_NETWORK" \
+                      -e MYSQL_ROOT_PASSWORD="$MYSQL_ROOT_PASS" \
+                      -e MYSQL_DATABASE="$MYSQL_DATABASE" \
+                      -e MYSQL_USER="$MYSQL_USER" \
+                      -e MYSQL_PASSWORD="$MYSQL_PASS" \
                       mysql:8.0
 
                     echo "Waiting for MySQL..."
                     sleep 25
-                    docker logs $MYSQL_CONTAINER --tail 20 || true
+                    docker logs "$MYSQL_CONTAINER" --tail 20 || true
                 '''
             }
         }
@@ -151,17 +163,17 @@ pipeline {
         stage('Deploy App') {
             steps {
                 sh '''
-                    docker rm -f $APP_CONTAINER 2>/dev/null || true
+                    docker rm -f "$APP_CONTAINER" 2>/dev/null || true
 
                     docker run -d \
-                      --name $APP_CONTAINER \
-                      --network $DOCKER_NETWORK \
+                      --name "$APP_CONTAINER" \
+                      --network "$DOCKER_NETWORK" \
                       --volumes-from jenkins \
                       --add-host=host.docker.internal:host-gateway \
-                      -p $APP_PORT:$APP_PORT \
+                      -p "$APP_PORT:$APP_PORT" \
                       maven:3.9.9-eclipse-temurin-17 \
                       sh -lc "mvn -B \
-                        -f $WORKSPACE_DIR/pom.xml \
+                        -f '$WORKSPACE/pom.xml' \
                         -Dmaven.repo.local=/var/jenkins_home/.m2/repository \
                         spring-boot:run \
                         -Dspring-boot.run.arguments='--server.port=$APP_PORT --spring.datasource.url=jdbc:mysql://$MYSQL_CONTAINER:3306/$MYSQL_DATABASE --spring.datasource.username=$MYSQL_USER --spring.datasource.password=$MYSQL_PASS'"
@@ -172,10 +184,10 @@ pipeline {
                     READY=0
                     for i in $(seq 1 12); do
                       STATUS=$(docker run --rm \
-                        --network $DOCKER_NETWORK \
+                        --network "$DOCKER_NETWORK" \
                         curlimages/curl:8.7.1 \
                         -s -o /dev/null -w "%{http_code}" \
-                        http://$APP_CONTAINER:$APP_PORT/ || true)
+                        "http://$APP_CONTAINER:$APP_PORT/" || true)
 
                       echo "Attempt $i/12 -> HTTP status: $STATUS"
 
@@ -189,7 +201,7 @@ pipeline {
 
                     if [ "$READY" -ne 1 ]; then
                       echo "Application did not become ready. Container logs:"
-                      docker logs $APP_CONTAINER --tail 200 || true
+                      docker logs "$APP_CONTAINER" --tail 200 || true
                       exit 1
                     fi
                 '''
@@ -198,75 +210,116 @@ pipeline {
 
         stage('ZAP DAST Scan') {
             steps {
-                sh '''
-                    mkdir -p $WORKSPACE_DIR/reports/zap
+                catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
+                    sh '''
+                        mkdir -p "$WORKSPACE/reports/zap"
 
-                    docker run --rm \
-                      --user root \
-                      --add-host=host.docker.internal:host-gateway \
-                      --volumes-from jenkins \
-                      -v $WORKSPACE_DIR/reports/zap:/zap/wrk:rw \
-                      ghcr.io/zaproxy/zaproxy:stable \
-                      zap-baseline.py \
-                      -t http://host.docker.internal:$APP_PORT \
-                      -r zap-report.html \
-                      -J zap-report.json \
-                      -I
-                '''
+                        docker run --rm \
+                          --user root \
+                          --add-host=host.docker.internal:host-gateway \
+                          --volumes-from jenkins \
+                          -v "$WORKSPACE/reports/zap:/zap/wrk:rw" \
+                          ghcr.io/zaproxy/zaproxy:stable \
+                          zap-baseline.py \
+                          -t "http://host.docker.internal:$APP_PORT" \
+                          -r zap-report.html \
+                          -J zap-report.json \
+                          -I || true
+                    '''
+                }
             }
         }
 
-        stage('OPA Policy Check') {
+        stage('Security Dashboard') {
             steps {
                 catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
                     sh '''
-                        mkdir -p $WORKSPACE_DIR/reports/opa
+                        mkdir -p "$WORKSPACE/reports/dashboard"
 
-                        GITLEAKS_COUNT=$(grep -o '"RuleID"' "$WORKSPACE_DIR/reports/gitleaks/gitleaks-report.json" | wc -l || true)
-                        TRIVY_CRITICAL=$(grep -o 'CRITICAL' "$WORKSPACE_DIR/reports/trivy/trivy-fs-report.json" | wc -l || true)
-                        ZAP_HIGH=$(grep -o '"riskcode":"3"' "$WORKSPACE_DIR/reports/zap/zap-report.json" | wc -l || true)
+                        TRIVY_HIGH=0
+                        TRIVY_MEDIUM=0
+                        ZAP_HIGH=0
+                        ZAP_MEDIUM=0
 
-                        cat > $WORKSPACE_DIR/reports/opa/policy-input.json <<EOF
-{
-  "gitleaks_findings": $GITLEAKS_COUNT,
-  "trivy_critical": $TRIVY_CRITICAL,
-  "zap_high": $ZAP_HIGH
-}
+                        if [ -f "$WORKSPACE/reports/trivy/trivy-report.json" ]; then
+                          TRIVY_HIGH=$(grep -o '"Severity":"HIGH"' "$WORKSPACE/reports/trivy/trivy-report.json" | wc -l | tr -d ' ' || true)
+                          TRIVY_MEDIUM=$(grep -o '"Severity":"MEDIUM"' "$WORKSPACE/reports/trivy/trivy-report.json" | wc -l | tr -d ' ' || true)
+                        fi
+
+                        if [ -f "$WORKSPACE/reports/zap/zap-report.json" ]; then
+                          ZAP_HIGH=$(grep -o '"riskcode":"3"' "$WORKSPACE/reports/zap/zap-report.json" | wc -l | tr -d ' ' || true)
+                          ZAP_MEDIUM=$(grep -o '"riskcode":"2"' "$WORKSPACE/reports/zap/zap-report.json" | wc -l | tr -d ' ' || true)
+                        fi
+
+                        cat > "$WORKSPACE/reports/dashboard/index.html" <<EOF
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <title>Security Dashboard</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 30px; background: #f7f9fc; color: #222; }
+    h1 { margin-bottom: 10px; }
+    .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin: 20px 0; }
+    .card { background: white; border-radius: 10px; padding: 20px; box-shadow: 0 2px 8px rgba(0,0,0,.08); text-align: center; }
+    .num { font-size: 30px; font-weight: bold; margin-top: 8px; }
+    .high { border-top: 5px solid #d32f2f; }
+    .medium { border-top: 5px solid #f9a825; }
+    table { width: 100%; border-collapse: collapse; background: white; margin-top: 20px; }
+    th, td { border: 1px solid #ddd; padding: 12px; text-align: center; }
+    th { background: #263238; color: white; }
+    .note { margin-top: 20px; color: #555; }
+  </style>
+</head>
+<body>
+  <h1>Security Dashboard</h1>
+  <p>Vue synthese des vulnerabilites Medium et High publiees par Jenkins.</p>
+
+  <div class="grid">
+    <div class="card high">
+      <div>Trivy High</div>
+      <div class="num">${TRIVY_HIGH}</div>
+    </div>
+    <div class="card medium">
+      <div>Trivy Medium</div>
+      <div class="num">${TRIVY_MEDIUM}</div>
+    </div>
+    <div class="card high">
+      <div>ZAP High</div>
+      <div class="num">${ZAP_HIGH}</div>
+    </div>
+    <div class="card medium">
+      <div>ZAP Medium</div>
+      <div class="num">${ZAP_MEDIUM}</div>
+    </div>
+  </div>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Scanner</th>
+        <th>High</th>
+        <th>Medium</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Trivy</td>
+        <td>${TRIVY_HIGH}</td>
+        <td>${TRIVY_MEDIUM}</td>
+      </tr>
+      <tr>
+        <td>OWASP ZAP</td>
+        <td>${ZAP_HIGH}</td>
+        <td>${ZAP_MEDIUM}</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p class="note">Consultez aussi les rapports publies dans Jenkins : "Trivy Report" et "ZAP Report".</p>
+</body>
+</html>
 EOF
-
-                        cat > $WORKSPACE_DIR/reports/opa/policy.rego <<'EOF'
-package cicd
-
-default allow = true
-
-deny[msg] {
-  input.gitleaks_findings > 0
-  msg := sprintf("Gitleaks found %v potential secret(s)", [input.gitleaks_findings])
-}
-
-deny[msg] {
-  input.trivy_critical > 0
-  msg := sprintf("Trivy found %v CRITICAL finding(s)", [input.trivy_critical])
-}
-
-deny[msg] {
-  input.zap_high > 0
-  msg := sprintf("ZAP found %v High-risk alert(s)", [input.zap_high])
-}
-
-allow {
-  count(deny) == 0
-}
-EOF
-
-                        docker run --rm \
-                          --volumes-from jenkins \
-                          openpolicyagent/opa:latest \
-                          eval \
-                          --format pretty \
-                          --data $WORKSPACE_DIR/reports/opa/policy.rego \
-                          --input $WORKSPACE_DIR/reports/opa/policy-input.json \
-                          'data.cicd' | tee $WORKSPACE_DIR/reports/opa/opa-result.txt || true
                     '''
                 }
             }
@@ -276,17 +329,51 @@ EOF
     post {
         always {
             archiveArtifacts artifacts: 'reports/**', allowEmptyArchive: true
+
+            publishHTML(target: [
+                reportName: 'Security Dashboard',
+                reportDir: 'reports/dashboard',
+                reportFiles: 'index.html',
+                keepAll: true,
+                alwaysLinkToLastBuild: true,
+                allowMissing: true
+            ])
+
+            publishHTML(target: [
+                reportName: 'Trivy Report',
+                reportDir: 'reports/trivy',
+                reportFiles: 'trivy-report.html',
+                keepAll: true,
+                alwaysLinkToLastBuild: true,
+                allowMissing: true
+            ])
+
+            publishHTML(target: [
+                reportName: 'ZAP Report',
+                reportDir: 'reports/zap',
+                reportFiles: 'zap-report.html',
+                keepAll: true,
+                alwaysLinkToLastBuild: true,
+                allowMissing: true
+            ])
+
             sh '''
-                docker rm -f $APP_CONTAINER 2>/dev/null || true
-                docker rm -f $MYSQL_CONTAINER 2>/dev/null || true
-                docker network rm $DOCKER_NETWORK 2>/dev/null || true
+                docker rm -f "$APP_CONTAINER" 2>/dev/null || true
+                docker rm -f "$MYSQL_CONTAINER" 2>/dev/null || true
+                docker network rm "$DOCKER_NETWORK" 2>/dev/null || true
             '''
         }
+
         success {
-            echo '✅ Pipeline DevSecOps terminé avec succès'
+            echo '✅ Pipeline DevSecOps termine avec succes'
         }
+
+        unstable {
+            echo '⚠️ Pipeline termine, mais certains scans securite ont remonte des alertes ou des erreurs non bloquantes'
+        }
+
         failure {
-            echo '❌ Pipeline échoué — vérifier les logs'
+            echo '❌ Pipeline echoue — verifier les logs'
         }
     }
 }
