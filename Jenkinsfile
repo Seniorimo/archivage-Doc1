@@ -2,15 +2,15 @@ pipeline {
     agent any
 
     environment {
-        SONAR_TOKEN        = credentials('sonar-token')
-        APP_PORT           = '8081'
-        MYSQL_ROOT_PASS    = 'root'
-        MYSQL_DATABASE     = 'archivage_db'
-        MYSQL_USER         = 'archivage_user'
-        MYSQL_PASS         = 'archivage_pass'
-        DOCKER_NETWORK     = 'archivage-net'
-        MYSQL_CONTAINER    = 'mysql-archivage'
-        APP_CONTAINER      = 'app-archivage'
+        SONAR_TOKEN     = credentials('sonar-token')
+        APP_PORT        = '8081'
+        MYSQL_ROOT_PASS = 'root'
+        MYSQL_DATABASE  = 'archivage_db'
+        MYSQL_USER      = 'archivage_user'
+        MYSQL_PASS      = 'archivage_pass'
+        DOCKER_NETWORK  = 'archivage-net'
+        MYSQL_CONTAINER = 'mysql-archivage'
+        APP_CONTAINER   = 'app-archivage'
     }
 
     stages {
@@ -21,12 +21,11 @@ pipeline {
             }
         }
 
-        stage('Build & Test') {
+        stage('Build & Package') {
             steps {
                 sh '''
                     docker run --rm \
                       --volumes-from jenkins \
-                      -w /var/jenkins_home/workspace/DevSecOps-PFE-Test \
                       maven:3.9.9-eclipse-temurin-17 \
                       mvn -B \
                         -f /var/jenkins_home/workspace/DevSecOps-PFE-Test/pom.xml \
@@ -42,7 +41,6 @@ pipeline {
                     docker run --rm \
                       --volumes-from jenkins \
                       --add-host=host.docker.internal:host-gateway \
-                      -w /var/jenkins_home/workspace/DevSecOps-PFE-Test \
                       maven:3.9.9-eclipse-temurin-17 \
                       mvn -B \
                         -f /var/jenkins_home/workspace/DevSecOps-PFE-Test/pom.xml \
@@ -50,7 +48,7 @@ pipeline {
                         org.sonarsource.scanner.maven:sonar-maven-plugin:4.0.0.4121:sonar \
                         -Dsonar.projectKey=archivage-doc \
                         -Dsonar.host.url=http://host.docker.internal:9000 \
-                        -Dsonar.login=${SONAR_TOKEN} \
+                        -Dsonar.login=$SONAR_TOKEN \
                         -Dsonar.java.binaries=target/classes
                 '''
             }
@@ -59,48 +57,46 @@ pipeline {
         stage('Deploy App for DAST') {
             steps {
                 sh '''
-                    # Créer le réseau s'il n'existe pas
-                    docker network inspect ${DOCKER_NETWORK} >/dev/null 2>&1 \
-                      || docker network create ${DOCKER_NETWORK}
+                    # Nettoyage préventif
+                    docker rm -f $APP_CONTAINER $MYSQL_CONTAINER 2>/dev/null || true
+                    docker network rm $DOCKER_NETWORK 2>/dev/null || true
+
+                    # Créer le réseau
+                    docker network create $DOCKER_NETWORK
 
                     # Lancer MySQL
                     docker run -d \
-                      --name ${MYSQL_CONTAINER} \
-                      --network ${DOCKER_NETWORK} \
-                      -e MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASS} \
-                      -e MYSQL_DATABASE=${MYSQL_DATABASE} \
-                      -e MYSQL_USER=${MYSQL_USER} \
-                      -e MYSQL_PASSWORD=${MYSQL_PASS} \
+                      --name $MYSQL_CONTAINER \
+                      --network $DOCKER_NETWORK \
+                      -e MYSQL_ROOT_PASSWORD=$MYSQL_ROOT_PASS \
+                      -e MYSQL_DATABASE=$MYSQL_DATABASE \
+                      -e MYSQL_USER=$MYSQL_USER \
+                      -e MYSQL_PASSWORD=$MYSQL_PASS \
                       mysql:8.0
 
-                    # Attendre que MySQL soit prêt
-                    echo "Waiting for MySQL..."
-                    sleep 20
+                    echo "Waiting for MySQL to be ready..."
+                    sleep 25
 
-                    # Lancer l'application Spring Boot
+                    # Lancer Spring Boot
                     docker run -d \
-                      --name ${APP_CONTAINER} \
-                      --network ${DOCKER_NETWORK} \
+                      --name $APP_CONTAINER \
+                      --network $DOCKER_NETWORK \
                       --volumes-from jenkins \
                       --add-host=host.docker.internal:host-gateway \
-                      -p ${APP_PORT}:${APP_PORT} \
+                      -p $APP_PORT:$APP_PORT \
                       maven:3.9.9-eclipse-temurin-17 \
                       sh -lc "mvn -B \
                         -f /var/jenkins_home/workspace/DevSecOps-PFE-Test/pom.xml \
                         -Dmaven.repo.local=/var/jenkins_home/.m2/repository \
                         spring-boot:run \
-                        -Dspring-boot.run.arguments='\
-                          --server.port=${APP_PORT} \
-                          --spring.datasource.url=jdbc:mysql://${MYSQL_CONTAINER}:3306/${MYSQL_DATABASE} \
-                          --spring.datasource.username=${MYSQL_USER} \
-                          --spring.datasource.password=${MYSQL_PASS}'"
+                        -Dspring-boot.run.arguments='--server.port=$APP_PORT --spring.datasource.url=jdbc:mysql://$MYSQL_CONTAINER:3306/$MYSQL_DATABASE --spring.datasource.username=$MYSQL_USER --spring.datasource.password=$MYSQL_PASS'"
 
-                    # Attendre que l'app soit prête
-                    echo "Waiting for Spring Boot..."
-                    sleep 30
+                    echo "Waiting for Spring Boot to start..."
+                    sleep 35
 
                     # Vérifier que l'app répond
-                    curl -s -o /dev/null -w "%{http_code}" http://localhost:${APP_PORT}/ | grep -E "200|302"
+                    curl -s -o /dev/null -w "%{http_code}" http://localhost:$APP_PORT/ | grep -qE "200|302"
+                    echo "✅ App is up!"
                 '''
             }
         }
@@ -117,7 +113,7 @@ pipeline {
                       -v /var/jenkins_home/workspace/DevSecOps-PFE-Test/reports/zap:/zap/wrk:rw \
                       ghcr.io/zaproxy/zaproxy:stable \
                       zap-baseline.py \
-                      -t http://host.docker.internal:${APP_PORT} \
+                      -t http://host.docker.internal:$APP_PORT \
                       -r zap-report.html \
                       -J zap-report.json \
                       -I
@@ -128,15 +124,14 @@ pipeline {
 
     post {
         always {
-            // Archiver les rapports
-            archiveArtifacts artifacts: 'reports/zap/zap-report.html, reports/zap/zap-report.json',
-                             allowEmptyArchive: true
-
-            // Nettoyer les conteneurs
+            node('built-in') {
+                archiveArtifacts artifacts: 'reports/zap/**',
+                                 allowEmptyArchive: true
+            }
             sh '''
-                docker rm -f ${APP_CONTAINER}  || true
-                docker rm -f ${MYSQL_CONTAINER} || true
-                docker network rm ${DOCKER_NETWORK} || true
+                docker rm -f $APP_CONTAINER  || true
+                docker rm -f $MYSQL_CONTAINER || true
+                docker network rm $DOCKER_NETWORK || true
             '''
         }
         success {
