@@ -57,14 +57,10 @@ pipeline {
         stage('Deploy App for DAST') {
             steps {
                 sh '''
-                    # Nettoyage préventif
                     docker rm -f $APP_CONTAINER $MYSQL_CONTAINER 2>/dev/null || true
                     docker network rm $DOCKER_NETWORK 2>/dev/null || true
-
-                    # Créer le réseau
                     docker network create $DOCKER_NETWORK
 
-                    # Lancer MySQL
                     docker run -d \
                       --name $MYSQL_CONTAINER \
                       --network $DOCKER_NETWORK \
@@ -74,10 +70,9 @@ pipeline {
                       -e MYSQL_PASSWORD=$MYSQL_PASS \
                       mysql:8.0
 
-                    echo "Waiting for MySQL to be ready..."
+                    echo "Waiting for MySQL..."
                     sleep 25
 
-                    # Lancer Spring Boot
                     docker run -d \
                       --name $APP_CONTAINER \
                       --network $DOCKER_NETWORK \
@@ -91,12 +86,11 @@ pipeline {
                         spring-boot:run \
                         -Dspring-boot.run.arguments='--server.port=$APP_PORT --spring.datasource.url=jdbc:mysql://$MYSQL_CONTAINER:3306/$MYSQL_DATABASE --spring.datasource.username=$MYSQL_USER --spring.datasource.password=$MYSQL_PASS'"
 
-                    echo "Waiting for Spring Boot to start..."
+                    echo "Waiting for Spring Boot..."
                     sleep 35
 
-                    # Vérifier que l'app répond
                     curl -s -o /dev/null -w "%{http_code}" http://localhost:$APP_PORT/ | grep -qE "200|302"
-                    echo "✅ App is up!"
+                    echo "App is up!"
                 '''
             }
         }
@@ -120,19 +114,22 @@ pipeline {
                 '''
             }
         }
+
+        stage('Cleanup') {
+            steps {
+                sh '''
+                    docker rm -f $APP_CONTAINER  || true
+                    docker rm -f $MYSQL_CONTAINER || true
+                    docker network rm $DOCKER_NETWORK || true
+                '''
+            }
+        }
     }
 
     post {
         always {
-            node('built-in') {
-                archiveArtifacts artifacts: 'reports/zap/**',
-                                 allowEmptyArchive: true
-            }
-            sh '''
-                docker rm -f $APP_CONTAINER  || true
-                docker rm -f $MYSQL_CONTAINER || true
-                docker network rm $DOCKER_NETWORK || true
-            '''
+            archiveArtifacts artifacts: 'reports/zap/**',
+                             allowEmptyArchive: true
         }
         success {
             echo '✅ Pipeline DevSecOps terminé avec succès'
