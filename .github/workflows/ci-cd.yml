@@ -1,0 +1,56 @@
+name: DevSecOps Pipeline
+
+on: [push]
+
+jobs:
+  security-scans:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📥 Checkout Code
+        uses: actions/checkout@v4
+
+      # ==========================================
+      # الجزء الأول: خدمة مباشرة على الكود (بلا Docker)
+      # ==========================================
+
+      - name: ☕ Setup Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: 🔑 Secret Detection (Gitleaks)
+        uses: gitleaks/gitleaks-action@v2
+        continue-on-error: true
+
+      - name: 🛡️ SCA (Trivy Scan sur le code)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs' # كيسكاني الدوسي نيشان
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+
+      - name: 🔍 SAST (SonarQube)
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+        run: mvn -B verify sonar:sonar -DskipTests
+        continue-on-error: true
+
+      # ==========================================
+      # الجزء الثاني: هنا فين غاندخلو Docker للبلان
+      # ==========================================
+
+      - name: 🐳 Build Docker Image
+        run: docker build -t archivage-app:latest .
+
+      - name: 🚀 Run App in Docker
+        run: |
+          docker run -d --name test-app -p 8080:8080 archivage-app:latest
+          sleep 15 # نخليوها تشعل على خاطرها
+
+      - name: 🕷️ DAST (OWASP ZAP)
+        uses: zaproxy/action-baseline@v0.12.0
+        with:
+          target: 'http://localhost:8080' # ZAP كيهاجم الـ Container لي شعلنا
+        continue-on-error: true
