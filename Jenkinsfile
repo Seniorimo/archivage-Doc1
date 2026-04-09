@@ -21,7 +21,7 @@ pipeline {
     POLICY_DIR         = 'policy'
     SCRIPT_DIR         = 'scripts'
 
-    // ⚠️ بدل هاد الجوج بمعلومات SonarQube ديالك (بحال لي درنا فـ Github Actions)
+    // ⚠️ بدل هاد الجوج بمعلومات SonarQube ديالك
     SONAR_PROJECT_KEY  = 'archivage-doc'
     SONAR_PROJECT_NAME = 'archivage-doc'
     SONAR_URL          = 'http://192.168.x.x:9000'
@@ -87,16 +87,10 @@ with open(output_file, "w", encoding="utf-8") as f:
     stage('🧱 Brique 1: Secret Detection (Gitleaks)') {
       steps {
         sh '''
-          # 1. نكرييو الكونطينير طافي
-          docker create --name gitleaks-scan "${GITLEAKS_IMAGE}" detect --source=/src --report-format sarif --report-path /tmp/gitleaks-results.sarif --exit-code 0
-          
-          # 2. نصيفطو ليه الكود
+          # زدنا -w /src باش Docker يكريي الدوسي أوتوماتيك + --no-git باش يسكاني الفيشيات نيشان
+          docker create --name gitleaks-scan -w /src "${GITLEAKS_IMAGE}" detect --no-git --source=/src --report-format sarif --report-path /tmp/gitleaks-results.sarif --exit-code 0
           tar --exclude=.git -cf - . | docker cp - gitleaks-scan:/src
-          
-          # 3. عاد نشعلوه يدير خدمتو
           docker start -a gitleaks-scan || true
-          
-          # 4. نخرجو النتيجة
           docker cp gitleaks-scan:/tmp/gitleaks-results.sarif "${REPORT_DIR}/gitleaks-results.sarif" || true
           docker rm -f gitleaks-scan
         '''
@@ -106,15 +100,15 @@ with open(output_file, "w", encoding="utf-8") as f:
     stage('🧱 Brique 2: SCA (Trivy)') {
       steps {
         sh '''
-          # تقرير SARIF
-          docker create --name trivy-scan "${TRIVY_IMAGE}" fs --scanners vuln --format sarif --output /tmp/trivy-results.sarif /src
+          # تقرير SARIF (زدنا -w /src هنا حتى هو)
+          docker create --name trivy-scan -w /src "${TRIVY_IMAGE}" fs --scanners vuln --format sarif --output /tmp/trivy-results.sarif /src
           tar --exclude=.git -cf - . | docker cp - trivy-scan:/src
           docker start -a trivy-scan || true
           docker cp trivy-scan:/tmp/trivy-results.sarif "${REPORT_DIR}/trivy-results.sarif" || true
           docker rm -f trivy-scan
 
           # تقرير JSON (باش تخدم بيه OPA)
-          docker create --name trivy-json "${TRIVY_IMAGE}" fs --scanners vuln --format json --output /tmp/trivy-results.json /src
+          docker create --name trivy-json -w /src "${TRIVY_IMAGE}" fs --scanners vuln --format json --output /tmp/trivy-results.json /src
           tar --exclude=.git -cf - . | docker cp - trivy-json:/src
           docker start -a trivy-json || true
           docker cp trivy-json:/tmp/trivy-results.json "${REPORT_DIR}/trivy-results.json" || true
@@ -126,7 +120,7 @@ with open(output_file, "w", encoding="utf-8") as f:
     stage('🧱 Brique 3 & 4: SAST & SBOM (SonarQube & CycloneDX)') {
       steps {
         sh '''
-          # -w /app كتكريي الدوسي أوتوماتيك فـ الـ Container
+          # -w /app كانت ديجا خدامة لينا هنا
           docker create --name maven-sec -w /app "${MAVEN_IMAGE}" sh -lc "mvn -B clean install org.cyclonedx:cyclonedx-maven-plugin:2.9.0:makeBom sonar:sonar -DskipTests -Dsonar.projectKey=${SONAR_PROJECT_KEY} -Dsonar.projectName=${SONAR_PROJECT_NAME} -Dsonar.host.url=${SONAR_URL} -Dsonar.token=${SONAR_TOKEN}"
           tar --exclude=.git -cf - . | docker cp - maven-sec:/app
           docker start -a maven-sec
@@ -140,20 +134,17 @@ with open(output_file, "w", encoding="utf-8") as f:
     stage('🧱 Brique 5: DAST (OWASP ZAP)') {
       steps {
         sh '''
-          # 1. بناء وتشغيل التطبيق
           docker build -t "${APP_IMAGE}" .
           docker network create "${APP_NETWORK}" || true
           docker run -d --name "${APP_CONTAINER}" --network "${APP_NETWORK}" "${APP_IMAGE}"
           sleep 20 
 
-          # 2. الهجوم
           docker create --name zap-scan --network "${APP_NETWORK}" "${ZAP_IMAGE}" zap-baseline.py -t "http://${APP_CONTAINER}:8080" -x zap-report.xml -I
           docker start -a zap-scan || true
           docker cp zap-scan:/zap/wrk/zap-report.xml "${REPORT_DIR}/zap-report.xml" || true
           docker rm -f zap-scan
           
-          # 3. التحويل لـ SARIF
-          docker create --name zap-convert python:3.12-alpine sh -lc "python /work/zap_xml_to_sarif.py /work/zap-report.xml /work/zap-results.sarif"
+          docker create --name zap-convert -w /work python:3.12-alpine sh -lc "python /work/zap_xml_to_sarif.py /work/zap-report.xml /work/zap-results.sarif"
           docker cp "${SCRIPT_DIR}/zap_xml_to_sarif.py" zap-convert:/work/zap_xml_to_sarif.py
           docker cp "${REPORT_DIR}/zap-report.xml" zap-convert:/work/zap-report.xml
           docker start -a zap-convert || true
@@ -166,7 +157,7 @@ with open(output_file, "w", encoding="utf-8") as f:
     stage('🧱 Brique 6: Policy as Code (OPA Gate)') {
       steps {
         sh '''
-          docker create --name opa-eval "${OPA_IMAGE}" eval --fail-defined --format pretty --data /work/trivy.rego --input /work/trivy-results.json "data.trivy.deny"
+          docker create --name opa-eval -w /work "${OPA_IMAGE}" eval --fail-defined --format pretty --data /work/trivy.rego --input /work/trivy-results.json "data.trivy.deny"
           docker cp "${POLICY_DIR}/trivy.rego" opa-eval:/work/trivy.rego
           docker cp "${REPORT_DIR}/trivy-results.json" opa-eval:/work/trivy-results.json
           docker start -a opa-eval
@@ -186,15 +177,3 @@ with open(output_file, "w", encoding="utf-8") as f:
       }
     }
   }
-
-  post {
-    always {
-      sh '''
-        docker rm -f gitleaks-scan trivy-scan trivy-json maven-sec zap-scan zap-convert opa-eval "${APP_CONTAINER}" >/dev/null 2>&1 || true
-        docker network rm "${APP_NETWORK}" >/dev/null 2>&1 || true
-      '''
-    }
-    success { echo '✅ Pipeline de Sécurité terminée.' }
-    failure { echo '❌ Pipeline de Sécurité en échec.' }
-  }
-}
