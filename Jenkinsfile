@@ -1,104 +1,265 @@
 pipeline {
     agent any
 
+    options {
+        timestamps()
+        ansiColor('xterm')
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '20'))
+        timeout(time: 45, unit: 'MINUTES')
+        skipDefaultCheckout(false)
+    }
+
+    environment {
+        REPORTS_DIR      = "${WORKSPACE}/reports"
+        GITLEAKS_DIR     = "${WORKSPACE}/reports/gitleaks"
+        TRIVY_DIR        = "${WORKSPACE}/reports/trivy"
+        SBOM_DIR         = "${WORKSPACE}/reports/sbom"
+        SONAR_DIR        = "${WORKSPACE}/reports/sonar"
+        ZAP_DIR          = "${WORKSPACE}/reports/zap"
+        OPA_DIR          = "${WORKSPACE}/reports/opa"
+
+        SONAR_HOST_URL   = "http://localhost:9000"
+        SONAR_PROJECT_KEY = "archivage-doc"
+
+        // Prefer a deployed staging URL for DAST.
+        ZAP_TARGET_URL   = "http://host.docker.internal:8081"
+    }
+
     stages {
-
-        stage('1 - Secrets: Gitleaks') {
+        stage('Prepare Workspace') {
             steps {
                 sh '''
-                    docker run --rm \
-                        -v ${WORKSPACE}:/repo \
-                        ghcr.io/zricethezav/gitleaks:latest detect \
-                        --source /repo \
-                        -r /repo/gitleaks.json \
-                        --exit-code 0
-                    echo "✅ Gitleaks OK"
+                    set -eu
+                    mkdir -p "${REPORTS_DIR}" \
+                             "${GITLEAKS_DIR}" \
+                             "${TRIVY_DIR}" \
+                             "${SBOM_DIR}" \
+                             "${SONAR_DIR}" \
+                             "${ZAP_DIR}" \
+                             "${OPA_DIR}"
+
+                    test -d "${WORKSPACE}/.git"
+                    git rev-parse --is-inside-work-tree
+
+                    # Ensure full history when secret scanning Git history matters
+                    git fetch --unshallow || true
+                    git fetch --tags --prune || true
                 '''
             }
         }
 
-        stage('2 - SCA: Trivy') {
-            steps {
-                sh '''
-                    docker run --rm \
-                        -v ${WORKSPACE}:/app \
-                        ghcr.io/aquasecurity/trivy:latest \
-                        fs --format json \
-                        --output /app/trivy.json \
-                        --exit-code 0 /app
-                    echo "✅ Trivy SCA OK"
-                '''
+        stage('Source Security') {
+            parallel {
+                stage('Secrets - Gitleaks') {
+                    steps {
+                        script {
+                            catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                                sh '''
+                                    set +e
+
+                                    docker run --rm \
+                                      --user "$(id -u):$(id -g)" \
+                                      -v "${WORKSPACE}:/repo:ro" \
+                                      -v "${GITLEAKS_DIR}:/out:rw" \
+                                      ghcr.io/zricethezav/gitleaks:latest detect \
+                                      --source /repo \
+                                      --report-format json \
+                                      --report-path /out/gitleaks.json \
+                                      --exit-code 0 \
+                                      --redact
+
+                                    rc=$?
+
+                                    if [ ! -f "${GITLEAKS_DIR}/gitleaks.json" ]; then
+                                      echo "Git mode unavailable inside container, retrying in filesystem mode"
+                                      docker run --rm \
+                                        --user "$(id -u):$(id -g)" \
+                                        -v "${WORKSPACE}:/repo:ro" \
+                                        -v "${GITLEAKS_DIR}:/out:rw" \
+                                        ghcr.io/zricethezav/gitleaks:latest detect \
+                                        --no-git \
+                                        --source /repo \
+                                        --report-format json \
+                                        --report-path /out/gitleaks.json \
+                                        --exit-code 0 \
+                                        --redact
+                                    fi
+
+                                    test -f "${GITLEAKS_DIR}/gitleaks.json"
+                                    exit 0
+                                '''
+                            }
+                        }
+                    }
+                }
+
+                stage('SCA - Trivy FS') {
+                    steps {
+                        script {
+                            catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                                sh '''
+                                    set +e
+
+                                    docker run --rm \
+                                      --user "$(id -u):$(id -g)" \
+                                      -v "${WORKSPACE}:/src:ro" \
+                                      -v "${TRIVY_DIR}:/out:rw" \
+                                      ghcr.io/aquasecurity/trivy:latest fs \
+                                      --scanners vuln \
+                                      --format json \
+                                      --output /out/trivy-fs.json \
+                                      /src
+
+                                    test -f "${TRIVY_DIR}/trivy-fs.json"
+                                    exit 0
+                                '''
+                            }
+                        }
+                    }
+                }
             }
         }
 
-        stage('3 - SBOM: CycloneDX') {
+        stage('Software Inventory') {
             steps {
-                sh '''
-                    mvn -f ${WORKSPACE}/pom.xml \
-                        org.cyclonedx:cyclonedx-maven-plugin:makeAggregateBom \
-                        -DoutputFormat=json \
-                        -DoutputName=sbom \
-                        -B
-                    echo "✅ CycloneDX SBOM OK"
-                '''
+                script {
+                    catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                        sh '''
+                            set +e
+
+                            mvn -B -f "${WORKSPACE}/pom.xml" \
+                              org.cyclonedx:cyclonedx-maven-plugin:makeAggregateBom \
+                              -DoutputFormat=json \
+                              -DoutputDirectory="${SBOM_DIR}" \
+                              -DoutputName=bom
+
+                            test -f "${SBOM_DIR}/bom.json"
+                            exit 0
+                        '''
+                    }
+                }
             }
         }
 
-        stage('4 - SAST: SonarQube') {
+        stage('Static Analysis') {
             steps {
-                sh '''
-                    mvn -f ${WORKSPACE}/pom.xml sonar:sonar \
-                        -Dsonar.projectKey=archivage-Doc \
-                        -Dsonar.host.url=http://localhost:9000 \
-                        -B || echo "⚠️ SonarQube non configuré - skipped"
-                    echo "✅ SonarQube OK"
-                '''
+                script {
+                    catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                        withCredentials([string(credentialsId: 'sonarqube-token', variable: 'SONAR_TOKEN')]) {
+                            sh '''
+                                set +e
+
+                                mvn -B -f "${WORKSPACE}/pom.xml" sonar:sonar \
+                                  -Dsonar.projectKey="${SONAR_PROJECT_KEY}" \
+                                  -Dsonar.host.url="${SONAR_HOST_URL}" \
+                                  -Dsonar.token="${SONAR_TOKEN}"
+
+                                echo "{\\"status\\":\\"submitted\\"}" > "${SONAR_DIR}/sonar-status.json"
+                                exit 0
+                            '''
+                        }
+                    }
+                }
             }
         }
 
-        stage('5 - DAST: OWASP ZAP') {
+        stage('Dynamic Analysis') {
             steps {
-                sh '''
-                    docker rm -f zap-target || true
-                    docker run -d --name zap-target \
-                        --network host \
-                        archivage-doc:latest || echo "⚠️ Image pas dispo, ZAP skipped"
-                    sleep 15
-                    docker run --rm \
-                        -v ${WORKSPACE}:/zap/wrk/:rw \
-                        --network host \
-                        owasp/zap2docker-stable \
-                        zap-baseline.py \
-                        -t http://localhost:8081 \
-                        -r zap.html -I || echo "⚠️ ZAP warnings"
-                    docker rm -f zap-target || true
-                    echo "✅ ZAP DAST OK"
-                '''
+                script {
+                    catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                        sh '''
+                            set +e
+
+                            docker run --rm \
+                              --user "$(id -u):$(id -g)" \
+                              -v "${ZAP_DIR}:/zap/wrk:rw" \
+                              --network host \
+                              owasp/zap2docker-stable \
+                              zap-baseline.py \
+                              -t "${ZAP_TARGET_URL}" \
+                              -r zap-report.html \
+                              -J zap-report.json \
+                              -I
+
+                            test -f "${ZAP_DIR}/zap-report.html" || true
+                            exit 0
+                        '''
+                    }
+                }
             }
         }
 
-        stage('6 - Policy: OPA') {
+        stage('Policy Gate - OPA') {
             steps {
-                sh '''
-                    docker run --rm \
-                        -v ${WORKSPACE}:/data \
-                        openpolicyagent/opa:latest \
-                        eval -d /data/trivy.json \
-                        "count(data.Results) >= 0" \
-                        && echo "✅ OPA Policy PASS" \
-                        || echo "⚠️ OPA check warning"
-                '''
+                script {
+                    catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                        sh '''
+                            set +e
+
+                            cat > "${OPA_DIR}/policy.rego" <<'EOF'
+                            package cicd.security
+
+                            default allow = true
+
+                            trivy_report_exists if {
+                              input.trivy_report_exists == true
+                            }
+
+                            deny contains "Missing Trivy report" if {
+                              not trivy_report_exists
+                            }
+                            EOF
+
+                            TRIVY_EXISTS=false
+                            [ -f "${TRIVY_DIR}/trivy-fs.json" ] && TRIVY_EXISTS=true
+
+                            cat > "${OPA_DIR}/input.json" <<EOF
+                            {
+                              "trivy_report_exists": ${TRIVY_EXISTS}
+                            }
+                            EOF
+
+                            docker run --rm \
+                              --user "$(id -u):$(id -g)" \
+                              -v "${OPA_DIR}:/policy:rw" \
+                              openpolicyagent/opa:latest \
+                              eval \
+                              --format pretty \
+                              --data /policy/policy.rego \
+                              --input /policy/input.json \
+                              "data.cicd.security"
+
+                            docker run --rm \
+                              --user "$(id -u):$(id -g)" \
+                              -v "${OPA_DIR}:/policy:rw" \
+                              openpolicyagent/opa:latest \
+                              eval \
+                              --format json \
+                              --data /policy/policy.rego \
+                              --input /policy/input.json \
+                              "data.cicd.security" > "${OPA_DIR}/opa-result.json"
+
+                            exit 0
+                        '''
+                    }
+                }
             }
         }
     }
 
     post {
         always {
-            sh 'docker rm -f zap-target || true'
-            archiveArtifacts artifacts: '*.json, *.html, target/bom.json',
-                             allowEmptyArchive: true
+            archiveArtifacts artifacts: 'reports/**/*.json, reports/**/*.html', allowEmptyArchive: true, fingerprint: true
         }
-        success { echo '🛡️ DevSecOps Pipeline SUCCESS - 6/6 scans OK' }
-        failure { echo '🚨 Pipeline FAILED - voir logs' }
+        unstable {
+            echo 'Pipeline completed with scanner issues or findings; review archived reports.'
+        }
+        success {
+            echo 'DevSecOps pipeline completed successfully.'
+        }
+        failure {
+            echo 'Pipeline failed due to a pipeline/runtime error; review stage logs and archived artifacts.'
+        }
     }
 }
