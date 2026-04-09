@@ -9,7 +9,7 @@ pipeline {
   environment {
     MAVEN_IMAGE        = 'maven:3.9.6-eclipse-temurin-17'
     GITLEAKS_IMAGE     = 'zricethezav/gitleaks:v8.21.2'
-    TRIVY_IMAGE        = 'aquasec/trivy:latest'
+    TRIVY_IMAGE        = 'ghcr.io/aquasecurity/trivy:latest'
     OPA_IMAGE          = 'openpolicyagent/opa:latest-static'
     ZAP_IMAGE          = 'ghcr.io/zaproxy/zaproxy:stable'
 
