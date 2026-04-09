@@ -87,7 +87,6 @@ with open(output_file, "w", encoding="utf-8") as f:
     stage('🧱 Brique 1: Secret Detection (Gitleaks)') {
       steps {
         sh '''
-          # زدنا -w /src باش Docker يكريي الدوسي أوتوماتيك + --no-git باش يسكاني الفيشيات نيشان
           docker create --name gitleaks-scan -w /src "${GITLEAKS_IMAGE}" detect --no-git --source=/src --report-format sarif --report-path /tmp/gitleaks-results.sarif --exit-code 0
           tar --exclude=.git -cf - . | docker cp - gitleaks-scan:/src
           docker start -a gitleaks-scan || true
@@ -100,14 +99,12 @@ with open(output_file, "w", encoding="utf-8") as f:
     stage('🧱 Brique 2: SCA (Trivy)') {
       steps {
         sh '''
-          # تقرير SARIF (زدنا -w /src هنا حتى هو)
           docker create --name trivy-scan -w /src "${TRIVY_IMAGE}" fs --scanners vuln --format sarif --output /tmp/trivy-results.sarif /src
           tar --exclude=.git -cf - . | docker cp - trivy-scan:/src
           docker start -a trivy-scan || true
           docker cp trivy-scan:/tmp/trivy-results.sarif "${REPORT_DIR}/trivy-results.sarif" || true
           docker rm -f trivy-scan
 
-          # تقرير JSON (باش تخدم بيه OPA)
           docker create --name trivy-json -w /src "${TRIVY_IMAGE}" fs --scanners vuln --format json --output /tmp/trivy-results.json /src
           tar --exclude=.git -cf - . | docker cp - trivy-json:/src
           docker start -a trivy-json || true
@@ -120,7 +117,6 @@ with open(output_file, "w", encoding="utf-8") as f:
     stage('🧱 Brique 3 & 4: SAST & SBOM (SonarQube & CycloneDX)') {
       steps {
         sh '''
-          # -w /app كانت ديجا خدامة لينا هنا
           docker create --name maven-sec -w /app "${MAVEN_IMAGE}" sh -lc "mvn -B clean install org.cyclonedx:cyclonedx-maven-plugin:2.9.0:makeBom sonar:sonar -DskipTests -Dsonar.projectKey=${SONAR_PROJECT_KEY} -Dsonar.projectName=${SONAR_PROJECT_NAME} -Dsonar.host.url=${SONAR_URL} -Dsonar.token=${SONAR_TOKEN}"
           tar --exclude=.git -cf - . | docker cp - maven-sec:/app
           docker start -a maven-sec
@@ -177,3 +173,16 @@ with open(output_file, "w", encoding="utf-8") as f:
       }
     }
   }
+
+  post {
+    always {
+      sh '''
+        docker rm -f gitleaks-scan trivy-scan trivy-json maven-sec zap-scan zap-convert opa-eval "${APP_CONTAINER}" >/dev/null 2>&1 || true
+        docker network rm "${APP_NETWORK}" >/dev/null 2>&1 || true
+      '''
+    }
+    success { echo '✅ Pipeline de Sécurité terminée.' }
+    failure { echo '❌ Pipeline de Sécurité en échec.' }
+  }
+}
+// <-- تأكد بلي كوبيتي هاد المعقوفة اللخرة اللي كتسد Pipeline كاملة!
