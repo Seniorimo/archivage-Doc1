@@ -25,7 +25,7 @@ pipeline {
     SONAR_PROJECT_KEY  = 'archivage-doc'
     SONAR_PROJECT_NAME = 'archivage-doc'
     SONAR_URL          = 'http://10.0.0.237:9000'
-    SONAR_TOKEN        = 'sqa_xxxxxxxxxxxxxxxxxxx'
+    SONAR_TOKEN        = '***SONAR_TOKEN_REMOVED***'
   }
 
   stages {
