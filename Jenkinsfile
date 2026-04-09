@@ -24,7 +24,7 @@ pipeline {
     // ⚠️ بدل هاد الجوج بمعلومات SonarQube ديالك
     SONAR_PROJECT_KEY  = 'archivage-doc'
     SONAR_PROJECT_NAME = 'archivage-doc'
-    SONAR_URL          = 'http://192.168.x.x:9000'
+    SONAR_URL          = 'http://10.0.0.237:9000'
     SONAR_TOKEN        = 'sqa_xxxxxxxxxxxxxxxxxxx'
   }
 
