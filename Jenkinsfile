@@ -137,14 +137,12 @@ pipeline {
 
     post {
         always {
-            node {
-                archiveArtifacts artifacts: 'reports/zap/**', allowEmptyArchive: true
-                sh '''
-                    docker rm -f $APP_CONTAINER 2>/dev/null || true
-                    docker rm -f $MYSQL_CONTAINER 2>/dev/null || true
-                    docker network rm $DOCKER_NETWORK 2>/dev/null || true
-                '''
-            }
+            archiveArtifacts artifacts: 'reports/zap/**', allowEmptyArchive: true
+            sh '''
+                docker rm -f $APP_CONTAINER 2>/dev/null || true
+                docker rm -f $MYSQL_CONTAINER 2>/dev/null || true
+                docker network rm $DOCKER_NETWORK 2>/dev/null || true
+            '''
         }
         success {
             echo '✅ Pipeline DevSecOps terminé avec succès'
