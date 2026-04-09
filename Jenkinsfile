@@ -2,7 +2,6 @@ pipeline {
   agent any
 
   tools {
-    // Assurez-vous que ces outils existent dans Jenkins (Global Tool Configuration)
     jdk 'JDK17'
     maven 'Maven3'
   }
@@ -10,57 +9,42 @@ pipeline {
   options {
     timestamps()
     ansiColor('xterm')
+    disableConcurrentBuilds()
   }
 
   environment {
-    // Identifiant du serveur SonarQube configuré dans Jenkins (Manage Jenkins > System)
     SONARQUBE_SERVER = 'SonarQubeServer'
-    // Nom de l'artefact final archivé (adapter selon votre packaging)
     ARTIFACT_PATTERN = 'target/*.jar, target/*.war'
+    IMAGE_NAME = 'archivage-doc'
+    CONTAINER_NAME = 'archivage-doc-smoke'
+    APP_PORT = '8090'
+    HOST_PORT = '18081'
   }
 
   stages {
-    // ------------------------------------------------------------------------------------
-    // Stage 1 - Checkout
-    // Récupère le code source depuis le dépôt Git configuré au niveau du job Jenkins.
-    // Avec "checkout scm", Jenkins utilise automatiquement la configuration SCM du job.
-    // ------------------------------------------------------------------------------------
     stage('Checkout') {
       steps {
         checkout scm
       }
     }
 
-    // ------------------------------------------------------------------------------------
-    // Stage 2 - Build
-    // Compile et package l'application Java avec Maven.
-    // Les tests sont explicitement ignorés ici pour respecter votre exigence:
-    // "mvn clean install -DskipTests".
-    // ------------------------------------------------------------------------------------
     stage('Build') {
       steps {
         sh 'mvn -B clean install -DskipTests'
       }
     }
 
-    // ------------------------------------------------------------------------------------
-    // Stage 3 - SCA (OWASP Dependency-Check)
-    // Lance l'analyse des dépendances pour identifier les composants vulnérables.
-    // Le build échoue automatiquement si des vulnérabilités critiques sont détectées
-    // via le seuil CVSS défini (failBuildOnCVSS=9).
-    //
-    // Pré-requis:
-    // - Le plugin Maven OWASP Dependency-Check doit être disponible
-    //   (idéalement déclaré dans le pom.xml, sinon invoqué ici par son groupId/artifactId).
-    // ------------------------------------------------------------------------------------
     stage('SCA - Dependency Check') {
       steps {
-        sh '''
-          mvn -B org.owasp:dependency-check-maven:check \
-            -Dformat=HTML \
-            -DoutputDirectory=target/dependency-check-report \
-            -DfailBuildOnCVSS=9
-        '''
+        withCredentials([string(credentialsId: 'nvd-api-key', variable: 'NVD_API_KEY')]) {
+          sh '''
+            mvn -B org.owasp:dependency-check-maven:check \
+              -DnvdApiKey=$NVD_API_KEY \
+              -Dformat=HTML \
+              -DoutputDirectory=target/dependency-check-report \
+              -DfailBuildOnCVSS=9
+          '''
+        }
       }
       post {
         always {
@@ -69,16 +53,6 @@ pipeline {
       }
     }
 
-    // ------------------------------------------------------------------------------------
-    // Stage 4 - SAST (SonarQube)
-    // Exécute l'analyse statique du code avec SonarQube (bugs, code smells, vulnérabilités).
-    // L'étape est encapsulée dans "withSonarQubeEnv" pour injecter automatiquement
-    // les variables/URL/token configurés dans Jenkins.
-    //
-    // Pré-requis:
-    // - Plugin Jenkins "SonarQube Scanner" installé.
-    // - Serveur SonarQube enregistré dans Jenkins avec le nom SONARQUBE_SERVER.
-    // ------------------------------------------------------------------------------------
     stage('SAST - SonarQube') {
       steps {
         withSonarQubeEnv("${SONARQUBE_SERVER}") {
@@ -87,31 +61,88 @@ pipeline {
       }
     }
 
-    // ------------------------------------------------------------------------------------
-    // Stage 5 - Archive / Deploy (optionnel pour l'instant)
-    // Archive les artefacts produits (.jar/.war) afin de les conserver dans Jenkins.
-    // Cela prépare également le terrain pour un futur stage de déploiement.
-    // ------------------------------------------------------------------------------------
     stage('Archive') {
       steps {
         archiveArtifacts artifacts: "${ARTIFACT_PATTERN}", fingerprint: true
       }
     }
+
+    stage('Prepare Docker Metadata') {
+      steps {
+        script {
+          env.GIT_SHORT = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
+          env.LOCAL_IMAGE = "${IMAGE_NAME}:build-${BUILD_NUMBER}"
+          env.VERSION_TAG = "${BUILD_NUMBER}-${GIT_SHORT}"
+        }
+      }
+    }
+
+    stage('Build Docker Image') {
+      steps {
+        sh '''
+          docker build --no-cache -t "$LOCAL_IMAGE" .
+        '''
+      }
+    }
+
+    stage('Smoke Test Docker') {
+      steps {
+        sh '''
+          docker rm -f "$CONTAINER_NAME" || true
+
+          docker run -d \
+            --name "$CONTAINER_NAME" \
+            -p "$HOST_PORT:$APP_PORT" \
+            -e SPRING_PROFILES_ACTIVE=docker \
+            "$LOCAL_IMAGE"
+
+          sleep 30
+
+          docker logs "$CONTAINER_NAME" --tail 300
+
+          docker logs "$CONTAINER_NAME" | grep "Started ArchivageDocApplication"
+        '''
+      }
+    }
+
+    stage('Push Docker Image') {
+      steps {
+        withCredentials([usernamePassword(
+          credentialsId: 'dockerhub-credentials',
+          usernameVariable: 'DOCKERHUB_USER',
+          passwordVariable: 'DOCKERHUB_PASS'
+        )]) {
+          sh '''
+            REPO="$DOCKERHUB_USER/$IMAGE_NAME"
+            VERSION_IMAGE="$REPO:$VERSION_TAG"
+            LATEST_IMAGE="$REPO:latest"
+
+            echo "$DOCKERHUB_PASS" | docker login -u "$DOCKERHUB_USER" --password-stdin
+
+            docker tag "$LOCAL_IMAGE" "$VERSION_IMAGE"
+            docker tag "$LOCAL_IMAGE" "$LATEST_IMAGE"
+
+            docker push "$VERSION_IMAGE"
+            docker push "$LATEST_IMAGE"
+
+            docker logout || true
+          '''
+        }
+      }
+    }
   }
 
   post {
-    // Notification simple en cas de succès global de la pipeline
     success {
-      echo 'SUCCESS: la pipeline CI/CD s’est terminée correctement (Build + SCA + SAST + Archive).'
+      echo 'SUCCESS: Build + SCA + SAST + Archive + Docker build + smoke test + push terminés correctement.'
     }
 
-    // Notification simple en cas d’échec de la pipeline
     failure {
       echo 'FAILURE: la pipeline CI/CD a échoué. Vérifiez les logs des stages pour identifier la cause.'
     }
 
-    // Message final toujours affiché (audit trail minimal)
     always {
+      sh 'docker rm -f "$CONTAINER_NAME" || true'
       echo "Pipeline terminée - Job: ${env.JOB_NAME} #${env.BUILD_NUMBER}"
     }
   }

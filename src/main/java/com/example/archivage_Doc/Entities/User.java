@@ -13,35 +13,35 @@ import java.time.LocalDateTime;
 import java.util.Collection;
 import java.util.HashSet;
 import java.util.Set;
-import java.util.stream.Collectors;
 
 @Entity
-@Table(name = "user")
+@Table(name = "users")
 @Getter
 @Setter
 @NoArgsConstructor
 @AllArgsConstructor
 @Builder
 public class User implements UserDetails {
-    @Id 
+
+    @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
-    
+
     @Column(unique = true, nullable = false, length = 50)
     private String username;
-    
+
     @Column(nullable = false)
     private String password;
-    
+
     @Column(name = "first_name", length = 50)
     private String firstName;
-    
+
     @Column(name = "last_name", length = 50)
     private String lastName;
-    
+
     @Column(length = 100)
     private String email;
-    
+
     @Column(name = "phone_number", length = 20)
     private String phoneNumber;
 
@@ -52,19 +52,19 @@ public class User implements UserDetails {
     @OneToMany(mappedBy = "user", cascade = CascadeType.ALL, orphanRemoval = true, fetch = FetchType.EAGER)
     @Builder.Default
     private Set<UserRole> userRoles = new HashSet<>();
-    
+
     @Column(name = "enabled", nullable = false)
     @Builder.Default
     private boolean enabled = true;
-    
+
     @CreationTimestamp
     @Column(name = "created_at", nullable = false, updatable = false)
     private LocalDateTime createdAt;
-    
+
     @UpdateTimestamp
     @Column(name = "updated_at")
     private LocalDateTime updatedAt;
-    
+
     @Column(name = "last_login")
     private LocalDateTime lastLogin;
 
@@ -74,14 +74,15 @@ public class User implements UserDetails {
     @Override
     public Collection<? extends GrantedAuthority> getAuthorities() {
         Set<GrantedAuthority> authorities = new HashSet<>();
-        
-        // Ajouter les permissions de tous les rôles de l'utilisateur
+
         for (UserRole userRole : userRoles) {
-            for (Permission permission : userRole.getPermissions()) {
-                authorities.add(new SimpleGrantedAuthority(permission.name()));
+            if (userRole.getPermissions() != null) {
+                for (Permission permission : userRole.getPermissions()) {
+                    authorities.add(new SimpleGrantedAuthority(permission.name()));
+                }
             }
         }
-        
+
         return authorities;
     }
 
@@ -114,7 +115,7 @@ public class User implements UserDetails {
     public boolean isEnabled() {
         return enabled;
     }
-    
+
     public void updateLastLogin() {
         this.lastLogin = LocalDateTime.now();
     }
