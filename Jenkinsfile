@@ -26,6 +26,27 @@ pipeline {
             }
         }
 
+        stage('Gitleaks Secrets Scan') {
+            steps {
+                catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
+                    sh '''
+                        mkdir -p $WORKSPACE_DIR/reports/gitleaks
+
+                        docker run --rm \
+                          --volumes-from jenkins \
+                          -w $WORKSPACE_DIR \
+                          zricethezav/gitleaks:latest \
+                          detect \
+                          --source . \
+                          --log-opts="--all" \
+                          --report-format json \
+                          --report-path reports/gitleaks/gitleaks-report.json \
+                          --exit-code 0 || true
+                    '''
+                }
+            }
+        }
+
         stage('Build & Package') {
             steps {
                 sh '''
@@ -37,6 +58,47 @@ pipeline {
                         -Dmaven.repo.local=/var/jenkins_home/.m2/repository \
                         clean package -DskipTests
                 '''
+            }
+        }
+
+        stage('Trivy SCA Scan') {
+            steps {
+                catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
+                    sh '''
+                        mkdir -p $WORKSPACE_DIR/reports/trivy
+
+                        docker run --rm \
+                          --volumes-from jenkins \
+                          aquasec/trivy:latest fs \
+                          --scanners vuln \
+                          --format json \
+                          --output $WORKSPACE_DIR/reports/trivy/trivy-fs-report.json \
+                          $WORKSPACE_DIR || true
+                    '''
+                }
+            }
+        }
+
+        stage('CycloneDX SBOM') {
+            steps {
+                catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
+                    sh '''
+                        mkdir -p $WORKSPACE_DIR/reports/sbom
+
+                        docker run --rm \
+                          --volumes-from jenkins \
+                          maven:3.9.9-eclipse-temurin-17 \
+                          sh -lc "
+                            mvn -B \
+                              -f $WORKSPACE_DIR/pom.xml \
+                              -Dmaven.repo.local=/var/jenkins_home/.m2/repository \
+                              org.cyclonedx:cyclonedx-maven-plugin:2.7.11:makeAggregateBom \
+                              -DoutputFormat=all &&
+                            cp -f $WORKSPACE_DIR/target/bom.xml  $WORKSPACE_DIR/reports/sbom/bom.xml &&
+                            cp -f $WORKSPACE_DIR/target/bom.json $WORKSPACE_DIR/reports/sbom/bom.json
+                          " || true
+                    '''
+                }
             }
         }
 
@@ -153,11 +215,67 @@ pipeline {
                 '''
             }
         }
+
+        stage('OPA Policy Check') {
+            steps {
+                catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
+                    sh '''
+                        mkdir -p $WORKSPACE_DIR/reports/opa
+
+                        GITLEAKS_COUNT=$(grep -o '"RuleID"' "$WORKSPACE_DIR/reports/gitleaks/gitleaks-report.json" | wc -l || true)
+                        TRIVY_CRITICAL=$(grep -o 'CRITICAL' "$WORKSPACE_DIR/reports/trivy/trivy-fs-report.json" | wc -l || true)
+                        ZAP_HIGH=$(grep -o '"riskcode":"3"' "$WORKSPACE_DIR/reports/zap/zap-report.json" | wc -l || true)
+
+                        cat > $WORKSPACE_DIR/reports/opa/policy-input.json <<EOF
+{
+  "gitleaks_findings": $GITLEAKS_COUNT,
+  "trivy_critical": $TRIVY_CRITICAL,
+  "zap_high": $ZAP_HIGH
+}
+EOF
+
+                        cat > $WORKSPACE_DIR/reports/opa/policy.rego <<'EOF'
+package cicd
+
+default allow = true
+
+deny[msg] {
+  input.gitleaks_findings > 0
+  msg := sprintf("Gitleaks found %v potential secret(s)", [input.gitleaks_findings])
+}
+
+deny[msg] {
+  input.trivy_critical > 0
+  msg := sprintf("Trivy found %v CRITICAL finding(s)", [input.trivy_critical])
+}
+
+deny[msg] {
+  input.zap_high > 0
+  msg := sprintf("ZAP found %v High-risk alert(s)", [input.zap_high])
+}
+
+allow {
+  count(deny) == 0
+}
+EOF
+
+                        docker run --rm \
+                          --volumes-from jenkins \
+                          openpolicyagent/opa:latest \
+                          eval \
+                          --format pretty \
+                          --data $WORKSPACE_DIR/reports/opa/policy.rego \
+                          --input $WORKSPACE_DIR/reports/opa/policy-input.json \
+                          'data.cicd' | tee $WORKSPACE_DIR/reports/opa/opa-result.txt || true
+                    '''
+                }
+            }
+        }
     }
 
     post {
         always {
-            archiveArtifacts artifacts: 'reports/zap/**', allowEmptyArchive: true
+            archiveArtifacts artifacts: 'reports/**', allowEmptyArchive: true
             sh '''
                 docker rm -f $APP_CONTAINER 2>/dev/null || true
                 docker rm -f $MYSQL_CONTAINER 2>/dev/null || true
