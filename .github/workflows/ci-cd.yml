@@ -1,4 +1,4 @@
-name: Fast CI & Sanity Check
+name: Fast CI & Security Check
 
 on:
   push:
@@ -7,7 +7,7 @@ on:
     branches: [ "main" ]
 
 jobs:
-  build-and-run:
+  build-and-test:
     name: Build & Test Spring Boot App
     runs-on: ubuntu-latest
 
@@ -22,14 +22,24 @@ jobs:
           distribution: 'temurin'
           cache: 'maven'
 
-      # Optimisation : Utilisation de -T 1C pour exploiter tous les cœurs du runner GitHub
-      - name: ⚡ Build with Maven
-        run: mvn -B -T 1C clean package -DskipTests
+      - name: ⚡ Build with Maven (Multithreaded)
+        run: mvn -B -T 1C clean package -DskipTests --no-transfer-progress
 
       - name: 🐳 Build Docker Image
-        run: docker build -t archivage-app:latest .
+        env:
+          DOCKER_BUILDKIT: 1
+        run: docker build --progress=auto -t archivage-app:latest .
 
-      # Optimisation : Remplacement du 'sleep' aveugle par un vrai script de Healthcheck
+      - name: 🛡️ Shift-Left Security (Trivy Scan)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: 'archivage-app:latest'
+          format: 'table'
+          exit-code: '0' # Mettre à '1' plus tard si vous voulez bloquer les PR vulnérables
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'CRITICAL,HIGH'
+
       - name: 🚀 Run Application & Healthcheck
         run: |
           docker run -d --name my-spring-app -p 8080:8080 archivage-app:latest
@@ -37,9 +47,7 @@ jobs:
           echo "⏳ Attente du démarrage de Spring Boot (Healthcheck)..."
           READY=0
           
-          # Boucle de vérification dynamique (Max 60 secondes)
           for i in {1..12}; do
-            # On test si le port 8080 répond (même avec une erreur 401/403, ça prouve que le serveur tourne)
             if curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/ | grep -qE "200|302|401|403|404"; then
               echo "✅ Application démarrée et accessible !"
               READY=1
@@ -48,7 +56,6 @@ jobs:
             sleep 5
           done
 
-          # Si après 60s READY est toujours à 0, on affiche les logs et on force l'échec du job
           if [ "$READY" -ne 1 ]; then
             echo "❌ L'application n'a pas démarré correctement. Affichage des logs :"
             docker logs my-spring-app
