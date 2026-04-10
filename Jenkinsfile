@@ -25,7 +25,7 @@ pipeline {
             }
         }
 
-        stage('Gitleaks Secrets Scan') {
+        stage('Secrets - Gitleaks') {
             steps {
                 catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
                     sh '''
@@ -60,7 +60,7 @@ pipeline {
             }
         }
 
-        stage('Trivy SCA Scan') {
+        stage('SCA - Trivy') {
             steps {
                 catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
                     sh '''
@@ -70,53 +70,19 @@ pipeline {
                         docker run --rm \
                           --volumes-from jenkins \
                           -v "$WORKSPACE/.trivycache:/root/.cache/trivy" \
-                          -v "$WORKSPACE/reports/trivy:/work" \
+                          -v "$WORKSPACE/reports/trivy:/report" \
                           ghcr.io/aquasecurity/trivy:latest fs \
                           --scanners vuln \
                           --severity LOW,MEDIUM,HIGH,CRITICAL \
                           --format json \
-                          --output /work/trivy-report.json \
+                          --output /report/trivy-report.json \
                           "$WORKSPACE" || true
-
-                        if [ -f "$WORKSPACE/reports/trivy/trivy-report.json" ]; then
-                          docker run --rm \
-                            --volumes-from jenkins \
-                            -v "$WORKSPACE/reports/trivy:/work" \
-                            ghcr.io/aquasecurity/trivy:latest convert \
-                            --format template \
-                            --template "@/usr/local/share/trivy/templates/html.tpl" \
-                            --output /work/trivy-report.html \
-                            /work/trivy-report.json || true
-                        fi
                     '''
                 }
             }
         }
 
-        stage('CycloneDX SBOM') {
-            steps {
-                catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
-                    sh '''
-                        mkdir -p reports/sbom
-
-                        docker run --rm \
-                          --volumes-from jenkins \
-                          maven:3.9.9-eclipse-temurin-17 \
-                          sh -lc "
-                            mvn -B \
-                              -f '$WORKSPACE/pom.xml' \
-                              -Dmaven.repo.local=/var/jenkins_home/.m2/repository \
-                              org.cyclonedx:cyclonedx-maven-plugin:2.7.11:makeAggregateBom \
-                              -DoutputFormat=all &&
-                            cp -f '$WORKSPACE/target/bom.xml' '$WORKSPACE/reports/sbom/bom.xml' &&
-                            cp -f '$WORKSPACE/target/bom.json' '$WORKSPACE/reports/sbom/bom.json'
-                          " || true
-                    '''
-                }
-            }
-        }
-
-        stage('SonarQube Analysis') {
+        stage('SAST - SonarQube') {
             steps {
                 withCredentials([string(credentialsId: 'sonar-token', variable: 'SONAR_TOKEN')]) {
                     sh '''
@@ -140,6 +106,29 @@ pipeline {
             }
         }
 
+        stage('SBOM - CycloneDX') {
+            steps {
+                catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
+                    sh '''
+                        mkdir -p reports/sbom
+
+                        docker run --rm \
+                          --volumes-from jenkins \
+                          maven:3.9.9-eclipse-temurin-17 \
+                          sh -lc "
+                            mvn -B \
+                              -f '$WORKSPACE/pom.xml' \
+                              -Dmaven.repo.local=/var/jenkins_home/.m2/repository \
+                              org.cyclonedx:cyclonedx-maven-plugin:2.7.11:makeAggregateBom \
+                              -DoutputFormat=all &&
+                            cp -f '$WORKSPACE/target/bom.xml' '$WORKSPACE/reports/sbom/bom.xml' &&
+                            cp -f '$WORKSPACE/target/bom.json' '$WORKSPACE/reports/sbom/bom.json'
+                          " || true
+                    '''
+                }
+            }
+        }
+
         stage('Deploy MySQL') {
             steps {
                 sh '''
@@ -155,9 +144,7 @@ pipeline {
                       -e MYSQL_PASSWORD="$MYSQL_PASS" \
                       mysql:8.0
 
-                    echo "Waiting for MySQL..."
                     sleep 25
-                    docker logs "$MYSQL_CONTAINER" --tail 20 || true
                 '''
             }
         }
@@ -180,9 +167,6 @@ pipeline {
                         spring-boot:run \
                         -Dspring-boot.run.arguments='--server.port=$APP_PORT --spring.datasource.url=jdbc:mysql://$MYSQL_CONTAINER:3306/$MYSQL_DATABASE --spring.datasource.username=$MYSQL_USER --spring.datasource.password=$MYSQL_PASS'"
 
-                    echo "Waiting for Spring Boot..."
-                    sleep 10
-
                     READY=0
                     for i in $(seq 1 12); do
                       STATUS=$(docker run --rm \
@@ -193,7 +177,7 @@ pipeline {
 
                       echo "Attempt $i/12 -> HTTP status: $STATUS"
 
-                      if echo "$STATUS" | grep -qE "200|302"; then
+                      if echo "$STATUS" | grep -qE "200|302|401|403"; then
                         READY=1
                         break
                       fi
@@ -202,7 +186,6 @@ pipeline {
                     done
 
                     if [ "$READY" -ne 1 ]; then
-                      echo "Application did not become ready. Container logs:"
                       docker logs "$APP_CONTAINER" --tail 200 || true
                       exit 1
                     fi
@@ -210,7 +193,7 @@ pipeline {
             }
         }
 
-        stage('ZAP DAST Scan') {
+        stage('DAST - OWASP ZAP') {
             steps {
                 catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
                     sh '''
@@ -232,111 +215,58 @@ pipeline {
             }
         }
 
-        stage('Security Dashboard') {
+        stage('Policy - OPA') {
             steps {
                 catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
                     sh '''
-                        mkdir -p reports/dashboard
+                        mkdir -p reports/opa
+                        mkdir -p policy
 
-                        TRIVY_HIGH=0
-                        TRIVY_MEDIUM=0
-                        TRIVY_CRITICAL=0
-                        ZAP_HIGH=0
-                        ZAP_MEDIUM=0
+                        cat > policy/security.rego <<'EOF'
+package security
 
-                        if [ -f reports/trivy/trivy-report.json ]; then
-                          TRIVY_CRITICAL=$(grep -o '"Severity":"CRITICAL"' reports/trivy/trivy-report.json | wc -l | tr -d ' ' || true)
-                          TRIVY_HIGH=$(grep -o '"Severity":"HIGH"' reports/trivy/trivy-report.json | wc -l | tr -d ' ' || true)
-                          TRIVY_MEDIUM=$(grep -o '"Severity":"MEDIUM"' reports/trivy/trivy-report.json | wc -l | tr -d ' ' || true)
-                        fi
+default allow = false
 
-                        if [ -f reports/zap/zap-report.json ]; then
-                          ZAP_HIGH=$(grep -o '"riskcode":"3"' reports/zap/zap-report.json | wc -l | tr -d ' ' || true)
-                          ZAP_MEDIUM=$(grep -o '"riskcode":"2"' reports/zap/zap-report.json | wc -l | tr -d ' ' || true)
-                        fi
+trivy_high_count := count([v |
+  some i
+  input.trivy.Results[i].Vulnerabilities[_].Severity == "HIGH"
+  v := 1
+])
 
-                        cat > reports/dashboard/index.html <<EOF
-<!DOCTYPE html>
-<html lang="fr">
-<head>
-  <meta charset="UTF-8">
-  <title>Security Dashboard</title>
-  <style>
-    body { font-family: Arial, sans-serif; margin: 30px; background: #f7f9fc; color: #222; }
-    h1 { margin-bottom: 8px; }
-    p { color: #555; }
-    .grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 16px; margin: 24px 0; }
-    .card { background: #fff; border-radius: 12px; padding: 20px; box-shadow: 0 2px 10px rgba(0,0,0,.08); text-align: center; }
-    .critical { border-top: 6px solid #6a1b9a; }
-    .high { border-top: 6px solid #d32f2f; }
-    .medium { border-top: 6px solid #f9a825; }
-    .num { font-size: 32px; font-weight: bold; margin-top: 10px; }
-    table { width: 100%; border-collapse: collapse; margin-top: 18px; background: #fff; }
-    th, td { border: 1px solid #ddd; padding: 12px; text-align: center; }
-    th { background: #263238; color: #fff; }
-    .links { margin-top: 20px; }
-    .links a { margin-right: 16px; text-decoration: none; color: #1565c0; }
-  </style>
-</head>
-<body>
-  <h1>Security Dashboard</h1>
-  <p>Vue synthese des vulnerabilites et alertes securite publiees par Jenkins.</p>
+trivy_critical_count := count([v |
+  some i
+  input.trivy.Results[i].Vulnerabilities[_].Severity == "CRITICAL"
+  v := 1
+])
 
-  <div class="grid">
-    <div class="card critical">
-      <div>Trivy Critical</div>
-      <div class="num">${TRIVY_CRITICAL}</div>
-    </div>
-    <div class="card high">
-      <div>Trivy High</div>
-      <div class="num">${TRIVY_HIGH}</div>
-    </div>
-    <div class="card medium">
-      <div>Trivy Medium</div>
-      <div class="num">${TRIVY_MEDIUM}</div>
-    </div>
-    <div class="card high">
-      <div>ZAP High</div>
-      <div class="num">${ZAP_HIGH}</div>
-    </div>
-    <div class="card medium">
-      <div>ZAP Medium</div>
-      <div class="num">${ZAP_MEDIUM}</div>
-    </div>
-  </div>
+zap_high_count := count([v |
+  some s
+  input.zap.site[s].alerts[_].riskcode == "3"
+  v := 1
+])
 
-  <table>
-    <thead>
-      <tr>
-        <th>Scanner</th>
-        <th>Critical</th>
-        <th>High</th>
-        <th>Medium</th>
-      </tr>
-    </thead>
-    <tbody>
-      <tr>
-        <td>Trivy</td>
-        <td>${TRIVY_CRITICAL}</td>
-        <td>${TRIVY_HIGH}</td>
-        <td>${TRIVY_MEDIUM}</td>
-      </tr>
-      <tr>
-        <td>OWASP ZAP</td>
-        <td>-</td>
-        <td>${ZAP_HIGH}</td>
-        <td>${ZAP_MEDIUM}</td>
-      </tr>
-    </tbody>
-  </table>
-
-  <div class="links">
-    <a href="../trivy/trivy-report.html">Ouvrir le rapport detaille Trivy</a>
-    <a href="../zap/zap-report.html">Ouvrir le rapport detaille ZAP</a>
-  </div>
-</body>
-</html>
+allow if {
+  trivy_critical_count == 0
+  zap_high_count == 0
+}
 EOF
+
+                        cat > reports/opa/input.json <<EOF
+{
+  "trivy": $(cat reports/trivy/trivy-report.json 2>/dev/null || echo '{}'),
+  "zap": $(cat reports/zap/zap-report.json 2>/dev/null || echo '{}')
+}
+EOF
+
+                        docker run --rm \
+                          --volumes-from jenkins \
+                          -w "$WORKSPACE" \
+                          openpolicyagent/opa:latest \
+                          eval \
+                          --format pretty \
+                          --data policy/security.rego \
+                          --input reports/opa/input.json \
+                          "data.security" > reports/opa/opa-result.txt || true
                     '''
                 }
             }
@@ -346,33 +276,6 @@ EOF
     post {
         always {
             archiveArtifacts artifacts: 'reports/**', allowEmptyArchive: true
-
-            publishHTML(target: [
-                allowMissing: true,
-                alwaysLinkToLastBuild: true,
-                keepAll: true,
-                reportDir: 'reports/dashboard',
-                reportFiles: 'index.html',
-                reportName: 'Security Dashboard'
-            ])
-
-            publishHTML(target: [
-                allowMissing: true,
-                alwaysLinkToLastBuild: true,
-                keepAll: true,
-                reportDir: 'reports/trivy',
-                reportFiles: 'trivy-report.html',
-                reportName: 'Trivy Report'
-            ])
-
-            publishHTML(target: [
-                allowMissing: true,
-                alwaysLinkToLastBuild: true,
-                keepAll: true,
-                reportDir: 'reports/zap',
-                reportFiles: 'zap-report.html',
-                reportName: 'ZAP Report'
-            ])
 
             sh '''
                 docker rm -f "$APP_CONTAINER" 2>/dev/null || true
@@ -386,7 +289,7 @@ EOF
         }
 
         unstable {
-            echo '⚠️ Pipeline termine, mais certains scans securite ont remonte des alertes non bloquantes'
+            echo '⚠️ Pipeline termine, mais certains controles ont remonte des alertes non bloquantes'
         }
 
         failure {
