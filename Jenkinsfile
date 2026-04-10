@@ -62,7 +62,7 @@ pipeline {
             }
         }
 
-        // ─── BRIQUE 2 : SCA ───────────────────────────────────────────────────
+    // ─── BRIQUE 2 : SCA ───────────────────────────────────────────────────
         stage('SCA - Trivy') {
             steps {
                 catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
@@ -72,26 +72,26 @@ pipeline {
 
                         docker run --rm \
                           --volumes-from jenkins \
+                          -w "$WORKSPACE" \
                           -v "$WORKSPACE/.trivycache:/root/.cache/trivy" \
-                          -v "$WORKSPACE/reports/trivy:/report" \
                           ghcr.io/aquasecurity/trivy:latest fs \
                           --scanners vuln \
                           --severity LOW,MEDIUM,HIGH,CRITICAL \
                           --format json \
-                          --output /report/trivy-report.json \
-                          "$WORKSPACE" || true
+                          --output reports/trivy/trivy-report.json \
+                          . || true
 
                         docker run --rm \
                           --volumes-from jenkins \
+                          -w "$WORKSPACE" \
                           -v "$WORKSPACE/.trivycache:/root/.cache/trivy" \
-                          -v "$WORKSPACE/reports/trivy:/report" \
                           ghcr.io/aquasecurity/trivy:latest fs \
                           --scanners vuln \
                           --severity LOW,MEDIUM,HIGH,CRITICAL \
                           --format template \
                           --template "@contrib/html.tpl" \
-                          --output /report/trivy-report.html \
-                          "$WORKSPACE" || true
+                          --output reports/trivy/trivy-report.html \
+                          . || true
                     '''
                 }
             }
