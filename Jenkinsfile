@@ -6,11 +6,13 @@ pipeline {
         timestamps()
         disableConcurrentBuilds()
         timeout(time: 15, unit: 'MINUTES') // Sécurité anti-freeze
-        buildDiscarder(logRotator(numToKeepStr: '5')) // Évite de saturer Jenkins
+        buildDiscarder(logRotator(numToKeepStr: '5')) // Évite de saturer l'espace disque de Jenkins
     }
 
     environment {
-        APP_PORT        = '8080'
+        // 🛠️ CORRECTION ICI : On expose l'application sur le port 8081 vers l'extérieur
+        // pour ne pas entrer en conflit avec le port 8080 de Jenkins lui-même.
+        APP_PORT        = '8081' 
         MYSQL_ROOT_PASS = 'root'
         MYSQL_DATABASE  = 'archivage_db'
         MYSQL_USER      = 'archivage_user'
@@ -25,7 +27,7 @@ pipeline {
             steps { checkout scm }
         }
 
-        // ⏱️ TEMPS PRÉVU : ~10 secondes (Multithread activé)
+        // ─── COMPILATION MULTITHREAD ──────────────────────────────────────────
         stage('Build & Package') {
             steps {
                 sh '''
@@ -38,7 +40,7 @@ pipeline {
             }
         }
 
-        // ⏱️ TEMPS PRÉVU : ~25 secondes (Tout tourne en même temps)
+        // ─── ANALYSES STATIQUES EN PARALLÈLE ──────────────────────────────────
         stage('Analyses Statiques (SAST/SCA)') {
             parallel {
                 stage('Secrets (Gitleaks)') {
@@ -60,7 +62,7 @@ pipeline {
                         catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
                             sh '''
                                 mkdir -p reports/trivy .trivycache
-                                # OPTIMISATION : Un seul scan JSON, on supprime le HTML inutile qui faisait planter
+                                # Uniquement la génération JSON pour Jenkins, évite les freezes
                                 docker run --rm --volumes-from jenkins -w "$WORKSPACE" \
                                   -v "$WORKSPACE/.trivycache:/root/.cache/trivy" \
                                   ghcr.io/aquasecurity/trivy:latest fs --scanners vuln \
@@ -109,20 +111,19 @@ pipeline {
             }
         }
 
-        // ⏱️ TEMPS PRÉVU : ~25 secondes
+        // ─── DÉPLOIEMENT DE L'INFRASTRUCTURE DE TEST ──────────────────────────
         stage('Deploy Infra & App') {
             steps {
                 sh '''
                     docker rm -f "$APP_CONTAINER" "$MYSQL_CONTAINER" 2>/dev/null || true
                     docker network inspect "$DOCKER_NETWORK" >/dev/null 2>&1 || docker network create "$DOCKER_NETWORK"
 
-                    # OPTIMISATION : Sleep réduit
                     docker run -d --name "$MYSQL_CONTAINER" --network "$DOCKER_NETWORK" \
                       -e MYSQL_ROOT_PASSWORD="$MYSQL_ROOT_PASS" -e MYSQL_DATABASE="$MYSQL_DATABASE" \
                       -e MYSQL_USER="$MYSQL_USER" -e MYSQL_PASSWORD="$MYSQL_PASS" mysql:8.0
                     sleep 10 
 
-                    # Lancement App optimisé
+                    # 🛠️ CORRECTION DU PORT ICI : On lie le port externe 8081 vers le 8080 interne
                     docker run -d --name "$APP_CONTAINER" --network "$DOCKER_NETWORK" \
                       --volumes-from jenkins --add-host=host.docker.internal:host-gateway \
                       -p "$APP_PORT:8080" maven:3.9.9-eclipse-temurin-17 \
@@ -131,8 +132,10 @@ pipeline {
                         spring-boot:run \
                         -Dspring-boot.run.arguments='--server.port=8080 --spring.datasource.url=jdbc:mysql://$MYSQL_CONTAINER:3306/$MYSQL_DATABASE --spring.datasource.username=$MYSQL_USER --spring.datasource.password=$MYSQL_PASS'"
 
+                    echo "Attente du démarrage..."
                     READY=0
                     for i in $(seq 1 12); do
+                      # Le Healthcheck attaque le port 8080 car il est lancé DEPUIS le réseau Docker
                       if docker run --rm --network "$DOCKER_NETWORK" curlimages/curl:8.7.1 -s -o /dev/null -w "%{http_code}" "http://$APP_CONTAINER:8080/" | grep -qE "200|302|401|403|404"; then
                         READY=1; break;
                       fi
@@ -148,7 +151,7 @@ pipeline {
             }
         }
 
-        // ⏱️ TEMPS PRÉVU : ~1 minute 15 max (Au lieu de 6 minutes !)
+        // ─── ANALYSES DYNAMIQUES EN PARALLÈLE ─────────────────────────────────
         stage('Analyses Dynamiques (Offensive)') {
             parallel {
                 stage('ZAP Baseline (Web)') {
@@ -156,7 +159,7 @@ pipeline {
                         catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
                             sh '''
                                 mkdir -p reports/zap
-                                # OPTIMISATION EXTRÊME : Ajout de "-m 1" pour limiter le scan ZAP à 1 minute MAXIMUM
+                                # ZAP attaque le port externe (8081) depuis Jenkins
                                 docker run --rm --user root --add-host=host.docker.internal:host-gateway \
                                   --volumes-from jenkins -v "$WORKSPACE/reports/zap:/zap/wrk:rw" \
                                   ghcr.io/zaproxy/zaproxy:stable zap-baseline.py \
@@ -173,6 +176,7 @@ pipeline {
                         catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
                             sh '''
                                 mkdir -p reports/nuclei
+                                # Nuclei attaque le port interne (8080) car il tourne dans le réseau Docker
                                 docker run --rm --network "$DOCKER_NETWORK" \
                                   --volumes-from jenkins -w "$WORKSPACE" \
                                   projectdiscovery/nuclei:latest \
@@ -186,6 +190,7 @@ pipeline {
             }
         }
 
+        // ─── GOUVERNANCE OPA ──────────────────────────────────────────────────
         stage('Policy - OPA') {
             steps {
                 catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
@@ -213,6 +218,7 @@ EOF
         }
     }
 
+    // ─── NETTOYAGE ET RAPPORTS ──────────────────────────────────────────────
     post {
         always {
             archiveArtifacts artifacts: 'reports/**', allowEmptyArchive: true
@@ -233,7 +239,7 @@ EOF
             '''
         }
         success { echo '✅ Pipeline DevSecOps terminé avec succès' }
-        unstable { echo '⚠️ Pipeline terminé — Alertes de sécurité détectées' }
+        unstable { echo '⚠️ Pipeline terminé — Alertes de sécurité détectées (non bloquantes)' }
         failure { echo '❌ Pipeline échoué' }
     }
 }
