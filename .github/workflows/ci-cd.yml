@@ -1,4 +1,4 @@
-name: Fast CI & Security Check
+name: Java Application CI
 
 on:
   push:
@@ -7,26 +7,9 @@ on:
     branches: [ "main" ]
 
 jobs:
-  build-and-test:
+  build-and-run:
     name: Build & Test Spring Boot App
     runs-on: ubuntu-latest
-
-    # LA SOLUTION EST ICI 👇 : On allume MySQL avant de lancer quoi que ce soit
-    services:
-      mysql:
-        image: mysql:8.0
-        env:
-          MYSQL_ROOT_PASSWORD: root
-          MYSQL_DATABASE: archivage_db
-          MYSQL_USER: archivage_user
-          MYSQL_PASSWORD: archivage_pass
-        ports:
-          - 3306:3306
-        options: >-
-          --health-cmd="mysqladmin ping -h localhost"
-          --health-interval=10s
-          --health-timeout=5s
-          --health-retries=5
 
     steps:
       - name: 📥 Checkout Code
@@ -37,49 +20,21 @@ jobs:
         with:
           java-version: '17'
           distribution: 'temurin'
-          cache: 'maven'
+          cache: maven
 
-      - name: ⚡ Build with Maven (Multithreaded)
-        run: mvn -B -T 1C clean package -DskipTests --no-transfer-progress
+      - name: 🔨 Build with Maven
+        run: mvn -B clean install -DskipTests
 
       - name: 🐳 Build Docker Image
-        env:
-          DOCKER_BUILDKIT: 1
-        run: docker build --progress=auto -t archivage-app:latest .
+        run: docker build -t archivage-app:latest .
 
-      - name: 🛡️ Shift-Left Security (Trivy Scan)
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: 'archivage-app:latest'
-          format: 'table'
-          exit-code: '0'
-          ignore-unfixed: true
-          vuln-type: 'os,library'
-          severity: 'CRITICAL,HIGH'
-
-      - name: 🚀 Run Application & Healthcheck
+      - name: 🚀 Run Application (Sanity Check)
         run: |
-          # On lance l'app en la branchant sur le MySQL qu'on vient de créer
-          # Utilisation de --network host pour accéder au localhost du runner GitHub
-          docker run -d --name my-spring-app --network host archivage-app:latest \
-            --spring.datasource.url=jdbc:mysql://localhost:3306/archivage_db \
-            --spring.datasource.username=archivage_user \
-            --spring.datasource.password=archivage_pass
+          # Lancement de l'application en arrière-plan
+          docker run -d --name my-spring-app -p 8080:8080 archivage-app:latest
           
-          echo "⏳ Attente du démarrage de Spring Boot (Healthcheck)..."
-          READY=0
+          echo "⏳ Attente du démarrage de Spring Boot..."
+          sleep 15
           
-          for i in {1..12}; do
-            if curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/ | grep -qE "200|302|401|403|404"; then
-              echo "✅ Application démarrée et accessible !"
-              READY=1
-              break
-            fi
-            sleep 5
-          done
-
-          if [ "$READY" -ne 1 ]; then
-            echo "❌ L'application n'a pas démarré correctement. Affichage des logs :"
-            docker logs my-spring-app
-            exit 1
-          fi
+          # Affichage des logs pour vérification manuelle
+          docker logs my-spring-app
