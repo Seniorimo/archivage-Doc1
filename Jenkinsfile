@@ -311,6 +311,14 @@ EOF
         always {
             archiveArtifacts artifacts: 'reports/**', allowEmptyArchive: true
 
+            // === AJOUT ICI ===
+            // Cette ligne permet au plugin Warnings Next Generation de lire le JSON de Trivy
+            recordIssues(
+                tools: [trivy(pattern: 'reports/trivy/trivy-report.json')],
+                name: 'Trivy Security Scan Warnings'
+            )
+            // =================
+
             publishHTML(target: [
                 allowMissing         : true,
                 alwaysLinkToLastBuild: true,
