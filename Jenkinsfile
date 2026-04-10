@@ -29,7 +29,7 @@ pipeline {
             steps {
                 catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
                     sh '''
-                        mkdir -p "$WORKSPACE/reports/gitleaks"
+                        mkdir -p reports/gitleaks
 
                         docker run --rm \
                           --volumes-from jenkins \
@@ -64,28 +64,30 @@ pipeline {
             steps {
                 catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
                     sh '''
-                        mkdir -p "$WORKSPACE/reports/trivy"
+                        mkdir -p reports/trivy
+                        mkdir -p .trivycache
 
                         docker run --rm \
                           --volumes-from jenkins \
-                          -v "$WORKSPACE/reports/trivy:/report" \
+                          -v "$WORKSPACE/.trivycache:/root/.cache/trivy" \
+                          -v "$WORKSPACE/reports/trivy:/work" \
                           ghcr.io/aquasecurity/trivy:latest fs \
                           --scanners vuln \
-                          --severity MEDIUM,HIGH,CRITICAL \
+                          --severity LOW,MEDIUM,HIGH,CRITICAL \
                           --format json \
-                          --output /report/trivy-report.json \
+                          --output /work/trivy-report.json \
                           "$WORKSPACE" || true
 
-                        docker run --rm \
-                          --volumes-from jenkins \
-                          -v "$WORKSPACE/reports/trivy:/report" \
-                          ghcr.io/aquasecurity/trivy:latest fs \
-                          --scanners vuln \
-                          --severity MEDIUM,HIGH,CRITICAL \
-                          --format template \
-                          --template "@contrib/html.tpl" \
-                          --output /report/trivy-report.html \
-                          "$WORKSPACE" || true
+                        if [ -f "$WORKSPACE/reports/trivy/trivy-report.json" ]; then
+                          docker run --rm \
+                            --volumes-from jenkins \
+                            -v "$WORKSPACE/reports/trivy:/work" \
+                            ghcr.io/aquasecurity/trivy:latest convert \
+                            --format template \
+                            --template "@/usr/local/share/trivy/templates/html.tpl" \
+                            --output /work/trivy-report.html \
+                            /work/trivy-report.json || true
+                        fi
                     '''
                 }
             }
@@ -95,7 +97,7 @@ pipeline {
             steps {
                 catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
                     sh '''
-                        mkdir -p "$WORKSPACE/reports/sbom"
+                        mkdir -p reports/sbom
 
                         docker run --rm \
                           --volumes-from jenkins \
@@ -106,7 +108,7 @@ pipeline {
                               -Dmaven.repo.local=/var/jenkins_home/.m2/repository \
                               org.cyclonedx:cyclonedx-maven-plugin:2.7.11:makeAggregateBom \
                               -DoutputFormat=all &&
-                            cp -f '$WORKSPACE/target/bom.xml'  '$WORKSPACE/reports/sbom/bom.xml' &&
+                            cp -f '$WORKSPACE/target/bom.xml' '$WORKSPACE/reports/sbom/bom.xml' &&
                             cp -f '$WORKSPACE/target/bom.json' '$WORKSPACE/reports/sbom/bom.json'
                           " || true
                     '''
@@ -212,7 +214,7 @@ pipeline {
             steps {
                 catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
                     sh '''
-                        mkdir -p "$WORKSPACE/reports/zap"
+                        mkdir -p reports/zap
 
                         docker run --rm \
                           --user root \
@@ -234,24 +236,26 @@ pipeline {
             steps {
                 catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
                     sh '''
-                        mkdir -p "$WORKSPACE/reports/dashboard"
+                        mkdir -p reports/dashboard
 
                         TRIVY_HIGH=0
                         TRIVY_MEDIUM=0
+                        TRIVY_CRITICAL=0
                         ZAP_HIGH=0
                         ZAP_MEDIUM=0
 
-                        if [ -f "$WORKSPACE/reports/trivy/trivy-report.json" ]; then
-                          TRIVY_HIGH=$(grep -o '"Severity":"HIGH"' "$WORKSPACE/reports/trivy/trivy-report.json" | wc -l | tr -d ' ' || true)
-                          TRIVY_MEDIUM=$(grep -o '"Severity":"MEDIUM"' "$WORKSPACE/reports/trivy/trivy-report.json" | wc -l | tr -d ' ' || true)
+                        if [ -f reports/trivy/trivy-report.json ]; then
+                          TRIVY_CRITICAL=$(grep -o '"Severity":"CRITICAL"' reports/trivy/trivy-report.json | wc -l | tr -d ' ' || true)
+                          TRIVY_HIGH=$(grep -o '"Severity":"HIGH"' reports/trivy/trivy-report.json | wc -l | tr -d ' ' || true)
+                          TRIVY_MEDIUM=$(grep -o '"Severity":"MEDIUM"' reports/trivy/trivy-report.json | wc -l | tr -d ' ' || true)
                         fi
 
-                        if [ -f "$WORKSPACE/reports/zap/zap-report.json" ]; then
-                          ZAP_HIGH=$(grep -o '"riskcode":"3"' "$WORKSPACE/reports/zap/zap-report.json" | wc -l | tr -d ' ' || true)
-                          ZAP_MEDIUM=$(grep -o '"riskcode":"2"' "$WORKSPACE/reports/zap/zap-report.json" | wc -l | tr -d ' ' || true)
+                        if [ -f reports/zap/zap-report.json ]; then
+                          ZAP_HIGH=$(grep -o '"riskcode":"3"' reports/zap/zap-report.json | wc -l | tr -d ' ' || true)
+                          ZAP_MEDIUM=$(grep -o '"riskcode":"2"' reports/zap/zap-report.json | wc -l | tr -d ' ' || true)
                         fi
 
-                        cat > "$WORKSPACE/reports/dashboard/index.html" <<EOF
+                        cat > reports/dashboard/index.html <<EOF
 <!DOCTYPE html>
 <html lang="fr">
 <head>
@@ -259,23 +263,30 @@ pipeline {
   <title>Security Dashboard</title>
   <style>
     body { font-family: Arial, sans-serif; margin: 30px; background: #f7f9fc; color: #222; }
-    h1 { margin-bottom: 10px; }
-    .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin: 20px 0; }
-    .card { background: white; border-radius: 10px; padding: 20px; box-shadow: 0 2px 8px rgba(0,0,0,.08); text-align: center; }
-    .num { font-size: 30px; font-weight: bold; margin-top: 8px; }
-    .high { border-top: 5px solid #d32f2f; }
-    .medium { border-top: 5px solid #f9a825; }
-    table { width: 100%; border-collapse: collapse; background: white; margin-top: 20px; }
+    h1 { margin-bottom: 8px; }
+    p { color: #555; }
+    .grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 16px; margin: 24px 0; }
+    .card { background: #fff; border-radius: 12px; padding: 20px; box-shadow: 0 2px 10px rgba(0,0,0,.08); text-align: center; }
+    .critical { border-top: 6px solid #6a1b9a; }
+    .high { border-top: 6px solid #d32f2f; }
+    .medium { border-top: 6px solid #f9a825; }
+    .num { font-size: 32px; font-weight: bold; margin-top: 10px; }
+    table { width: 100%; border-collapse: collapse; margin-top: 18px; background: #fff; }
     th, td { border: 1px solid #ddd; padding: 12px; text-align: center; }
-    th { background: #263238; color: white; }
-    .note { margin-top: 20px; color: #555; }
+    th { background: #263238; color: #fff; }
+    .links { margin-top: 20px; }
+    .links a { margin-right: 16px; text-decoration: none; color: #1565c0; }
   </style>
 </head>
 <body>
   <h1>Security Dashboard</h1>
-  <p>Vue synthese des vulnerabilites Medium et High publiees par Jenkins.</p>
+  <p>Vue synthese des vulnerabilites et alertes securite publiees par Jenkins.</p>
 
   <div class="grid">
+    <div class="card critical">
+      <div>Trivy Critical</div>
+      <div class="num">${TRIVY_CRITICAL}</div>
+    </div>
     <div class="card high">
       <div>Trivy High</div>
       <div class="num">${TRIVY_HIGH}</div>
@@ -298,6 +309,7 @@ pipeline {
     <thead>
       <tr>
         <th>Scanner</th>
+        <th>Critical</th>
         <th>High</th>
         <th>Medium</th>
       </tr>
@@ -305,18 +317,23 @@ pipeline {
     <tbody>
       <tr>
         <td>Trivy</td>
+        <td>${TRIVY_CRITICAL}</td>
         <td>${TRIVY_HIGH}</td>
         <td>${TRIVY_MEDIUM}</td>
       </tr>
       <tr>
         <td>OWASP ZAP</td>
+        <td>-</td>
         <td>${ZAP_HIGH}</td>
         <td>${ZAP_MEDIUM}</td>
       </tr>
     </tbody>
   </table>
 
-  <p class="note">Consultez aussi les rapports publies dans Jenkins : "Trivy Report" et "ZAP Report".</p>
+  <div class="links">
+    <a href="../trivy/trivy-report.html">Ouvrir le rapport detaille Trivy</a>
+    <a href="../zap/zap-report.html">Ouvrir le rapport detaille ZAP</a>
+  </div>
 </body>
 </html>
 EOF
@@ -331,30 +348,30 @@ EOF
             archiveArtifacts artifacts: 'reports/**', allowEmptyArchive: true
 
             publishHTML(target: [
-                reportName: 'Security Dashboard',
+                allowMissing: true,
+                alwaysLinkToLastBuild: true,
+                keepAll: true,
                 reportDir: 'reports/dashboard',
                 reportFiles: 'index.html',
-                keepAll: true,
-                alwaysLinkToLastBuild: true,
-                allowMissing: true
+                reportName: 'Security Dashboard'
             ])
 
             publishHTML(target: [
-                reportName: 'Trivy Report',
+                allowMissing: true,
+                alwaysLinkToLastBuild: true,
+                keepAll: true,
                 reportDir: 'reports/trivy',
                 reportFiles: 'trivy-report.html',
-                keepAll: true,
-                alwaysLinkToLastBuild: true,
-                allowMissing: true
+                reportName: 'Trivy Report'
             ])
 
             publishHTML(target: [
-                reportName: 'ZAP Report',
+                allowMissing: true,
+                alwaysLinkToLastBuild: true,
+                keepAll: true,
                 reportDir: 'reports/zap',
                 reportFiles: 'zap-report.html',
-                keepAll: true,
-                alwaysLinkToLastBuild: true,
-                allowMissing: true
+                reportName: 'ZAP Report'
             ])
 
             sh '''
@@ -369,7 +386,7 @@ EOF
         }
 
         unstable {
-            echo '⚠️ Pipeline termine, mais certains scans securite ont remonte des alertes ou des erreurs non bloquantes'
+            echo '⚠️ Pipeline termine, mais certains scans securite ont remonte des alertes non bloquantes'
         }
 
         failure {
