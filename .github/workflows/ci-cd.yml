@@ -1,4 +1,4 @@
-name: Java Application CI
+name: Fast CI & Sanity Check
 
 on:
   push:
@@ -20,21 +20,37 @@ jobs:
         with:
           java-version: '17'
           distribution: 'temurin'
-          cache: maven
+          cache: 'maven'
 
-      - name: 🔨 Build with Maven
-        run: mvn -B clean install -DskipTests
+      # Optimisation : Utilisation de -T 1C pour exploiter tous les cœurs du runner GitHub
+      - name: ⚡ Build with Maven
+        run: mvn -B -T 1C clean package -DskipTests
 
       - name: 🐳 Build Docker Image
         run: docker build -t archivage-app:latest .
 
-      - name: 🚀 Run Application (Sanity Check)
+      # Optimisation : Remplacement du 'sleep' aveugle par un vrai script de Healthcheck
+      - name: 🚀 Run Application & Healthcheck
         run: |
-          # إطلاق التطبيق في الخلفية
           docker run -d --name my-spring-app -p 8080:8080 archivage-app:latest
           
-          echo "⏳ نتسناو Spring Boot يشعل..."
-          sleep 15
+          echo "⏳ Attente du démarrage de Spring Boot (Healthcheck)..."
+          READY=0
           
-          # طباعة الـ Logs باش نشوفو واش التطبيق طالع بحال فـ البيسي عندك
-          docker logs my-spring-app
+          # Boucle de vérification dynamique (Max 60 secondes)
+          for i in {1..12}; do
+            # On test si le port 8080 répond (même avec une erreur 401/403, ça prouve que le serveur tourne)
+            if curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/ | grep -qE "200|302|401|403|404"; then
+              echo "✅ Application démarrée et accessible !"
+              READY=1
+              break
+            fi
+            sleep 5
+          done
+
+          # Si après 60s READY est toujours à 0, on affiche les logs et on force l'échec du job
+          if [ "$READY" -ne 1 ]; then
+            echo "❌ L'application n'a pas démarré correctement. Affichage des logs :"
+            docker logs my-spring-app
+            exit 1
+          fi
