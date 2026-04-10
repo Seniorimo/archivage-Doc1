@@ -4,7 +4,9 @@ pipeline {
     options {
         skipDefaultCheckout(true)
         timestamps()
-        disableConcurrentBuilds() // Évite les conflits si plusieurs builds se lancent
+        disableConcurrentBuilds()
+        timeout(time: 20, unit: 'MINUTES') // Sécurité : kill le job s'il freeze
+        buildDiscarder(logRotator(numToKeepStr: '10')) // Optimisation de l'espace disque Jenkins
     }
 
     environment {
@@ -26,15 +28,14 @@ pipeline {
             }
         }
 
-        // ─── BUILD CENTRALISÉ ─────────────────────────────────────────────────
-        // On compile une seule fois ici. Les briques SAST et SBOM utiliseront ces binaires.
+        // ─── BUILD CENTRALISÉ & MULTITHREADÉ ──────────────────────────────────
         stage('Build & Package') {
             steps {
                 sh '''
                     docker run --rm \
                       --volumes-from jenkins \
                       maven:3.9.9-eclipse-temurin-17 \
-                      mvn -B \
+                      mvn -B -T 1C \
                         -f "$WORKSPACE/pom.xml" \
                         -Dmaven.repo.local=/var/jenkins_home/.m2/repository \
                         clean package -DskipTests
@@ -42,13 +43,11 @@ pipeline {
             }
         }
 
-        // ─── EXÉCUTION PARALLÈLE DES SCANS STATIQUES ──────────────────────────
-        // Ces 4 briques tournent en même temps pour un gain de performance massif
-        stage('Analyses de Sécurité (Static)') {
+        // ─── PARALLÉLISATION 1 : SCANS STATIQUES ──────────────────────────────
+        stage('Analyses Statiques (SAST/SCA)') {
             parallel {
                 
-                // ─── BRIQUE 1 : SECRETS (Gitleaks) -> Cible: Code & Git
-                stage('Secrets') {
+                stage('Secrets (Gitleaks)') {
                     steps {
                         catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
                             sh '''
@@ -62,22 +61,18 @@ pipeline {
                     }
                 }
 
-                // ─── BRIQUE 2 : SCA (Trivy) -> Cible: Dépendances (pom.xml)
-                stage('SCA') {
+                stage('SCA (Trivy)') {
                     steps {
                         catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
                             sh '''
-                                mkdir -p reports/trivy
-                                mkdir -p .trivycache
+                                mkdir -p reports/trivy .trivycache
                                 
-                                # Génération JSON pour Jenkins/OPA
                                 docker run --rm --volumes-from jenkins -w "$WORKSPACE" \
                                   -v "$WORKSPACE/.trivycache:/root/.cache/trivy" \
                                   ghcr.io/aquasecurity/trivy:latest fs --scanners vuln \
                                   --severity LOW,MEDIUM,HIGH,CRITICAL --format json \
                                   --output reports/trivy/trivy-report.json . || true
 
-                                # Génération HTML pour l'archivage
                                 docker run --rm --volumes-from jenkins -w "$WORKSPACE" \
                                   -v "$WORKSPACE/.trivycache:/root/.cache/trivy" \
                                   ghcr.io/aquasecurity/trivy:latest fs --scanners vuln \
@@ -89,15 +84,14 @@ pipeline {
                     }
                 }
 
-                // ─── BRIQUE 3 : SAST (SonarQube) -> Cible: Code source Java
-                stage('SAST') {
+                stage('SAST (SonarQube)') {
                     steps {
                         withCredentials([string(credentialsId: 'sonar-token', variable: 'SONAR_TOKEN')]) {
                             sh '''
                                 docker run --rm --volumes-from jenkins \
                                   --add-host=host.docker.internal:host-gateway \
                                   maven:3.9.9-eclipse-temurin-17 \
-                                  sh -lc "mvn -B -f '$WORKSPACE/pom.xml' \
+                                  sh -lc "mvn -B -T 1C -f '$WORKSPACE/pom.xml' \
                                     -Dmaven.repo.local=/var/jenkins_home/.m2/repository \
                                     org.sonarsource.scanner.maven:sonar-maven-plugin:4.0.0.4121:sonar \
                                     -Dsonar.projectKey=archivage-Doc \
@@ -109,15 +103,14 @@ pipeline {
                     }
                 }
 
-                // ─── BRIQUE 4 : SBOM (CycloneDX) -> Cible: Conformité / Inventaire
-                stage('SBOM') {
+                stage('SBOM (CycloneDX)') {
                     steps {
                         catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
                             sh '''
                                 mkdir -p reports/sbom
                                 docker run --rm --volumes-from jenkins \
                                   maven:3.9.9-eclipse-temurin-17 \
-                                  sh -lc "mvn -B -f '$WORKSPACE/pom.xml' \
+                                  sh -lc "mvn -B -T 1C -f '$WORKSPACE/pom.xml' \
                                     -Dmaven.repo.local=/var/jenkins_home/.m2/repository \
                                     org.cyclonedx:cyclonedx-maven-plugin:2.7.11:makeAggregateBom \
                                     -DoutputFormat=all && \
@@ -130,21 +123,18 @@ pipeline {
             }
         }
 
-        // ─── DÉPLOIEMENT ENVIRONNEMENT DE TEST ────────────────────────────────
+        // ─── DÉPLOIEMENT ÉPHÉMÈRE ─────────────────────────────────────────────
         stage('Deploy Infra & App') {
             steps {
                 sh '''
-                    # Nettoyage préalable
                     docker rm -f "$APP_CONTAINER" "$MYSQL_CONTAINER" 2>/dev/null || true
                     docker network inspect "$DOCKER_NETWORK" >/dev/null 2>&1 || docker network create "$DOCKER_NETWORK"
 
-                    # Lancement MySQL
                     docker run -d --name "$MYSQL_CONTAINER" --network "$DOCKER_NETWORK" \
                       -e MYSQL_ROOT_PASSWORD="$MYSQL_ROOT_PASS" -e MYSQL_DATABASE="$MYSQL_DATABASE" \
                       -e MYSQL_USER="$MYSQL_USER" -e MYSQL_PASSWORD="$MYSQL_PASS" mysql:8.0
-                    sleep 20 # Attente raccourcie, MySQL 8.0 met un peu de temps au premier boot
+                    sleep 20 
 
-                    # Lancement App
                     docker run -d --name "$APP_CONTAINER" --network "$DOCKER_NETWORK" \
                       --volumes-from jenkins --add-host=host.docker.internal:host-gateway \
                       -p "$APP_PORT:$APP_PORT" maven:3.9.9-eclipse-temurin-17 \
@@ -153,8 +143,7 @@ pipeline {
                         spring-boot:run \
                         -Dspring-boot.run.arguments='--server.port=$APP_PORT --spring.datasource.url=jdbc:mysql://$MYSQL_CONTAINER:3306/$MYSQL_DATABASE --spring.datasource.username=$MYSQL_USER --spring.datasource.password=$MYSQL_PASS'"
 
-                    # Healthcheck avec Timeout
-                    echo "En attente du démarrage de l'application..."
+                    echo "Attente du démarrage..."
                     READY=0
                     for i in $(seq 1 10); do
                       if docker run --rm --network "$DOCKER_NETWORK" curlimages/curl:8.7.1 -s -o /dev/null -w "%{http_code}" "http://$APP_CONTAINER:$APP_PORT/" | grep -qE "200|302|401|403"; then
@@ -164,7 +153,7 @@ pipeline {
                     done
 
                     if [ "$READY" -ne 1 ]; then
-                      echo "Échec du démarrage. Logs:"
+                      echo "Échec du démarrage."
                       docker logs "$APP_CONTAINER" --tail 100
                       exit 1
                     fi
@@ -172,23 +161,60 @@ pipeline {
             }
         }
 
-        // ─── BRIQUE 5 : DAST (OWASP ZAP) -> Cible: Application Runtime ────────
-        stage('DAST - OWASP ZAP') {
-            steps {
-                catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
-                    sh '''
-                        mkdir -p reports/zap
-                        docker run --rm --user root --add-host=host.docker.internal:host-gateway \
-                          --volumes-from jenkins -v "$WORKSPACE/reports/zap:/zap/wrk:rw" \
-                          ghcr.io/zaproxy/zaproxy:stable zap-baseline.py \
-                          -t "http://host.docker.internal:$APP_PORT" \
-                          -r zap-report.html -J zap-report.json -I || true
-                    '''
+        // ─── PARALLÉLISATION 2 : OFFENSIVE SECURITY (DAST & PENTEST) ──────────
+        stage('Analyses Dynamiques (Offensive)') {
+            parallel {
+                
+                stage('ZAP Baseline (Web)') {
+                    steps {
+                        catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
+                            sh '''
+                                mkdir -p reports/zap
+                                docker run --rm --user root --add-host=host.docker.internal:host-gateway \
+                                  --volumes-from jenkins -v "$WORKSPACE/reports/zap:/zap/wrk:rw" \
+                                  ghcr.io/zaproxy/zaproxy:stable zap-baseline.py \
+                                  -t "http://host.docker.internal:$APP_PORT" \
+                                  -r zap-baseline-report.html -J zap-baseline-report.json -I || true
+                            '''
+                        }
+                    }
+                }
+
+                stage('ZAP API Fuzzing') {
+                    steps {
+                        catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
+                            sh '''
+                                mkdir -p reports/zap
+                                # Note: Assurez-vous que l'endpoint v3/api-docs est actif via springdoc-openapi
+                                docker run --rm --user root --add-host=host.docker.internal:host-gateway \
+                                  --volumes-from jenkins -v "$WORKSPACE/reports/zap:/zap/wrk:rw" \
+                                  ghcr.io/zaproxy/zaproxy:stable zap-api-scan.py \
+                                  -t "http://host.docker.internal:$APP_PORT/v3/api-docs" -f openapi \
+                                  -r zap-api-report.html -J zap-api-report.json -I || true
+                            '''
+                        }
+                    }
+                }
+
+                stage('Nuclei (Misconfigs & CVEs)') {
+                    steps {
+                        catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
+                            sh '''
+                                mkdir -p reports/nuclei
+                                docker run --rm --network "$DOCKER_NETWORK" \
+                                  --volumes-from jenkins -w "$WORKSPACE" \
+                                  projectdiscovery/nuclei:latest \
+                                  -u "http://$APP_CONTAINER:$APP_PORT" \
+                                  -t cves,exposures,misconfiguration,vulnerabilities \
+                                  -je reports/nuclei/nuclei-report.json || true
+                            '''
+                        }
+                    }
                 }
             }
         }
 
-        // ─── BRIQUE 6 : POLICY (OPA) -> Cible: Résultats des scans ────────────
+        // ─── GOUVERNANCE : ÉVALUATION DES RÉSULTATS PAR OPA ───────────────────
         stage('Policy - OPA') {
             steps {
                 catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
@@ -198,15 +224,23 @@ pipeline {
                         cat > policy/security.rego <<'EOF'
 package security
 default allow = false
+
 trivy_critical_count := count([v | some i; input.trivy.Results[i].Vulnerabilities[_].Severity == "CRITICAL"; v := 1])
-zap_high_count := count([v | some s; input.zap.site[s].alerts[_].riskcode == "3"; v := 1])
-allow if { trivy_critical_count == 0; zap_high_count == 0 }
+zap_high_count := count([v | some s; input.zap_web.site[s].alerts[_].riskcode == "3"; v := 1])
+nuclei_critical_count := count([v | some i; input.nuclei[i].info.severity == "critical"; v := 1])
+
+allow if { 
+  trivy_critical_count == 0; 
+  zap_high_count == 0;
+  nuclei_critical_count == 0
+}
 EOF
 
                         TRIVY_JSON=$(cat reports/trivy/trivy-report.json 2>/dev/null || echo '{}')
-                        ZAP_JSON=$(cat reports/zap/zap-report.json 2>/dev/null || echo '{}')
+                        ZAP_WEB_JSON=$(cat reports/zap/zap-baseline-report.json 2>/dev/null || echo '{}')
+                        NUCLEI_JSON=$(cat reports/nuclei/nuclei-report.json 2>/dev/null || echo '[]')
                         
-                        printf '{"trivy": %s, "zap": %s}' "$TRIVY_JSON" "$ZAP_JSON" > reports/opa/input.json
+                        printf '{"trivy": %s, "zap_web": %s, "nuclei": %s}' "$TRIVY_JSON" "$ZAP_WEB_JSON" "$NUCLEI_JSON" > reports/opa/input.json
 
                         docker run --rm --volumes-from jenkins -w "$WORKSPACE" openpolicyagent/opa:latest eval \
                           --format pretty --data policy/security.rego --input reports/opa/input.json "data.security" > reports/opa/opa-result.txt 2>&1 || true
@@ -219,7 +253,7 @@ EOF
         }
     }
 
-    // ─── POST ACTIONS : ARCHIVAGE & NETTOYAGE ─────────────────────────────────
+    // ─── POST ACTIONS : NETTOYAGE & PUBLICATION ───────────────────────────────
     post {
         always {
             archiveArtifacts artifacts: 'reports/**', allowEmptyArchive: true
@@ -236,17 +270,21 @@ EOF
 
             publishHTML(target: [
                 allowMissing: true, alwaysLinkToLastBuild: true, keepAll: true,
-                reportDir: 'reports/zap', reportFiles: 'zap-report.html', reportName: 'ZAP DAST Report'
+                reportDir: 'reports/zap', reportFiles: 'zap-baseline-report.html', reportName: 'ZAP Web Report'
+            ])
+            
+            publishHTML(target: [
+                allowMissing: true, alwaysLinkToLastBuild: true, keepAll: true,
+                reportDir: 'reports/zap', reportFiles: 'zap-api-report.html', reportName: 'ZAP API Report'
             ])
 
-            // Nettoyage systématique de l'environnement de test
             sh '''
                 docker rm -f "$APP_CONTAINER" "$MYSQL_CONTAINER" 2>/dev/null || true
                 docker network rm "$DOCKER_NETWORK" 2>/dev/null || true
             '''
         }
         success { echo '✅ Pipeline DevSecOps terminé avec succès' }
-        unstable { echo '⚠️ Pipeline terminé — certaines alertes de sécurité sont remontées' }
-        failure { echo '❌ Pipeline échoué — vérifier les logs' }
+        unstable { echo '⚠️ Pipeline terminé — Alertes de sécurité détectées (non-bloquantes)' }
+        failure { echo '❌ Pipeline échoué — Vérifiez la console Jenkins' }
     }
 }
