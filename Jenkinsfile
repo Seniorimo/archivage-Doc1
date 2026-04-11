@@ -5,7 +5,7 @@ pipeline {
         skipDefaultCheckout(true)
         timestamps()
         disableConcurrentBuilds()
-        timeout(time: 10, unit: 'MINUTES')
+        timeout(time: 15, unit: 'MINUTES')
         buildDiscarder(logRotator(numToKeepStr: '5'))
     }
 
@@ -27,8 +27,6 @@ pipeline {
 
         stage('Build & Package') {
             steps {
-                // Le #!/bin/bash + set +x cache la commande Docker de la console
-                // Le mvn -q rend Maven 100% silencieux (sauf s'il y a une erreur Java)
                 sh '''#!/bin/bash
                     set +x
                     echo "⚙️ [1/5] Compilation du code (Maven)..."
@@ -114,10 +112,20 @@ pipeline {
                     docker rm -f "$APP_CONTAINER" "$MYSQL_CONTAINER" 2>/dev/null || true
                     docker network inspect "$DOCKER_NETWORK" >/dev/null 2>&1 || docker network create "$DOCKER_NETWORK" > /dev/null
 
+                    # Lancement de MySQL
                     docker run -d --name "$MYSQL_CONTAINER" --network "$DOCKER_NETWORK" -e MYSQL_ROOT_PASSWORD="$MYSQL_ROOT_PASS" \
                       -e MYSQL_DATABASE="$MYSQL_DATABASE" -e MYSQL_USER="$MYSQL_USER" -e MYSQL_PASSWORD="$MYSQL_PASS" mysql:8.0 > /dev/null
-                    sleep 5 
+                    
+                    # 🛡️ CORRECTION : Smart Wait pour MySQL
+                    echo "⏳ Initialisation de la base de données..."
+                    for i in $(seq 1 20); do
+                      if docker exec "$MYSQL_CONTAINER" mysqladmin ping -h localhost -u"$MYSQL_USER" -p"$MYSQL_PASS" > /dev/null 2>&1; then
+                        break
+                      fi
+                      sleep 2
+                    done
 
+                    # Lancement de Spring Boot
                     docker run -d --name "$APP_CONTAINER" --network "$DOCKER_NETWORK" --volumes-from jenkins \
                       --add-host=host.docker.internal:host-gateway -p "$APP_PORT:8080" maven:3.9.9-eclipse-temurin-17 \
                       sh -lc "mvn -q -B -f '$WORKSPACE/pom.xml' -Dmaven.repo.local=/var/jenkins_home/.m2/repository \
@@ -125,8 +133,9 @@ pipeline {
                       --spring.datasource.url=jdbc:mysql://$MYSQL_CONTAINER:3306/$MYSQL_DATABASE \
                       --spring.datasource.username=$MYSQL_USER --spring.datasource.password=$MYSQL_PASS'" > /dev/null
 
+                    echo "⏳ Démarrage de l'application..."
                     READY=0
-                    for i in $(seq 1 12); do
+                    for i in $(seq 1 15); do
                       if docker run --rm --network "$DOCKER_NETWORK" curlimages/curl:8.7.1 -s -o /dev/null -w "%{http_code}" "http://$APP_CONTAINER:8080/" | grep -qE "200|302|401|403|404"; then
                         READY=1; break;
                       fi
