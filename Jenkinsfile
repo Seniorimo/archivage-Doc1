@@ -50,7 +50,7 @@ pipeline {
         // Vérifiez avec : docker inspect <jenkins-container> | grep -A5 Mounts
         // Ex: -v /opt/jenkins:/var/jenkins_home  → HOST_JH = '/opt/jenkins'
         //     -v /var/jenkins_home:/var/jenkins_home → HOST_JH = '/var/jenkins_home'
-        HOST_JH = '/var/jenkins_home'
+        HOST_JH = '/var/lib/docker/volumes/jenkins_home/_data'
     }
 
     stages {
