@@ -2,37 +2,23 @@ pipeline {
     agent any
 
     options {
-        skipDefaultCheckout(true)
         timestamps()
-        disableConcurrentBuilds()
         timeout(time: 60, unit: 'MINUTES')
+        disableConcurrentBuilds()
     }
 
     environment {
-        APP_PORT         = '8081'
-        MYSQL_ROOT_PASS  = 'root'
-        MYSQL_DATABASE   = 'archivage_db'
-        MYSQL_USER       = 'archivage_user'
-        MYSQL_PASS       = 'archivage_pass'
-        DOCKER_NETWORK   = 'archivage-net'
-        MYSQL_CONTAINER  = 'mysql-archivage'
-        APP_CONTAINER    = 'app-archivage'
-
-        SONAR_HOST_URL    = 'http://host.docker.internal:9000'
-        SONAR_PROJECT_KEY = 'archivage-Doc'
-
-        MAVEN_IMAGE     = 'maven:3.9.9-eclipse-temurin-17'
-        JRE_IMAGE       = 'eclipse-temurin:17-jre'
-        MYSQL_IMAGE     = 'mysql:8.0'
-        CURL_IMAGE      = 'curlimages/curl:8.7.1'
-        GITLEAKS_IMAGE  = 'zricethezav/gitleaks:latest'
-        TRIVY_IMAGE     = 'ghcr.io/aquasecurity/trivy:latest'
-        ZAP_IMAGE       = 'ghcr.io/zaproxy/zaproxy:stable'
-        OPA_IMAGE       = 'openpolicyagent/opa:latest'
+        APP_NAME        = 'archivage-Doc'
+        APP_CONTAINER   = 'app-archivage'
+        MYSQL_CONTAINER = 'mysql-archivage'
+        NETWORK_NAME    = 'archivage-net'
+        APP_PORT        = '8081'
+        WORKDIR         = "${env.WORKSPACE}"
+        MAVEN_REPO      = '/var/jenkins_home/.m2/repository'
+        TRIVY_CACHE     = "${env.WORKSPACE}/.trivycache"
     }
 
     stages {
-
         stage('Checkout') {
             steps {
                 checkout scm
@@ -42,8 +28,24 @@ pipeline {
         stage('Prepare Workspace') {
             steps {
                 sh '''
+                    set -eux
+
+                    rm -rf reports .trivycache policy .jarpath
                     mkdir -p reports/gitleaks reports/trivy reports/sbom reports/zap reports/opa .trivycache policy
-                    docker network inspect "$DOCKER_NETWORK" >/dev/null 2>&1 || docker network create "$DOCKER_NETWORK"
+
+                    docker network inspect "$NETWORK_NAME" >/dev/null 2>&1 || docker network create "$NETWORK_NAME"
+
+                    cat > policy/security-gate.rego <<'REGO'
+                    package security
+
+                    default allow := false
+
+                    allow if {
+                      count(input.gitleaks) == 0
+                      input.trivy.critical == 0
+                      input.zap.high == 0
+                    }
+                    REGO
                 '''
             }
         }
@@ -51,35 +53,39 @@ pipeline {
         stage('Build & Package') {
             steps {
                 sh '''
+                    set -eux
+
                     docker run --rm \
                       --volumes-from jenkins \
-                      -w "$WORKSPACE" \
-                      "$MAVEN_IMAGE" \
-                      sh -lc "mvn -B -f '$WORKSPACE/pom.xml' -Dmaven.repo.local=/var/jenkins_home/.m2/repository clean package -DskipTests"
+                      -w "$WORKDIR" \
+                      maven:3.9.9-eclipse-temurin-17 \
+                      sh -lc "mvn -B -f '$WORKDIR/pom.xml' -Dmaven.repo.local='$MAVEN_REPO' clean package -DskipTests"
 
-                    JAR_PATH=$(find "$WORKSPACE/target" -maxdepth 1 -type f -name "*.jar" ! -name "*.original" | head -n 1)
-                    echo "JAR_PATH=$JAR_PATH"
-                    test -n "$JAR_PATH"
+                    JARPATH=$(find "$WORKDIR/target" -maxdepth 1 -type f -name "*.jar" ! -name "*.original" | head -n 1)
+                    echo "JARPATH=$JARPATH"
+                    test -n "$JARPATH"
+                    echo "$JARPATH" > "$WORKDIR/.jarpath"
                 '''
             }
         }
 
         stage('Secrets - Gitleaks') {
             steps {
-                catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
                     sh '''
+                        set -eux
+
                         docker run --rm \
                           --volumes-from jenkins \
-                          -w "$WORKSPACE" \
-                          "$GITLEAKS_IMAGE" \
-                          detect \
+                          -w "$WORKDIR" \
+                          zricethezav/gitleaks:latest detect \
                           --source . \
                           --log-opts="--all" \
                           --report-format json \
                           --report-path reports/gitleaks/gitleaks-report.json \
-                          --exit-code 0 || true
+                          --exit-code 0
 
-                        test -s reports/gitleaks/gitleaks-report.json || echo '[]' > reports/gitleaks/gitleaks-report.json
+                        test -s reports/gitleaks/gitleaks-report.json || echo "[]" > reports/gitleaks/gitleaks-report.json
                     '''
                 }
             }
@@ -87,13 +93,16 @@ pipeline {
 
         stage('SCA - Trivy FS') {
             steps {
-                catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
                     sh '''
+                        set -eux
+
                         docker run --rm \
                           --volumes-from jenkins \
-                          -w "$WORKSPACE" \
-                          -v "$WORKSPACE/.trivycache:/root/.cache/trivy" \
-                          "$TRIVY_IMAGE" fs \
+                          -w "$WORKDIR" \
+                          -v "$TRIVY_CACHE:/root/.cache/trivy" \
+                          ghcr.io/aquasecurity/trivy:latest fs \
+                          --timeout 15m \
                           --scanners vuln \
                           --severity LOW,MEDIUM,HIGH,CRITICAL \
                           --format json \
@@ -108,46 +117,47 @@ pipeline {
 
         stage('SAST - SonarQube') {
             steps {
-                catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
-                    withCredentials([string(credentialsId: 'sonar-token', variable: 'SONAR_TOKEN')]) {
-                        sh '''
-                            test -d "$WORKSPACE/target/classes"
-                            test -n "$SONAR_TOKEN"
+                withCredentials([string(credentialsId: 'sonarqube-token', variable: 'SONAR_TOKEN')]) {
+                    sh '''
+                        set -eux
 
-                            docker run --rm \
-                              --volumes-from jenkins \
-                              --add-host=host.docker.internal:host-gateway \
-                              -w "$WORKSPACE" \
-                              "$MAVEN_IMAGE" \
-                              sh -lc "mvn -B \
-                                -f '$WORKSPACE/pom.xml' \
-                                -Dmaven.repo.local=/var/jenkins_home/.m2/repository \
-                                org.sonarsource.scanner.maven:sonar-maven-plugin:4.0.0.4121:sonar \
-                                -DskipTests \
-                                -Dsonar.projectKey=$SONAR_PROJECT_KEY \
-                                -Dsonar.host.url=$SONAR_HOST_URL \
-                                -Dsonar.login=$SONAR_TOKEN \
-                                -Dsonar.java.binaries=target/classes \
-                                -Dsonar.qualitygate.wait=false" || true
-                        '''
-                    }
+                        test -d "$WORKDIR/target/classes"
+                        test -f "$WORKDIR/.jarpath"
+
+                        docker run --rm \
+                          --volumes-from jenkins \
+                          --add-host=host.docker.internal:host-gateway \
+                          -w "$WORKDIR" \
+                          maven:3.9.9-eclipse-temurin-17 \
+                          sh -lc "mvn -B -f '$WORKDIR/pom.xml' \
+                            -Dmaven.repo.local='$MAVEN_REPO' \
+                            org.sonarsource.scanner.maven:sonar-maven-plugin:4.0.0.4121:sonar \
+                            -DskipTests \
+                            -Dsonar.projectKey='$APP_NAME' \
+                            -Dsonar.host.url='http://host.docker.internal:9000' \
+                            -Dsonar.login='$SONAR_TOKEN' \
+                            -Dsonar.java.binaries='target/classes' \
+                            -Dsonar.qualitygate.wait=false"
+                    '''
                 }
             }
         }
 
         stage('SBOM - CycloneDX') {
             steps {
-                catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
                     sh '''
+                        set -eux
+
                         docker run --rm \
                           --volumes-from jenkins \
-                          -w "$WORKSPACE" \
-                          "$MAVEN_IMAGE" \
-                          sh -lc "mvn -B -f '$WORKSPACE/pom.xml' -Dmaven.repo.local=/var/jenkins_home/.m2/repository org.cyclonedx:cyclonedx-maven-plugin:2.7.11:makeAggregateBom -DoutputFormat=all" || true
+                          -w "$WORKDIR" \
+                          maven:3.9.9-eclipse-temurin-17 \
+                          sh -lc "mvn -B -f '$WORKDIR/pom.xml' -Dmaven.repo.local='$MAVEN_REPO' org.cyclonedx:cyclonedx-maven-plugin:2.7.11:makeAggregateBom -DoutputFormat=all"
 
-                        test -f "$WORKSPACE/target/bom.xml"  && cp -f "$WORKSPACE/target/bom.xml"  "$WORKSPACE/reports/sbom/bom.xml"  || true
-                        test -f "$WORKSPACE/target/bom.json" && cp -f "$WORKSPACE/target/bom.json" "$WORKSPACE/reports/sbom/bom.json" || true
-                        test -s reports/sbom/bom.json || echo '{"components":[]}' > reports/sbom/bom.json
+                        test -f "$WORKDIR/target/bom.xml" && cp -f "$WORKDIR/target/bom.xml" "$WORKDIR/reports/sbom/bom.xml"
+                        test -f "$WORKDIR/target/bom.json" && cp -f "$WORKDIR/target/bom.json" "$WORKDIR/reports/sbom/bom.json"
+                        test -s reports/sbom/bom.json
                     '''
                 }
             }
@@ -156,35 +166,31 @@ pipeline {
         stage('Deploy MySQL') {
             steps {
                 sh '''
-                    docker rm -f "$MYSQL_CONTAINER" 2>/dev/null || true
+                    set -eux
+
+                    docker rm -f "$MYSQL_CONTAINER" >/dev/null 2>&1 || true
 
                     docker run -d \
                       --name "$MYSQL_CONTAINER" \
-                      --network "$DOCKER_NETWORK" \
-                      -e MYSQL_ROOT_PASSWORD="$MYSQL_ROOT_PASS" \
-                      -e MYSQL_DATABASE="$MYSQL_DATABASE" \
-                      -e MYSQL_USER="$MYSQL_USER" \
-                      -e MYSQL_PASSWORD="$MYSQL_PASS" \
-                      "$MYSQL_IMAGE"
+                      --network "$NETWORK_NAME" \
+                      -e MYSQL_ROOT_PASSWORD=root \
+                      -e MYSQL_DATABASE=archivagedb \
+                      -e MYSQL_USER=archivageuser \
+                      -e MYSQL_PASSWORD=archivagepass \
+                      mysql:8.0
 
                     READY=0
                     for i in $(seq 1 30); do
-                        if docker run --rm \
-                          --network "$DOCKER_NETWORK" \
-                          "$MYSQL_IMAGE" \
-                          mysqladmin ping -h"$MYSQL_CONTAINER" -uroot -p"$MYSQL_ROOT_PASS" --silent >/dev/null 2>&1; then
-                            READY=1
-                            break
-                        fi
-                        echo "Waiting for MySQL ($i/30)..."
-                        sleep 5
+                      if docker run --rm --network "$NETWORK_NAME" mysql:8.0 \
+                        mysqladmin ping -h"$MYSQL_CONTAINER" -uroot -proot --silent; then
+                        READY=1
+                        break
+                      fi
+                      echo "Waiting for MySQL ($i/30)..."
+                      sleep 5
                     done
 
-                    if [ "$READY" -ne 1 ]; then
-                        echo "MySQL did not become ready"
-                        docker logs "$MYSQL_CONTAINER" --tail 100 || true
-                        exit 1
-                    fi
+                    test "$READY" -eq 1
                 '''
             }
         }
@@ -192,76 +198,60 @@ pipeline {
         stage('Deploy App') {
             steps {
                 sh '''
-                    docker rm -f "$APP_CONTAINER" 2>/dev/null || true
+                    set -eux
 
-                    JAR_PATH=$(find "$WORKSPACE/target" -maxdepth 1 -type f -name "*.jar" ! -name "*.original" | head -n 1)
-                    echo "JAR_PATH=$JAR_PATH"
-                    test -n "$JAR_PATH"
+                    docker rm -f "$APP_CONTAINER" >/dev/null 2>&1 || true
+
+                    JARPATH=$(cat "$WORKDIR/.jarpath")
+                    test -n "$JARPATH"
+                    test -f "$JARPATH"
 
                     docker run -d \
                       --name "$APP_CONTAINER" \
-                      --network "$DOCKER_NETWORK" \
+                      --network "$NETWORK_NAME" \
                       --volumes-from jenkins \
-                      -w "$WORKSPACE" \
-                      -p "$APP_PORT:$APP_PORT" \
-                      "$JRE_IMAGE" \
-                      sh -lc "java -jar '$JAR_PATH' --server.port=$APP_PORT --spring.datasource.url=jdbc:mysql://$MYSQL_CONTAINER:3306/$MYSQL_DATABASE --spring.datasource.username=$MYSQL_USER --spring.datasource.password=$MYSQL_PASS"
+                      -w "$WORKDIR" \
+                      eclipse-temurin:17-jre \
+                      sh -lc "java -jar '$JARPATH' \
+                        --server.port=$APP_PORT \
+                        --spring.datasource.url=jdbc:mysql://$MYSQL_CONTAINER:3306/archivagedb \
+                        --spring.datasource.username=archivageuser \
+                        --spring.datasource.password=archivagepass"
 
                     READY=0
-                    for i in $(seq 1 18); do
-                        STATUS=$(docker run --rm \
-                          --network "$DOCKER_NETWORK" \
-                          "$CURL_IMAGE" \
-                          -s -o /dev/null -w "%{http_code}" \
-                          "http://$APP_CONTAINER:$APP_PORT/actuator/health" || true)
-
-                        if echo "$STATUS" | grep -q '^200$'; then
-                            READY=1
-                            break
-                        fi
-
-                        STATUS=$(docker run --rm \
-                          --network "$DOCKER_NETWORK" \
-                          "$CURL_IMAGE" \
-                          -s -o /dev/null -w "%{http_code}" \
-                          "http://$APP_CONTAINER:$APP_PORT/" || true)
-
-                        echo "Attempt $i/18 -> HTTP status: $STATUS"
-
-                        if echo "$STATUS" | grep -qE '200|302|401|403'; then
-                            READY=1
-                            break
-                        fi
-
-                        sleep 10
+                    for i in $(seq 1 30); do
+                      if docker run --rm --network "$NETWORK_NAME" curlimages/curl:8.7.1 \
+                        -fsS "http://$APP_CONTAINER:$APP_PORT/actuator/health"; then
+                        READY=1
+                        break
+                      fi
+                      echo "Waiting for app health ($i/30)..."
+                      sleep 5
                     done
 
-                    if [ "$READY" -ne 1 ]; then
-                        echo "App did not start correctly"
-                        docker logs "$APP_CONTAINER" --tail 200 || true
-                        exit 1
-                    fi
+                    test "$READY" -eq 1
                 '''
             }
         }
 
         stage('DAST - OWASP ZAP') {
             steps {
-                catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
                     sh '''
+                        set -eux
+
                         docker run --rm \
-                          --user root \
-                          --network "$DOCKER_NETWORK" \
+                          --network "$NETWORK_NAME" \
                           --volumes-from jenkins \
-                          -v "$WORKSPACE/reports/zap:/zap/wrk:rw" \
-                          "$ZAP_IMAGE" \
+                          -w "$WORKDIR" \
+                          ghcr.io/zaproxy/zaproxy:stable \
                           zap-baseline.py \
                           -t "http://$APP_CONTAINER:$APP_PORT" \
-                          -r zap-report.html \
-                          -J zap-report.json \
+                          -J "reports/zap/zap-report.json" \
+                          -r "reports/zap/zap-report.html" \
                           -I || true
 
-                        test -s reports/zap/zap-report.json || echo '{"site":[]}' > reports/zap/zap-report.json
+                        test -s reports/zap/zap-report.json || echo '{"site":[{"alerts":[]}]}' > reports/zap/zap-report.json
                         test -s reports/zap/zap-report.html || echo '<html><body><h2>ZAP report unavailable</h2></body></html>' > reports/zap/zap-report.html
                     '''
                 }
@@ -271,48 +261,71 @@ pipeline {
         stage('Policy - OPA Gate') {
             steps {
                 sh '''
-                    GITLEAKS_COUNT=$(grep -Eo '"StartLine"[[:space:]]*:' reports/gitleaks/gitleaks-report.json 2>/dev/null | wc -l | tr -d ' ')
-                    TRIVY_CRITICAL_COUNT=$(grep -Eo '"Severity"[[:space:]]*:[[:space:]]*"CRITICAL"' reports/trivy/trivy-report.json 2>/dev/null | wc -l | tr -d ' ')
-                    ZAP_HIGH_COUNT=$(grep -Eo '"riskcode"[[:space:]]*:[[:space:]]*"3"' reports/zap/zap-report.json 2>/dev/null | wc -l | tr -d ' ')
-
-                    test -n "$GITLEAKS_COUNT" || GITLEAKS_COUNT=0
-                    test -n "$TRIVY_CRITICAL_COUNT" || TRIVY_CRITICAL_COUNT=0
-                    test -n "$ZAP_HIGH_COUNT" || ZAP_HIGH_COUNT=0
-
-                    cat > policy/security.rego <<EOF
-package security
-
-deny[msg] {
-  input.gitleaks_count > 0
-  msg := sprintf("Gitleaks detected %v secret(s)", [input.gitleaks_count])
-}
-
-deny[msg] {
-  input.trivy_critical_count > 0
-  msg := sprintf("Trivy detected %v CRITICAL vulnerability(ies)", [input.trivy_critical_count])
-}
-
-deny[msg] {
-  input.zap_high_count > 0
-  msg := sprintf("ZAP detected %v High alert(s)", [input.zap_high_count])
-}
-EOF
-
-                    printf '{"gitleaks_count":%s,"trivy_critical_count":%s,"zap_high_count":%s}\n' \
-                      "$GITLEAKS_COUNT" "$TRIVY_CRITICAL_COUNT" "$ZAP_HIGH_COUNT" > reports/opa/input.json
+                    set -eux
 
                     docker run --rm \
                       --volumes-from jenkins \
-                      -w "$WORKSPACE" \
-                      "$OPA_IMAGE" \
-                      eval \
-                      --format pretty \
-                      --fail-defined \
-                      --data policy/security.rego \
-                      --input reports/opa/input.json \
-                      'data.security.deny' > reports/opa/opa-result.txt 2>&1
+                      -w "$WORKDIR" \
+                      python:3.12-alpine \
+                      sh -lc "python - <<'PY'
+import json
+from pathlib import Path
 
-                    cat reports/opa/opa-result.txt
+def load_json(path, default):
+    p = Path(path)
+    if not p.exists() or p.stat().st_size == 0:
+        return default
+    try:
+        return json.loads(p.read_text(encoding='utf-8'))
+    except Exception:
+        return default
+
+gitleaks = load_json('reports/gitleaks/gitleaks-report.json', [])
+trivy = load_json('reports/trivy/trivy-report.json', {'Results': []})
+zap = load_json('reports/zap/zap-report.json', {'site': [{'alerts': []}]})
+
+sev = {'CRITICAL': 0, 'HIGH': 0, 'MEDIUM': 0, 'LOW': 0}
+for result in trivy.get('Results', []):
+    for v in result.get('Vulnerabilities', []) or []:
+        s = (v.get('Severity') or '').upper()
+        if s in sev:
+            sev[s] += 1
+
+zap_high = 0
+for site in zap.get('site', []) or []:
+    for alert in site.get('alerts', []) or []:
+        risk = str(alert.get('riskcode', '')).strip()
+        if risk == '3':
+            zap_high += 1
+
+payload = {
+    'gitleaks': gitleaks if isinstance(gitleaks, list) else [],
+    'trivy': {
+        'critical': sev['CRITICAL'],
+        'high': sev['HIGH'],
+        'medium': sev['MEDIUM'],
+        'low': sev['LOW']
+    },
+    'zap': {
+        'high': zap_high
+    }
+}
+
+Path('reports/opa').mkdir(parents=True, exist_ok=True)
+Path('reports/opa/input.json').write_text(json.dumps(payload, indent=2), encoding='utf-8')
+PY"
+
+                    docker run --rm \
+                      --volumes-from jenkins \
+                      -w "$WORKDIR" \
+                      openpolicyagent/opa:latest \
+                      eval \
+                      --format raw \
+                      --data "$WORKDIR/policy/security-gate.rego" \
+                      --input "$WORKDIR/reports/opa/input.json" \
+                      "data.security.allow" | tee "$WORKDIR/reports/opa/opa-result.txt"
+
+                    grep -qx 'true' "$WORKDIR/reports/opa/opa-result.txt"
                 '''
             }
         }
@@ -320,21 +333,21 @@ EOF
 
     post {
         always {
-            archiveArtifacts artifacts: 'reports/**', allowEmptyArchive: true
+            archiveArtifacts artifacts: 'reports/**/*', allowEmptyArchive: true, fingerprint: true
 
             sh '''
-                docker rm -f "$APP_CONTAINER" 2>/dev/null || true
-                docker rm -f "$MYSQL_CONTAINER" 2>/dev/null || true
-                docker network rm "$DOCKER_NETWORK" 2>/dev/null || true
+                docker rm -f "$APP_CONTAINER" >/dev/null 2>&1 || true
+                docker rm -f "$MYSQL_CONTAINER" >/dev/null 2>&1 || true
+                docker network rm "$NETWORK_NAME" >/dev/null 2>&1 || true
             '''
         }
 
-        success {
-            echo 'Pipeline OK : aucune vulnerabilite bloquante detectee.'
+        failure {
+            echo 'Pipeline FAILED - verifier les rapports archives.'
         }
 
-        failure {
-            echo 'Pipeline FAILED : verifier reports/opa/opa-result.txt et les rapports archives.'
+        success {
+            echo 'Pipeline SUCCESS.'
         }
     }
 }
