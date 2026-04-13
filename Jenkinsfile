@@ -16,7 +16,7 @@ pipeline {
         APP_PORT        = '8081'
         MAVEN_REPO      = '/var/jenkins_home/.m2/repository'
         TRIVY_CACHE     = "${WORKSPACE}/.trivycache"
-        SONARQUBE_ENV   = 'SonarQube'
+        SONARQUBE_ENV   = 'sonar'
     }
 
     stages {
