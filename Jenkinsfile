@@ -1,25 +1,24 @@
 /* ===========================================================================
- * PIPELINE DEVSECOPS — ARCHIVAGE DOC (VERSION FINALE v2)
+ * PIPELINE DEVSECOPS — ARCHIVAGE DOC (VERSION FINALE v3)
  *
- * Fix appliqué :
- *   ✅ Maven exécuté DIRECTEMENT (tools directive) — plus de docker run maven
- *      → résout "POM file /workspace/pom.xml does not exist" (DinD path issue)
- *   ✅ HOST_JH : chemin hôte vers jenkins_home (pour montages Docker sécurité)
- *      → à adapter selon votre bind-mount (ex: -v /opt/jenkins:/var/jenkins_home)
+ * Corrections v3 :
+ *   ✅ HOST_WS calculé dynamiquement (sed sur WORKSPACE) — plus de nom de job
+ *      hardcodé → fonctionne quel que soit le nom du job Jenkins
+ *   ✅ JENKINS_VOLUME_ROOT = '/var/lib/docker/volumes/jenkins_home/_data'
+ *      (confirmé via docker inspect jenkins)
+ *   ✅ Backslashes corrigés : \\\\ → \ dans tous les blocs sh
+ *   ✅ Maven exécuté directement (tools directive) — résout le DinD path issue
  *   ✅ Outils sécurité (Gitleaks, Trivy, ZAP, OPA, Syft) restent en Docker
  *
  * PRÉ-REQUIS JENKINS :
- *   1. Maven configuré dans Jenkins > Global Tool Configuration
- *      Nom : "Maven-3.9" / Version : 3.9.x / Install automatically
- *   2. JDK 17 configuré dans Jenkins > Global Tool Configuration
- *      Nom : "JDK-17"
+ *   1. Maven "Maven-3.9" configuré dans Global Tool Configuration
+ *   2. JDK "JDK-17" configuré dans Global Tool Configuration
  *   3. Credentials :
  *       ID "sonar-token"           → Secret Text
  *       ID "mysql-root-password"   → Secret Text
  *       ID "mysql-app-credentials" → Username/Password
  *   4. Plugins : SonarQube Scanner, HTML Publisher, JUnit
- *   5. HOST_JH : adaptez à votre montage Docker Jenkins
- *      Ex: docker run -v /opt/jenkins:/var/jenkins_home → HOST_JH = '/opt/jenkins'
+ *   5. Fichier policy/security.rego présent dans le repo Git
  * =========================================================================== */
 
 pipeline {
@@ -39,18 +38,15 @@ pipeline {
     }
 
     environment {
-        APP_PORT        = '8081'
-        MYSQL_DATABASE  = 'archivage_db'
-        DOCKER_NETWORK  = 'archivage-net'
-        MYSQL_CONTAINER = 'mysql-archivage'
-        APP_CONTAINER   = 'app-archivage'
-        APP_IMAGE       = "archivage-app:${BUILD_NUMBER}"
-
-        // ── IMPORTANT : adaptez HOST_JH au chemin HOTE de votre bind-mount ──
-        // Vérifiez avec : docker inspect <jenkins-container> | grep -A5 Mounts
-        // Ex: -v /opt/jenkins:/var/jenkins_home  → HOST_JH = '/opt/jenkins'
-        //     -v /var/jenkins_home:/var/jenkins_home → HOST_JH = '/var/jenkins_home'
-        HOST_JH = '/var/lib/docker/volumes/jenkins_home/_data'
+        APP_PORT            = '8081'
+        MYSQL_DATABASE      = 'archivage_db'
+        DOCKER_NETWORK      = 'archivage-net'
+        MYSQL_CONTAINER     = 'mysql-archivage'
+        APP_CONTAINER       = 'app-archivage'
+        APP_IMAGE           = "archivage-app:${BUILD_NUMBER}"
+        // Racine du volume Jenkins sur l'hôte (confirmé via docker inspect jenkins)
+        // Calcul dynamique dans chaque sh : HOST_WS = JENKINS_VOLUME_ROOT + WORKSPACE sans /var/jenkins_home
+        JENKINS_VOLUME_ROOT = '/var/lib/docker/volumes/jenkins_home/_data'
     }
 
     stages {
@@ -64,7 +60,6 @@ pipeline {
         // ════════════════════════════════════════════════════════════════════
         stage('Tests Unitaires') {
         // ════════════════════════════════════════════════════════════════════
-        // [FIX] mvn exécuté directement — plus de docker run maven
             steps {
                 sh '''
                     echo "--------------------------------------------------------"
@@ -106,16 +101,20 @@ pipeline {
         // ════════════════════════════════════════════════════════════════════
             parallel {
 
+                // ── Secrets ──────────────────────────────────────────────────
                 stage('Secrets (Gitleaks)') {
                     steps {
                         catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
                             sh '''
+                                # Chemin hôte dynamique — indépendant du nom du job
+                                HOST_WS="${JENKINS_VOLUME_ROOT}$(echo ${WORKSPACE} | sed 's|/var/jenkins_home||')"
                                 echo " [3A] SCAN DES SECRETS (Gitleaks)"
+                                echo " Workspace hote : ${HOST_WS}"
                                 mkdir -p "${WORKSPACE}/reports/gitleaks"
 
                                 docker run --rm \
                                   --security-opt no-new-privileges \
-                                  -v "${HOST_JH}/workspace/DevSecOps-PFE-Test:/workspace:ro" \
+                                  -v "${HOST_WS}:/workspace:ro" \
                                   zricethezav/gitleaks:latest detect \
                                     --source /workspace \
                                     --report-format json \
@@ -126,17 +125,20 @@ pipeline {
                     }
                 }
 
+                // ── SCA ───────────────────────────────────────────────────────
                 stage('SCA (Trivy FS)') {
                     steps {
                         catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
                             sh '''
+                                HOST_WS="${JENKINS_VOLUME_ROOT}$(echo ${WORKSPACE} | sed 's|/var/jenkins_home||')"
                                 echo " [3B] SCAN DES DEPENDANCES (Trivy FS)"
+                                echo " Workspace hote : ${HOST_WS}"
                                 mkdir -p "${WORKSPACE}/reports/trivy" "${WORKSPACE}/.trivycache"
 
                                 docker run --rm \
                                   --security-opt no-new-privileges \
-                                  -v "${HOST_JH}/workspace/DevSecOps-PFE-Test:/workspace:rw" \
-                                  -v "${HOST_JH}/workspace/DevSecOps-PFE-Test/.trivycache:/root/.cache/trivy" \
+                                  -v "${HOST_WS}:/workspace:rw" \
+                                  -v "${HOST_WS}/.trivycache:/root/.cache/trivy" \
                                   ghcr.io/aquasecurity/trivy:latest fs \
                                     --scanners vuln,secret \
                                     --severity LOW,MEDIUM,HIGH,CRITICAL \
@@ -148,8 +150,9 @@ pipeline {
                     }
                 }
 
+                // ── SAST ──────────────────────────────────────────────────────
                 stage('SAST (SonarQube)') {
-                // [FIX] mvn sonar exécuté directement — plus de docker run maven
+                // Maven direct — pas de docker run ici
                     steps {
                         withCredentials([string(credentialsId: 'sonar-token', variable: 'SONAR_TOKEN')]) {
                             sh '''
@@ -166,16 +169,19 @@ pipeline {
                     }
                 }
 
+                // ── SBOM ──────────────────────────────────────────────────────
                 stage('SBOM (CycloneDX / Syft)') {
                     steps {
                         catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
                             sh '''
+                                HOST_WS="${JENKINS_VOLUME_ROOT}$(echo ${WORKSPACE} | sed 's|/var/jenkins_home||')"
                                 echo " [3D] GENERATION SBOM (Syft)"
+                                echo " Workspace hote : ${HOST_WS}"
                                 mkdir -p "${WORKSPACE}/reports/sbom"
 
                                 docker run --rm \
                                   --security-opt no-new-privileges \
-                                  -v "${HOST_JH}/workspace/DevSecOps-PFE-Test:/workspace:rw" \
+                                  -v "${HOST_WS}:/workspace:rw" \
                                   anchore/syft:latest \
                                     /workspace \
                                     -o cyclonedx-json \
@@ -217,14 +223,16 @@ pipeline {
             steps {
                 catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
                     sh '''
+                        HOST_WS="${JENKINS_VOLUME_ROOT}$(echo ${WORKSPACE} | sed 's|/var/jenkins_home||')"
                         echo " [5/7] SCAN IMAGE DOCKER (Trivy)"
+                        echo " Workspace hote : ${HOST_WS}"
                         mkdir -p "${WORKSPACE}/reports/trivy" "${WORKSPACE}/.trivycache"
 
                         docker run --rm \
                           --security-opt no-new-privileges \
                           -v /var/run/docker.sock:/var/run/docker.sock \
-                          -v "${HOST_JH}/workspace/DevSecOps-PFE-Test/.trivycache:/root/.cache/trivy" \
-                          -v "${HOST_JH}/workspace/DevSecOps-PFE-Test/reports/trivy:/reports" \
+                          -v "${HOST_WS}/.trivycache:/root/.cache/trivy" \
+                          -v "${HOST_WS}/reports/trivy:/reports" \
                           ghcr.io/aquasecurity/trivy:latest image \
                             --severity HIGH,CRITICAL \
                             --format json \
@@ -319,13 +327,15 @@ pipeline {
                     steps {
                         catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
                             sh '''
+                                HOST_WS="${JENKINS_VOLUME_ROOT}$(echo ${WORKSPACE} | sed 's|/var/jenkins_home||')"
                                 echo " [7A] DAST - OWASP ZAP Baseline Scan"
+                                echo " Workspace hote : ${HOST_WS}"
                                 mkdir -p "${WORKSPACE}/reports/zap"
 
                                 docker run --rm \
                                   --security-opt no-new-privileges \
                                   --network host \
-                                  -v "${HOST_JH}/workspace/DevSecOps-PFE-Test/reports/zap:/zap/wrk" \
+                                  -v "${HOST_WS}/reports/zap:/zap/wrk" \
                                   ghcr.io/zaproxy/zaproxy:stable \
                                   zap-baseline.py \
                                     -t "http://localhost:${APP_PORT}" \
@@ -351,7 +361,9 @@ pipeline {
                     steps {
                         catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
                             sh '''
+                                HOST_WS="${JENKINS_VOLUME_ROOT}$(echo ${WORKSPACE} | sed 's|/var/jenkins_home||')"
                                 echo " [7B] POLICY CHECK (OPA)"
+                                echo " Workspace hote : ${HOST_WS}"
                                 mkdir -p "${WORKSPACE}/reports/opa"
 
                                 if [ ! -f "${WORKSPACE}/policy/security.rego" ]; then
@@ -367,8 +379,8 @@ pipeline {
 
                                 OPA_RESULT=$(docker run --rm \
                                   --security-opt no-new-privileges \
-                                  -v "${HOST_JH}/workspace/DevSecOps-PFE-Test/policy:/policy:ro" \
-                                  -v "${HOST_JH}/workspace/DevSecOps-PFE-Test/reports/trivy:/data:ro" \
+                                  -v "${HOST_WS}/policy:/policy:ro" \
+                                  -v "${HOST_WS}/reports/trivy:/data:ro" \
                                   openpolicyagent/opa:latest eval \
                                     --data /policy/security.rego \
                                     --input /data/trivy-fs-report.json \
