@@ -2,6 +2,7 @@ pipeline {
     agent any
 
     options {
+        skipDefaultCheckout(true)
         timestamps()
         timeout(time: 60, unit: 'MINUTES')
         disableConcurrentBuilds()
@@ -13,9 +14,9 @@ pipeline {
         MYSQL_CONTAINER = 'mysql-archivage'
         NETWORK_NAME    = 'archivage-net'
         APP_PORT        = '8081'
-        WORKDIR         = "${env.WORKSPACE}"
         MAVEN_REPO      = '/var/jenkins_home/.m2/repository'
-        TRIVY_CACHE     = "${env.WORKSPACE}/.trivycache"
+        TRIVY_CACHE     = "${WORKSPACE}/.trivycache"
+        SONARQUBE_ENV   = 'SonarQube'
     }
 
     stages {
@@ -57,14 +58,14 @@ pipeline {
 
                     docker run --rm \
                       --volumes-from jenkins \
-                      -w "$WORKDIR" \
+                      -w "$WORKSPACE" \
                       maven:3.9.9-eclipse-temurin-17 \
-                      sh -lc "mvn -B -f '$WORKDIR/pom.xml' -Dmaven.repo.local='$MAVEN_REPO' clean package -DskipTests"
+                      sh -lc "mvn -B -f '$WORKSPACE/pom.xml' -Dmaven.repo.local='$MAVEN_REPO' clean package -DskipTests"
 
-                    JARPATH=$(find "$WORKDIR/target" -maxdepth 1 -type f -name "*.jar" ! -name "*.original" | head -n 1)
-                    echo "JARPATH=$JARPATH"
+                    JARPATH=$(find "$WORKSPACE/target" -maxdepth 1 -type f -name "*.jar" ! -name "*.original" | head -n 1)
                     test -n "$JARPATH"
-                    echo "$JARPATH" > "$WORKDIR/.jarpath"
+                    test -f "$JARPATH"
+                    echo "$JARPATH" > "$WORKSPACE/.jarpath"
                 '''
             }
         }
@@ -77,7 +78,7 @@ pipeline {
 
                         docker run --rm \
                           --volumes-from jenkins \
-                          -w "$WORKDIR" \
+                          -w "$WORKSPACE" \
                           zricethezav/gitleaks:latest detect \
                           --source . \
                           --log-opts="--all" \
@@ -99,7 +100,7 @@ pipeline {
 
                         docker run --rm \
                           --volumes-from jenkins \
-                          -w "$WORKDIR" \
+                          -w "$WORKSPACE" \
                           -v "$TRIVY_CACHE:/root/.cache/trivy" \
                           ghcr.io/aquasecurity/trivy:latest fs \
                           --timeout 15m \
@@ -117,28 +118,32 @@ pipeline {
 
         stage('SAST - SonarQube') {
             steps {
-                withCredentials([string(credentialsId: 'sonarqube-token', variable: 'SONAR_TOKEN')]) {
-                    sh '''
-                        set -eux
+                script {
+                    withSonarQubeEnv("${SONARQUBE_ENV}") {
+                        sh '''
+                            set -eux
 
-                        test -d "$WORKDIR/target/classes"
-                        test -f "$WORKDIR/.jarpath"
+                            test -d "$WORKSPACE/target/classes"
+                            test -f "$WORKSPACE/.jarpath"
 
-                        docker run --rm \
-                          --volumes-from jenkins \
-                          --add-host=host.docker.internal:host-gateway \
-                          -w "$WORKDIR" \
-                          maven:3.9.9-eclipse-temurin-17 \
-                          sh -lc "mvn -B -f '$WORKDIR/pom.xml' \
-                            -Dmaven.repo.local='$MAVEN_REPO' \
-                            org.sonarsource.scanner.maven:sonar-maven-plugin:4.0.0.4121:sonar \
-                            -DskipTests \
-                            -Dsonar.projectKey='$APP_NAME' \
-                            -Dsonar.host.url='http://host.docker.internal:9000' \
-                            -Dsonar.login='$SONAR_TOKEN' \
-                            -Dsonar.java.binaries='target/classes' \
-                            -Dsonar.qualitygate.wait=false"
-                    '''
+                            docker run --rm \
+                              --volumes-from jenkins \
+                              --add-host=host.docker.internal:host-gateway \
+                              -e SONAR_HOST_URL="$SONAR_HOST_URL" \
+                              -e SONAR_AUTH_TOKEN="$SONAR_AUTH_TOKEN" \
+                              -w "$WORKSPACE" \
+                              maven:3.9.9-eclipse-temurin-17 \
+                              sh -lc "mvn -B -f '$WORKSPACE/pom.xml' \
+                                -Dmaven.repo.local='$MAVEN_REPO' \
+                                org.sonarsource.scanner.maven:sonar-maven-plugin:4.0.0.4121:sonar \
+                                -DskipTests \
+                                -Dsonar.projectKey='$APP_NAME' \
+                                -Dsonar.host.url='$SONAR_HOST_URL' \
+                                -Dsonar.login='$SONAR_AUTH_TOKEN' \
+                                -Dsonar.java.binaries='target/classes' \
+                                -Dsonar.qualitygate.wait=false"
+                        '''
+                    }
                 }
             }
         }
@@ -151,12 +156,12 @@ pipeline {
 
                         docker run --rm \
                           --volumes-from jenkins \
-                          -w "$WORKDIR" \
+                          -w "$WORKSPACE" \
                           maven:3.9.9-eclipse-temurin-17 \
-                          sh -lc "mvn -B -f '$WORKDIR/pom.xml' -Dmaven.repo.local='$MAVEN_REPO' org.cyclonedx:cyclonedx-maven-plugin:2.7.11:makeAggregateBom -DoutputFormat=all"
+                          sh -lc "mvn -B -f '$WORKSPACE/pom.xml' -Dmaven.repo.local='$MAVEN_REPO' org.cyclonedx:cyclonedx-maven-plugin:2.7.11:makeAggregateBom -DoutputFormat=all"
 
-                        test -f "$WORKDIR/target/bom.xml" && cp -f "$WORKDIR/target/bom.xml" "$WORKDIR/reports/sbom/bom.xml"
-                        test -f "$WORKDIR/target/bom.json" && cp -f "$WORKDIR/target/bom.json" "$WORKDIR/reports/sbom/bom.json"
+                        test -f "$WORKSPACE/target/bom.xml" && cp -f "$WORKSPACE/target/bom.xml" "$WORKSPACE/reports/sbom/bom.xml"
+                        test -f "$WORKSPACE/target/bom.json" && cp -f "$WORKSPACE/target/bom.json" "$WORKSPACE/reports/sbom/bom.json"
                         test -s reports/sbom/bom.json
                     '''
                 }
@@ -202,7 +207,7 @@ pipeline {
 
                     docker rm -f "$APP_CONTAINER" >/dev/null 2>&1 || true
 
-                    JARPATH=$(cat "$WORKDIR/.jarpath")
+                    JARPATH=$(cat "$WORKSPACE/.jarpath")
                     test -n "$JARPATH"
                     test -f "$JARPATH"
 
@@ -210,7 +215,7 @@ pipeline {
                       --name "$APP_CONTAINER" \
                       --network "$NETWORK_NAME" \
                       --volumes-from jenkins \
-                      -w "$WORKDIR" \
+                      -w "$WORKSPACE" \
                       eclipse-temurin:17-jre \
                       sh -lc "java -jar '$JARPATH' \
                         --server.port=$APP_PORT \
@@ -243,7 +248,7 @@ pipeline {
                         docker run --rm \
                           --network "$NETWORK_NAME" \
                           --volumes-from jenkins \
-                          -w "$WORKDIR" \
+                          -w "$WORKSPACE" \
                           ghcr.io/zaproxy/zaproxy:stable \
                           zap-baseline.py \
                           -t "http://$APP_CONTAINER:$APP_PORT" \
@@ -265,7 +270,7 @@ pipeline {
 
                     docker run --rm \
                       --volumes-from jenkins \
-                      -w "$WORKDIR" \
+                      -w "$WORKSPACE" \
                       python:3.12-alpine \
                       sh -lc "python - <<'PY'
 import json
@@ -317,15 +322,15 @@ PY"
 
                     docker run --rm \
                       --volumes-from jenkins \
-                      -w "$WORKDIR" \
+                      -w "$WORKSPACE" \
                       openpolicyagent/opa:latest \
                       eval \
                       --format raw \
-                      --data "$WORKDIR/policy/security-gate.rego" \
-                      --input "$WORKDIR/reports/opa/input.json" \
-                      "data.security.allow" | tee "$WORKDIR/reports/opa/opa-result.txt"
+                      --data "$WORKSPACE/policy/security-gate.rego" \
+                      --input "$WORKSPACE/reports/opa/input.json" \
+                      "data.security.allow" | tee "$WORKSPACE/reports/opa/opa-result.txt"
 
-                    grep -qx 'true' "$WORKDIR/reports/opa/opa-result.txt"
+                    grep -qx 'true' "$WORKSPACE/reports/opa/opa-result.txt"
                 '''
             }
         }
