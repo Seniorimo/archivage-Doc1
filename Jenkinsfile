@@ -127,8 +127,8 @@ pipeline {
                             test -f "$WORKSPACE/.jarpath"
 
                             docker run --rm \
+                              --network "$NETWORK_NAME" \
                               --volumes-from jenkins \
-                              --add-host=host.docker.internal:host-gateway \
                               -e SONAR_HOST_URL="$SONAR_HOST_URL" \
                               -e SONAR_AUTH_TOKEN="$SONAR_AUTH_TOKEN" \
                               -w "$WORKSPACE" \
