@@ -1,4 +1,23 @@
-name: Java Application CI
+# ===========================================================================
+# GITHUB ACTIONS — Java Application CI/CD & Security (VERSION CORRIGÉE)
+#
+# Corrections par rapport à la version initiale :
+#   [P1] ✅ Service MySQL déclaré → l'app ne crashe plus au démarrage
+#   [P1] ✅ Tests unitaires réellement exécutés (plus de -DskipTests)
+#   [P1] ✅ Health check HTTP réel (plus de sleep 15 + docker logs aveugle)
+#   [P2] ✅ Job séparé "Secrets Scan" (Gitleaks) avec fetch-depth: 0
+#   [P2] ✅ SCA ajouté : OWASP Dependency Check (failOnCVSS 9)
+#   [P2] ✅ Trivy image scan → résultats uploadés dans GitHub Security (SARIF)
+#   [P2] ✅ Le conteneur Docker accède au MySQL via --network host
+#   [P2] ✅ Nettoyage systématique en post (if: always())
+#
+# SECRETS GITHUB À CONFIGURER (Settings > Secrets > Actions) :
+#   MYSQL_ROOT_PASSWORD  → mot de passe root MySQL de test
+#   MYSQL_APP_PASSWORD   → mot de passe utilisateur MySQL de test
+#   (Pour des envs de test CI, des valeurs fixes sont acceptables)
+# ===========================================================================
+
+name: Java Application CI/CD & Security
 
 on:
   push:
@@ -6,15 +25,61 @@ on:
   pull_request:
     branches: [ "main" ]
 
+# ══════════════════════════════════════════════════════════════════════════════
+# JOB 1 — SECRETS SCAN (shift-left, bloque tout si secret trouvé)
+# ══════════════════════════════════════════════════════════════════════════════
 jobs:
-  build-and-run:
-    name: Build & Test Spring Boot App
+  secrets-scan:
+    name: 🔐 Secrets Scan (Gitleaks)
     runs-on: ubuntu-latest
 
     steps:
+      - name: 📥 Checkout Code (historique complet)
+        uses: actions/checkout@v4
+        with:
+          # [FIX] fetch-depth: 0 pour scanner TOUT l'historique Git
+          # (était absent → seulement le dernier commit scanné)
+          fetch-depth: 0
+
+      - name: 🔍 Gitleaks — Scan de l'historique complet
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# JOB 2 — BUILD, TEST & SECURITY SCANS
+# ══════════════════════════════════════════════════════════════════════════════
+  build-and-security:
+    name: 🔨 Build, Test & Security
+    runs-on: ubuntu-latest
+    # Bloque ce job si des secrets sont détectés
+    needs: secrets-scan
+
+    # ── Service MySQL ────────────────────────────────────────────────────────
+    # [FIX] Déclaration du service MySQL — était absent, causant le crash de l'app
+    # Pour utiliser des secrets : ${{ secrets.MYSQL_APP_PASSWORD }}
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root_ci_pass
+          MYSQL_DATABASE: archivage_db
+          MYSQL_USER: archivage_user
+          MYSQL_PASSWORD: archivage_ci_pass
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h localhost -u archivage_user -parchivage_ci_pass --silent"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=12
+
+    steps:
+      # ── Checkout ────────────────────────────────────────────────────────────
       - name: 📥 Checkout Code
         uses: actions/checkout@v4
 
+      # ── JDK ─────────────────────────────────────────────────────────────────
       - name: ☕ Set up JDK 17
         uses: actions/setup-java@v4
         with:
@@ -22,19 +87,132 @@ jobs:
           distribution: 'temurin'
           cache: maven
 
-      - name: 🔨 Build with Maven
-        run: mvn -B clean install -DskipTests
+      # ── Tests unitaires ─────────────────────────────────────────────────────
+      # [FIX] Tests réellement exécutés (était -DskipTests partout)
+      - name: 🧪 Tests unitaires (JUnit + JaCoCo)
+        run: mvn -B test jacoco:report
+        env:
+          SPRING_DATASOURCE_URL: jdbc:mysql://localhost:3306/archivage_db
+          SPRING_DATASOURCE_USERNAME: archivage_user
+          SPRING_DATASOURCE_PASSWORD: archivage_ci_pass
 
-      - name: 🐳 Build Docker Image
-        run: docker build -t archivage-app:latest .
+      - name: 📊 Upload résultats de tests
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: |
+            target/surefire-reports/*.xml
+            target/site/jacoco/
 
-      - name: 🚀 Run Application (Sanity Check)
+      # ── Build ────────────────────────────────────────────────────────────────
+      - name: 🔨 Build JAR (Maven package)
+        run: mvn -B clean package -DskipTests
+
+      # ── SCA — OWASP Dependency Check ────────────────────────────────────────
+      # [AJOUT] Analyse des CVE dans les dépendances Maven (pom.xml)
+      - name: 📦 SCA — OWASP Dependency Check
+        uses: dependency-check/Dependency-Check_Action@main
+        with:
+          project: 'archivage-doc'
+          path: '.'
+          format: 'HTML,JSON'
+          args: >
+            --failOnCVSS 9
+            --enableRetired
+            --suppression ./.github/owasp-suppressions.xml
+
+      - name: 📤 Upload rapport OWASP
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: owasp-dependency-check
+          path: reports/
+
+      # ── Docker Build ─────────────────────────────────────────────────────────
+      - name: 🐳 Build image Docker
         run: |
-          # Lancement de l'application en arrière-plan
-          docker run -d --name my-spring-app -p 8080:8080 archivage-app:latest
-          
-          echo "⏳ Attente du démarrage de Spring Boot..."
-          sleep 15
-          
-          # Affichage des logs pour vérification manuelle
-          docker logs my-spring-app
+          docker build \
+            -t archivage-app:${{ github.sha }} \
+            -t archivage-app:latest \
+            .
+
+      # ── Trivy Image Scan ─────────────────────────────────────────────────────
+      # [AJOUT] Scan de l'image Docker → résultats dans GitHub Security Tab (SARIF)
+      - name: 🔬 Trivy — Scan image Docker
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: archivage-app:${{ github.sha }}
+          format: 'sarif'
+          output: 'trivy-image-results.sarif'
+          severity: 'HIGH,CRITICAL'
+          exit-code: '0'         # Non-bloquant ici (Jenkins fait l'enforcement OPA)
+
+      - name: 📤 Upload Trivy SARIF → GitHub Security Tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-image-results.sarif'
+          category: 'trivy-docker-image'
+
+      # ── Run App + Health Check ───────────────────────────────────────────────
+      # [FIX] --network host → le conteneur accède au MySQL du service GHA via localhost
+      # [FIX] Health check HTTP réel sur /actuator/health (plus de sleep aveugle)
+      - name: 🚀 Démarrage application (sanity check)
+        run: |
+          echo "➤ Lancement de l'application..."
+          docker run -d --name archivage-app \
+            --network host \
+            -e SPRING_DATASOURCE_URL=jdbc:mysql://localhost:3306/archivage_db \
+            -e SPRING_DATASOURCE_USERNAME=archivage_user \
+            -e SPRING_DATASOURCE_PASSWORD=archivage_ci_pass \
+            archivage-app:${{ github.sha }}
+
+          echo "⏳ Attente de Spring Boot..."
+          READY=0
+          for i in $(seq 1 24); do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+              http://localhost:8080/actuator/health 2>/dev/null || echo "000")
+            if echo "${STATUS}" | grep -qE "^(200|302)$"; then
+              echo "✅ Application disponible (HTTP ${STATUS}) — tentative ${i}/24"
+              READY=1
+              break
+            fi
+            echo "  ⏳ Tentative ${i}/24 — HTTP ${STATUS}"
+            sleep 5
+          done
+
+          if [ "${READY}" -ne 1 ]; then
+            echo "❌ Timeout — Application non disponible après 120s"
+            echo "--- Logs Docker ---"
+            docker logs archivage-app --tail 80
+            exit 1
+          fi
+
+      # ── Nettoyage ────────────────────────────────────────────────────────────
+      - name: 🧹 Nettoyage
+        if: always()
+        run: |
+          docker rm -f archivage-app 2>/dev/null || true
+          docker rmi archivage-app:${{ github.sha }} archivage-app:latest 2>/dev/null || true
+
+# ══════════════════════════════════════════════════════════════════════════════
+# NOTE : Résumé des responsabilités par outil
+#
+# GitHub Actions (ce fichier) — Shift-Left (rapide, chaque commit/PR) :
+#   • Gitleaks   → secrets dans l'historique Git
+#   • JUnit      → tests unitaires + couverture JaCoCo
+#   • OWASP DC   → CVE dans les dépendances Maven
+#   • Trivy      → CVE dans l'image Docker (résultat dans GitHub Security Tab)
+#   • Sanity     → l'application démarre correctement avec MySQL
+#
+# Jenkins (Jenkinsfile) — Pipeline complet CI/CD + Enforcement :
+#   • Gitleaks   → double scan (historique)
+#   • Trivy FS   → CVE dépendances + secrets fichiers
+#   • SonarQube  → SAST + Quality Gate bloquant
+#   • CycloneDX  → SBOM (inventaire logiciel)
+#   • Trivy img  → CVE dans l'image de production
+#   • OWASP ZAP  → DAST boîte noire
+#   • Nuclei     → misconfigurations web
+#   • OPA        → enforcement de la politique (bloque si CVE CRITICAL ou ZAP HIGH)
+# ══════════════════════════════════════════════════════════════════════════════
