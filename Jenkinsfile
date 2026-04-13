@@ -5,18 +5,19 @@ pipeline {
         skipDefaultCheckout(true)
         timestamps()
         disableConcurrentBuilds()
-        timeout(time: 30, unit: 'MINUTES')
+        timeout(time: 45, unit: 'MINUTES')
         buildDiscarder(logRotator(numToKeepStr: '5'))
     }
 
     environment {
-        APP_PORT            = '8081'
-        MYSQL_DATABASE      = 'archivage_db'
-        DOCKER_NETWORK      = 'archivage-net'
-        MYSQL_CONTAINER     = 'mysql-archivage'
-        APP_CONTAINER       = 'app-archivage'
-        APP_IMAGE           = "archivage-app:${BUILD_NUMBER}"
-        JENKINS_VOLUME_ROOT = '/var/lib/docker/volumes/jenkins_home/_data'
+        APP_PORT           = '8081'
+        MYSQL_DATABASE     = 'archivage_db'
+        DOCKER_NETWORK     = 'archivage-net'
+        MYSQL_CONTAINER    = 'mysql-archivage'
+        APP_CONTAINER      = 'app-archivage'
+        APP_IMAGE          = "archivage-app:${BUILD_NUMBER}"
+        MAVEN_CACHE_VOLUME = 'maven_repo_cache'
+        TRIVY_CACHE_VOLUME = 'trivy_cache'
     }
 
     stages {
@@ -24,6 +25,14 @@ pipeline {
         stage('Checkout') {
             steps {
                 checkout scm
+                sh '''
+                    echo "--------------------------------------------------------"
+                    echo " CHECKOUT OK"
+                    echo "--------------------------------------------------------"
+                    pwd
+                    ls -la
+                    test -f pom.xml
+                '''
             }
         }
 
@@ -31,20 +40,25 @@ pipeline {
             steps {
                 sh '''#!/bin/sh
                     set -eu
-                    HOST_WS="${JENKINS_VOLUME_ROOT}${WORKSPACE#/var/jenkins_home}"
 
                     echo "--------------------------------------------------------"
                     echo " [1/7] TESTS UNITAIRES (JUnit + JaCoCo)"
                     echo "--------------------------------------------------------"
-                    echo "WORKSPACE Jenkins : ${WORKSPACE}"
-                    echo "WORKSPACE Hote    : ${HOST_WS}"
 
-                    docker run --rm \
-                      -v "${HOST_WS}:/workspace" \
-                      -v "${JENKINS_VOLUME_ROOT}/.m2:/root/.m2" \
+                    CID=$(docker create \
                       -w /workspace \
+                      -v "${MAVEN_CACHE_VOLUME}:/root/.m2" \
                       maven:3.9.9-eclipse-temurin-17 \
-                      mvn -q -B verify -Dmaven.repo.local=/root/.m2/repository
+                      mvn -q -B verify -Dmaven.repo.local=/root/.m2/repository)
+
+                    cleanup() {
+                      docker rm -f "$CID" >/dev/null 2>&1 || true
+                    }
+                    trap cleanup EXIT
+
+                    docker cp "${WORKSPACE}/." "${CID}:/workspace"
+                    docker start -a "$CID"
+                    docker cp "${CID}:/workspace/target" "${WORKSPACE}/" || true
                 '''
             }
             post {
@@ -66,18 +80,25 @@ pipeline {
             steps {
                 sh '''#!/bin/sh
                     set -eu
-                    HOST_WS="${JENKINS_VOLUME_ROOT}${WORKSPACE#/var/jenkins_home}"
 
                     echo "--------------------------------------------------------"
                     echo " [2/7] COMPILATION (Maven package)"
                     echo "--------------------------------------------------------"
 
-                    docker run --rm \
-                      -v "${HOST_WS}:/workspace" \
-                      -v "${JENKINS_VOLUME_ROOT}/.m2:/root/.m2" \
+                    CID=$(docker create \
                       -w /workspace \
+                      -v "${MAVEN_CACHE_VOLUME}:/root/.m2" \
                       maven:3.9.9-eclipse-temurin-17 \
-                      mvn -q -B -T 1C package -DskipTests -Dmaven.repo.local=/root/.m2/repository
+                      mvn -q -B -T 1C package -DskipTests -Dmaven.repo.local=/root/.m2/repository)
+
+                    cleanup() {
+                      docker rm -f "$CID" >/dev/null 2>&1 || true
+                    }
+                    trap cleanup EXIT
+
+                    docker cp "${WORKSPACE}/." "${CID}:/workspace"
+                    docker start -a "$CID"
+                    docker cp "${CID}:/workspace/target" "${WORKSPACE}/" || true
                 '''
             }
         }
@@ -90,20 +111,27 @@ pipeline {
                         catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
                             sh '''#!/bin/sh
                                 set -eu
-                                HOST_WS="${JENKINS_VOLUME_ROOT}${WORKSPACE#/var/jenkins_home}"
 
                                 echo " [3A] SCAN DES SECRETS (Gitleaks)"
                                 mkdir -p "${WORKSPACE}/reports/gitleaks"
 
-                                docker run --rm \
+                                CID=$(docker create \
                                   --security-opt no-new-privileges \
-                                  -v "${HOST_WS}:/workspace:ro" \
                                   zricethezav/gitleaks:latest detect \
                                     --source /workspace \
                                     --log-opts="--all" \
                                     --report-format json \
                                     --report-path /workspace/reports/gitleaks/gitleaks-report.json \
-                                    --exit-code 0
+                                    --exit-code 0)
+
+                                cleanup() {
+                                  docker rm -f "$CID" >/dev/null 2>&1 || true
+                                }
+                                trap cleanup EXIT
+
+                                docker cp "${WORKSPACE}/." "${CID}:/workspace"
+                                docker start -a "$CID"
+                                docker cp "${CID}:/workspace/reports/gitleaks/." "${WORKSPACE}/reports/gitleaks/" || true
                             '''
                         }
                     }
@@ -114,21 +142,28 @@ pipeline {
                         catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
                             sh '''#!/bin/sh
                                 set -eu
-                                HOST_WS="${JENKINS_VOLUME_ROOT}${WORKSPACE#/var/jenkins_home}"
 
                                 echo " [3B] SCAN DES DEPENDANCES (Trivy FS)"
-                                mkdir -p "${WORKSPACE}/reports/trivy" "${WORKSPACE}/.trivycache"
+                                mkdir -p "${WORKSPACE}/reports/trivy"
 
-                                docker run --rm \
+                                CID=$(docker create \
                                   --security-opt no-new-privileges \
-                                  -v "${HOST_WS}:/workspace:rw" \
-                                  -v "${HOST_WS}/.trivycache:/root/.cache/trivy" \
+                                  -v "${TRIVY_CACHE_VOLUME}:/root/.cache/trivy" \
                                   ghcr.io/aquasecurity/trivy:latest fs \
                                     --scanners vuln,secret \
                                     --severity LOW,MEDIUM,HIGH,CRITICAL \
                                     --format json \
                                     --output /workspace/reports/trivy/trivy-fs-report.json \
-                                    /workspace
+                                    /workspace)
+
+                                cleanup() {
+                                  docker rm -f "$CID" >/dev/null 2>&1 || true
+                                }
+                                trap cleanup EXIT
+
+                                docker cp "${WORKSPACE}/." "${CID}:/workspace"
+                                docker start -a "$CID"
+                                docker cp "${CID}:/workspace/reports/trivy/." "${WORKSPACE}/reports/trivy/" || true
                             '''
                         }
                     }
@@ -136,27 +171,36 @@ pipeline {
 
                 stage('SAST (SonarQube)') {
                     steps {
-                        withCredentials([string(credentialsId: 'sonar-token', variable: 'SONAR_TOKEN')]) {
-                            sh '''#!/bin/sh
-                                set -eu
-                                HOST_WS="${JENKINS_VOLUME_ROOT}${WORKSPACE#/var/jenkins_home}"
+                        withSonarQubeEnv('SonarQube') {
+                            withCredentials([string(credentialsId: 'sonar-token', variable: 'SONAR_TOKEN')]) {
+                                sh '''#!/bin/sh
+                                    set -eu
 
-                                echo " [3C] ANALYSE QUALITE (SonarQube)"
+                                    echo " [3C] ANALYSE QUALITE (SonarQube)"
 
-                                docker run --rm \
-                                  --add-host=host.docker.internal:host-gateway \
-                                  -v "${HOST_WS}:/workspace" \
-                                  -v "${JENKINS_VOLUME_ROOT}/.m2:/root/.m2" \
-                                  -w /workspace \
-                                  maven:3.9.9-eclipse-temurin-17 \
-                                  mvn -q -B \
-                                    -Dmaven.repo.local=/root/.m2/repository \
-                                    org.sonarsource.scanner.maven:sonar-maven-plugin:4.0.0.4121:sonar \
-                                    -Dsonar.projectKey=archivage-Doc \
-                                    -Dsonar.host.url=http://host.docker.internal:9000 \
-                                    -Dsonar.login="${SONAR_TOKEN}" \
-                                    -Dsonar.java.binaries=target/classes
-                            '''
+                                    CID=$(docker create \
+                                      --add-host=host.docker.internal:host-gateway \
+                                      -w /workspace \
+                                      -v "${MAVEN_CACHE_VOLUME}:/root/.m2" \
+                                      maven:3.9.9-eclipse-temurin-17 \
+                                      mvn -q -B \
+                                        -Dmaven.repo.local=/root/.m2/repository \
+                                        org.sonarsource.scanner.maven:sonar-maven-plugin:4.0.0.4121:sonar \
+                                        -Dsonar.projectKey=archivage-Doc \
+                                        -Dsonar.host.url="${SONAR_HOST_URL}" \
+                                        -Dsonar.login="${SONAR_TOKEN}" \
+                                        -Dsonar.java.binaries=target/classes)
+
+                                    cleanup() {
+                                      docker rm -f "$CID" >/dev/null 2>&1 || true
+                                    }
+                                    trap cleanup EXIT
+
+                                    docker cp "${WORKSPACE}/." "${CID}:/workspace"
+                                    docker start -a "$CID"
+                                    docker cp "${CID}:/workspace/target" "${WORKSPACE}/" || true
+                                '''
+                            }
                         }
                     }
                 }
@@ -166,18 +210,25 @@ pipeline {
                         catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
                             sh '''#!/bin/sh
                                 set -eu
-                                HOST_WS="${JENKINS_VOLUME_ROOT}${WORKSPACE#/var/jenkins_home}"
 
                                 echo " [3D] GENERATION SBOM (Syft)"
                                 mkdir -p "${WORKSPACE}/reports/sbom"
 
-                                docker run --rm \
+                                CID=$(docker create \
                                   --security-opt no-new-privileges \
-                                  -v "${HOST_WS}:/workspace:rw" \
                                   anchore/syft:latest \
-                                    /workspace \
-                                    -o cyclonedx-json \
-                                    --file /workspace/reports/sbom/sbom-cyclonedx.json
+                                  /workspace \
+                                  -o cyclonedx-json \
+                                  --file /workspace/reports/sbom/sbom-cyclonedx.json)
+
+                                cleanup() {
+                                  docker rm -f "$CID" >/dev/null 2>&1 || true
+                                }
+                                trap cleanup EXIT
+
+                                docker cp "${WORKSPACE}/." "${CID}:/workspace"
+                                docker start -a "$CID"
+                                docker cp "${CID}:/workspace/reports/sbom/." "${WORKSPACE}/reports/sbom/" || true
                             '''
                         }
                     }
@@ -197,9 +248,11 @@ pipeline {
             steps {
                 sh '''#!/bin/sh
                     set -eu
+
                     echo "--------------------------------------------------------"
                     echo " [4/7] BUILD IMAGE DOCKER"
                     echo "--------------------------------------------------------"
+
                     docker build -t "${APP_IMAGE}" "${WORKSPACE}"
                     echo "Image construite : ${APP_IMAGE}"
                 '''
@@ -211,21 +264,27 @@ pipeline {
                 catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
                     sh '''#!/bin/sh
                         set -eu
-                        HOST_WS="${JENKINS_VOLUME_ROOT}${WORKSPACE#/var/jenkins_home}"
 
                         echo " [5/7] SCAN IMAGE DOCKER (Trivy)"
-                        mkdir -p "${WORKSPACE}/reports/trivy" "${WORKSPACE}/.trivycache"
+                        mkdir -p "${WORKSPACE}/reports/trivy"
 
-                        docker run --rm \
+                        CID=$(docker create \
                           --security-opt no-new-privileges \
                           -v /var/run/docker.sock:/var/run/docker.sock \
-                          -v "${HOST_WS}/.trivycache:/root/.cache/trivy" \
-                          -v "${HOST_WS}/reports/trivy:/reports" \
+                          -v "${TRIVY_CACHE_VOLUME}:/root/.cache/trivy" \
                           ghcr.io/aquasecurity/trivy:latest image \
                             --severity HIGH,CRITICAL \
                             --format json \
-                            --output /reports/trivy-image-report.json \
-                            "${APP_IMAGE}"
+                            --output /tmp/trivy-image-report.json \
+                            "${APP_IMAGE}")
+
+                        cleanup() {
+                          docker rm -f "$CID" >/dev/null 2>&1 || true
+                        }
+                        trap cleanup EXIT
+
+                        docker start -a "$CID"
+                        docker cp "${CID}:/tmp/trivy-image-report.json" "${WORKSPACE}/reports/trivy/trivy-image-report.json" || true
                     '''
                 }
             }
@@ -323,22 +382,28 @@ pipeline {
                         catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
                             sh '''#!/bin/sh
                                 set -eu
-                                HOST_WS="${JENKINS_VOLUME_ROOT}${WORKSPACE#/var/jenkins_home}"
 
                                 echo " [7A] DAST - OWASP ZAP Baseline Scan"
                                 mkdir -p "${WORKSPACE}/reports/zap"
 
-                                docker run --rm \
+                                CID=$(docker create \
                                   --security-opt no-new-privileges \
-                                  --network host \
-                                  -v "${HOST_WS}/reports/zap:/zap/wrk" \
+                                  --network "${DOCKER_NETWORK}" \
                                   ghcr.io/zaproxy/zaproxy:stable \
                                   zap-baseline.py \
-                                    -t "http://localhost:${APP_PORT}" \
+                                    -t "http://${APP_CONTAINER}:8080" \
                                     -m 3 \
-                                    -r zap-report.html \
-                                    -J zap-report.json \
-                                    -I
+                                    -r /zap/wrk/zap-report.html \
+                                    -J /zap/wrk/zap-report.json \
+                                    -I)
+
+                                cleanup() {
+                                  docker rm -f "$CID" >/dev/null 2>&1 || true
+                                }
+                                trap cleanup EXIT
+
+                                docker start -a "$CID"
+                                docker cp "${CID}:/zap/wrk/." "${WORKSPACE}/reports/zap/" || true
                             '''
                         }
                     }
@@ -361,7 +426,6 @@ pipeline {
                         catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
                             sh '''#!/bin/sh
                                 set -eu
-                                HOST_WS="${JENKINS_VOLUME_ROOT}${WORKSPACE#/var/jenkins_home}"
 
                                 echo " [7B] POLICY CHECK (OPA)"
                                 mkdir -p "${WORKSPACE}/reports/opa"
@@ -371,21 +435,29 @@ pipeline {
                                   exit 1
                                 fi
 
-                                TRIVY_REPORT="${WORKSPACE}/reports/trivy/trivy-fs-report.json"
-                                if [ ! -f "${TRIVY_REPORT}" ]; then
+                                if [ ! -f "${WORKSPACE}/reports/trivy/trivy-fs-report.json" ]; then
                                   echo "Rapport Trivy absent - OPA ignore"
                                   exit 0
                                 fi
 
-                                OPA_RESULT=$(docker run --rm \
+                                CID=$(docker create \
                                   --security-opt no-new-privileges \
-                                  -v "${HOST_WS}/policy:/policy:ro" \
-                                  -v "${HOST_WS}/reports/trivy:/data:ro" \
-                                  openpolicyagent/opa:latest eval \
+                                  openpolicyagent/opa:latest \
+                                  eval \
                                     --data /policy/security.rego \
                                     --input /data/trivy-fs-report.json \
                                     "data.security.allow" \
                                     --format raw)
+
+                                cleanup() {
+                                  docker rm -f "$CID" >/dev/null 2>&1 || true
+                                }
+                                trap cleanup EXIT
+
+                                docker cp "${WORKSPACE}/policy/security.rego" "${CID}:/policy/security.rego"
+                                docker cp "${WORKSPACE}/reports/trivy/trivy-fs-report.json" "${CID}:/data/trivy-fs-report.json"
+
+                                OPA_RESULT=$(docker start -a "$CID" | tr -d '\\r' | tail -n 1)
 
                                 echo "Resultat OPA : ${OPA_RESULT}"
                                 echo "${OPA_RESULT}" > "${WORKSPACE}/reports/opa/opa-result.txt"
