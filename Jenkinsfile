@@ -1,28 +1,39 @@
 /* ===========================================================================
- * PIPELINE DEVSECOPS — ARCHIVAGE DOC (VERSION CORRIGÉE)
+ * PIPELINE DEVSECOPS — ARCHIVAGE DOC (VERSION FINALE)
  *
- * Corrections par rapport à la version initiale :
- *   [P0] ✅ --volumes-from jenkins remplacé par montages explicites (sécurité)
- *   [P0] ✅ Secrets MySQL gérés via Jenkins Credentials Store (withCredentials)
+ * Corrections appliquées :
+ *   [P0] ✅ --volumes-from jenkins → montages explicites -v (sécurité)
+ *   [P0] ✅ Secrets MySQL via Jenkins Credentials Store (withCredentials)
  *   [P0] ✅ OPA : résultat capturé et enforced (exit 1 si allow=false)
- *   [P1] ✅ SonarQube Quality Gate bloquant ajouté
- *   [P1] ✅ Tests unitaires (JUnit + JaCoCo) ajoutés comme première étape
- *   [P1] ✅ Image Docker construite depuis le Dockerfile + scan Trivy image
- *   [P1] ✅ Déploiement utilise l'image Docker (pas mvn spring-boot:run)
- *   [P2] ✅ policy/security.rego lu depuis le repo (pas généré inline)
- *   [P2] ✅ ZAP scan étendu à -m 3 (3 minutes)
- *   [P2] ✅ Image Docker nettoyée en post (docker rmi)
+ *   [P1] ✅ SonarQube Quality Gate bloquant (waitForQualityGate)
+ *   [P1] ✅ Tests via "mvn verify" (fix JaCoCo — "jacoco:report" seul = erreur)
+ *   [P1] ✅ Image Docker construite depuis Dockerfile + scan Trivy image
+ *   [P1] ✅ Déploiement via l'image Docker (pas mvn spring-boot:run)
+ *   [P2] ✅ policy/security.rego lu depuis le repo Git (pas généré inline)
+ *   [P2] ✅ ZAP scan étendu à -m 3
+ *   [P2] ✅ docker rmi en post-cleanup
  *   [P2] ✅ --security-opt no-new-privileges sur les conteneurs de test
  *
  * PRÉ-REQUIS JENKINS :
  *   - Jenkins home BIND-MONTÉ depuis l'hôte :
  *       docker run -v /host/jenkins_home:/var/jenkins_home jenkins/jenkins
- *     (nécessaire pour que -v "${WORKSPACE}:..." fonctionne avec les sibling containers)
- *   - Credentials configurés dans Jenkins > Manage Credentials :
- *       ID "sonar-token"          → Secret Text    (token SonarQube)
- *       ID "mysql-root-password"  → Secret Text    (mot de passe root MySQL)
- *       ID "mysql-app-credentials"→ Username/Password (user/pass app MySQL)
+ *   - Credentials configurés (Jenkins > Manage Credentials) :
+ *       ID "sonar-token"           → Secret Text      (token SonarQube)
+ *       ID "mysql-root-password"   → Secret Text      (password root MySQL)
+ *       ID "mysql-app-credentials" → Username/Password (user + pass app)
  *   - Plugins : SonarQube Scanner, HTML Publisher, Warnings NG, JUnit
+ *   - Fichier policy/security.rego présent dans le repo Git
+ *
+ * PRÉ-REQUIS pom.xml — JaCoCo doit être déclaré :
+ *   <plugin>
+ *     <groupId>org.jacoco</groupId>
+ *     <artifactId>jacoco-maven-plugin</artifactId>
+ *     <version>0.8.12</version>
+ *     <executions>
+ *       <execution><id>prepare-agent</id><goals><goal>prepare-agent</goal></goals></execution>
+ *       <execution><id>report</id><phase>verify</phase><goals><goal>report</goal></goals></execution>
+ *     </executions>
+ *   </plugin>
  * =========================================================================== */
 
 pipeline {
@@ -35,28 +46,27 @@ pipeline {
         skipDefaultCheckout(true)
         timestamps()
         disableConcurrentBuilds()
-        timeout(time: 30, unit: 'MINUTES')             // Augmenté (tests + QG Sonar)
+        timeout(time: 30, unit: 'MINUTES')
         buildDiscarder(logRotator(numToKeepStr: '5'))
     }
 
     environment {
-        // ── Config non-sensible (peut rester ici) ──────────────────────────
+        // ── Config non-sensible ────────────────────────────────────────────
         APP_PORT        = '8081'
         MYSQL_DATABASE  = 'archivage_db'
         DOCKER_NETWORK  = 'archivage-net'
         MYSQL_CONTAINER = 'mysql-archivage'
         APP_CONTAINER   = 'app-archivage'
         APP_IMAGE       = "archivage-app:${BUILD_NUMBER}"
-
-        // ── Alias pratiques pour les montages Docker ───────────────────────
+        // ── Alias pour les montages Docker ─────────────────────────────────
         // WORKSPACE et JENKINS_HOME sont injectés automatiquement par Jenkins.
-        // Ils correspondent à des chemins HÔTE si Jenkins home est bind-monté.
-        WS  = "${WORKSPACE}"
-        JH  = "${JENKINS_HOME}"
+        // Prérequis : Jenkins home doit être BIND-MONTÉ depuis l'hôte.
+        WS = "${WORKSPACE}"
+        JH = "${JENKINS_HOME}"
     }
 
     // ────────────────────────────────────────────────────────────────────────
-    // EXÉCUTION DU PIPELINE
+    // STAGES
     // ────────────────────────────────────────────────────────────────────────
     stages {
 
@@ -69,8 +79,9 @@ pipeline {
         // ════════════════════════════════════════════════════════════════════
         stage('Tests Unitaires') {
         // ════════════════════════════════════════════════════════════════════
-        // [AJOUT] Tests JUnit + couverture JaCoCo avant toute analyse.
-        // Le pipeline s'arrête immédiatement si les tests échouent.
+        // [FIX] "mvn verify" au lieu de "mvn test jacoco:report"
+        //   → Maven ne résout "jacoco:" que si le plugin est dans les groupIds
+        //   → "verify" lance : prepare-agent → test → jacoco:report automatiquement
             steps {
                 sh '''#!/bin/bash
                     set -euo pipefail
@@ -84,7 +95,7 @@ pipeline {
                       maven:3.9.9-eclipse-temurin-17 \
                       mvn -q -B -f /workspace/pom.xml \
                           -Dmaven.repo.local=/root/.m2/repository \
-                          test jacoco:report
+                          verify
                 '''
             }
             post {
@@ -103,11 +114,12 @@ pipeline {
         // ════════════════════════════════════════════════════════════════════
         stage('Build & Package') {
         // ════════════════════════════════════════════════════════════════════
+        // -DskipTests : les tests ont déjà tourné au stage précédent
             steps {
                 sh '''#!/bin/bash
                     set -euo pipefail
                     echo "--------------------------------------------------------"
-                    echo " ⚙️ [2/7] COMPILATION DU CODE (Maven package)"
+                    echo " ⚙️  [2/7] COMPILATION (Maven package)"
                     echo "--------------------------------------------------------"
 
                     docker run --rm \
@@ -134,8 +146,6 @@ pipeline {
                                 echo " 🔍 [3A] SCAN DES SECRETS (Gitleaks)"
                                 mkdir -p "${WS}/reports/gitleaks"
 
-                                # [FIX] Montage explicite workspace en :ro
-                                # (était --volumes-from jenkins → exposait tous les volumes)
                                 docker run --rm \
                                   -v "${WS}:/workspace:ro" \
                                   zricethezav/gitleaks:latest detect \
@@ -149,7 +159,7 @@ pipeline {
                     }
                 }
 
-                // ── SCA (dépendances Maven) ──────────────────────────────────
+                // ── SCA ──────────────────────────────────────────────────────
                 stage('SCA (Trivy FS)') {
                     steps {
                         catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
@@ -157,7 +167,6 @@ pipeline {
                                 echo " 📦 [3B] SCAN DES DÉPENDANCES (Trivy FS)"
                                 mkdir -p "${WS}/reports/trivy" "${WS}/.trivycache"
 
-                                # [FIX] --scanners vuln,secret (ajout du scan de secrets fichiers)
                                 docker run --rm \
                                   -v "${WS}:/workspace:rw" \
                                   -v "${WS}/.trivycache:/root/.cache/trivy" \
@@ -172,13 +181,12 @@ pipeline {
                     }
                 }
 
-                // ── SAST (SonarQube) ─────────────────────────────────────────
+                // ── SAST ─────────────────────────────────────────────────────
                 stage('SAST (SonarQube)') {
                     steps {
-                        // [FIX] withCredentials au lieu de la variable d'env exposée
                         withCredentials([string(credentialsId: 'sonar-token', variable: 'SONAR_TOKEN')]) {
                             sh '''#!/bin/bash
-                                echo " 🧠 [3C] ANALYSE QUALITÉ DU CODE (SonarQube)"
+                                echo " 🧠 [3C] ANALYSE QUALITÉ (SonarQube)"
 
                                 docker run --rm \
                                   --add-host=host.docker.internal:host-gateway \
@@ -197,10 +205,9 @@ pipeline {
                     }
                 }
 
-                // ── SBOM (CycloneDX) ─────────────────────────────────────────
+                // ── SBOM ─────────────────────────────────────────────────────
                 stage('SBOM (CycloneDX)') {
                     steps {
                         catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
                             sh '''#!/bin/bash
-                                echo " 📜 [3D] INVENTAIRE LOGICIEL (CycloneDX)"
-                      
+                                echo " �
