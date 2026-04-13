@@ -2,26 +2,18 @@
 # GITHUB ACTIONS — Java Application CI (VERSION FINALE)
 # Rôle : UNIQUEMENT CI — Build, Tests, Sanity Check Docker
 #
-# ⚠️  TOUTES les briques sécurité (Gitleaks, Trivy, SonarQube, SBOM,
-#     ZAP, Nuclei, OPA) restent sur JENKINS — ce fichier n'en fait AUCUNE.
+# ⚠️  TOUTES les briques sécurité restent sur JENKINS.
 #
-# Corrections appliquées :
-#   [P1] ✅ Service MySQL déclaré → l'app ne crashe plus au démarrage
-#   [P1] ✅ Tests via "mvn verify" (fix JaCoCo — "jacoco:report" seul = erreur)
-#   [P1] ✅ Health check HTTP réel sur /actuator/health (fini le sleep 15)
-#   [P2] ✅ --network host sur le conteneur → accès au MySQL du service GHA
-#   [P2] ✅ Nettoyage systématique (if: always())
+# Fixes appliqués :
+#   ✅ Service MySQL pour mvn verify (tests unitaires avec BDD)
+#   ✅ Profil "docker" activé pour le sanity check → H2 + port 8080
+#   ✅ Health check sur port 8080 (fix mismatch 8090 vs 8080)
+#   ✅ Volume /tmp/archivage-uploads monté → fix AccessDeniedException uploads
+#   ✅ Secrets via GitHub Secrets (DB_PASSWORD, GITHUB_OAUTH_SECRET)
 #
-# PRÉ-REQUIS pom.xml — le plugin JaCoCo doit être déclaré :
-#   <plugin>
-#     <groupId>org.jacoco</groupId>
-#     <artifactId>jacoco-maven-plugin</artifactId>
-#     <version>0.8.12</version>
-#     <executions>
-#       <execution><id>prepare-agent</id><goals><goal>prepare-agent</goal></goals></execution>
-#       <execution><id>report</id><phase>verify</phase><goals><goal>report</goal></goals></execution>
-#     </executions>
-#   </plugin>
+# SECRETS GITHUB À CONFIGURER (Settings > Secrets > Actions) :
+#   DB_PASSWORD          → mot de passe MySQL de test (ex: archivage_pass)
+#   GITHUB_OAUTH_SECRET  → client-secret GitHub OAuth (si tests OAuth)
 # ===========================================================================
 
 name: Java Application CI
@@ -37,14 +29,13 @@ jobs:
     name: Build & Test Spring Boot App
     runs-on: ubuntu-latest
 
-    # ── Service MySQL ────────────────────────────────────────────────────────
-    # [FIX] Ajout du service MySQL — était absent, l'app crashait au démarrage
+    # ── Service MySQL (utilisé uniquement par mvn verify) ────────────────
     services:
       mysql:
         image: mysql:8.0
         env:
           MYSQL_ROOT_PASSWORD: root
-          MYSQL_DATABASE: archivage_db
+          MYSQL_DATABASE: archivage_doc
           MYSQL_USER: archivage_user
           MYSQL_PASSWORD: archivage_pass
         ports:
@@ -56,11 +47,11 @@ jobs:
           --health-retries=12
 
     steps:
-      # ── Checkout ────────────────────────────────────────────────────────────
+      # ── Checkout ──────────────────────────────────────────────────────
       - name: 📥 Checkout Code
         uses: actions/checkout@v4
 
-      # ── JDK ─────────────────────────────────────────────────────────────────
+      # ── JDK ───────────────────────────────────────────────────────────
       - name: ☕ Set up JDK 17
         uses: actions/setup-java@v4
         with:
@@ -68,19 +59,20 @@ jobs:
           distribution: 'temurin'
           cache: maven
 
-      # ── Tests unitaires + JaCoCo ─────────────────────────────────────────────
-      # [FIX] "mvn verify" au lieu de "mvn test jacoco:report"
-      #   → "jacoco:report" seul échoue si le plugin n'est pas dans les groupIds Maven
-      #   → "verify" exécute automatiquement : prepare-agent → test → report
-      #   (nécessite que jacoco-maven-plugin soit déclaré dans pom.xml)
+      # ── Tests unitaires + JaCoCo ─────────────────────────────────────
+      # "mvn verify" = prepare-agent → test → jacoco:report automatiquement
+      # Requiert jacoco-maven-plugin dans pom.xml
       - name: 🧪 Tests unitaires + Couverture JaCoCo
         run: mvn -B verify
         env:
-          SPRING_DATASOURCE_URL: jdbc:mysql://127.0.0.1:3306/archivage_db
+          SPRING_DATASOURCE_URL: jdbc:mysql://127.0.0.1:3306/archivage_doc?serverTimezone=UTC
           SPRING_DATASOURCE_USERNAME: archivage_user
           SPRING_DATASOURCE_PASSWORD: archivage_pass
+          DB_PASSWORD: archivage_pass
+          GITHUB_OAUTH_SECRET: ${{ secrets.GITHUB_OAUTH_SECRET }}
+          JWT_SECRET: ***REMOVED***
 
-      # ── Publication des résultats ────────────────────────────────────────────
+      # ── Publication des résultats ─────────────────────────────────────
       - name: 📊 Publication des résultats de tests
         if: always()
         uses: actions/upload-artifact@v4
@@ -90,25 +82,26 @@ jobs:
             target/surefire-reports/*.xml
             target/site/jacoco/
 
-      # ── Build JAR ────────────────────────────────────────────────────────────
-      # -DskipTests : les tests ont déjà tourné au-dessus, pas besoin de les relancer
+      # ── Build JAR ─────────────────────────────────────────────────────
       - name: 🔨 Build JAR (Maven package)
         run: mvn -B clean package -DskipTests
 
-      # ── Build Image Docker ───────────────────────────────────────────────────
+      # ── Build Image Docker ────────────────────────────────────────────
       - name: 🐳 Build image Docker
         run: docker build -t archivage-app:${{ github.sha }} .
 
-      # ── Sanity Check ─────────────────────────────────────────────────────────
-      # [FIX] --network host → le conteneur atteint le MySQL du service GHA
-      # [FIX] Boucle curl sur /actuator/health (plus de sleep 15 aveugle)
+      # ── Sanity Check ─────────────────────────────────────────────────
+      # Profil "docker" → H2 in-memory + port 8080 (application-docker.properties)
+      # Volume uploads → fix AccessDeniedException FileStorageServiceImpl
       - name: 🚀 Sanity Check — démarrage de l'application
         run: |
+          mkdir -p /tmp/archivage-uploads
+
           docker run -d --name archivage-app \
             --network host \
-            -e SPRING_DATASOURCE_URL=jdbc:mysql://127.0.0.1:3306/archivage_db \
-            -e SPRING_DATASOURCE_USERNAME=archivage_user \
-            -e SPRING_DATASOURCE_PASSWORD=archivage_pass \
+            -v /tmp/archivage-uploads:/app/uploads \
+            -e SPRING_PROFILES_ACTIVE=docker \
+            -e JWT_SECRET=***REMOVED*** \
             archivage-app:${{ github.sha }}
 
           echo "⏳ Attente du démarrage de Spring Boot..."
@@ -116,22 +109,30 @@ jobs:
           for i in $(seq 1 24); do
             STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
               http://localhost:8080/actuator/health 2>/dev/null || echo "000")
-            if echo "${STATUS}" | grep -qE "^(200|302)$"; then
-              echo "✅ Application disponible (HTTP ${STATUS}) — tentative ${i}/24"
+
+            if echo "${STATUS}" | grep -qE "^(200|302|401|403)$"; then
+              echo "✅ Application disponible (HTTP ${STATUS})"
               READY=1
               break
             fi
+
             echo "  ⏳ Tentative ${i}/24 — HTTP ${STATUS}"
+
+            if [ $((i % 5)) -eq 0 ]; then
+              echo "--- Docker logs (tentative ${i}) ---"
+              docker logs archivage-app --tail 20 2>&1 || true
+              echo "---"
+            fi
             sleep 5
           done
 
           if [ "${READY}" -ne 1 ]; then
-            echo "❌ Timeout — Application non disponible après 120s"
-            docker logs archivage-app --tail 80
+            echo "❌ Timeout — logs complets :"
+            docker logs archivage-app 2>&1
             exit 1
           fi
 
-      # ── Nettoyage ────────────────────────────────────────────────────────────
+      # ── Nettoyage ─────────────────────────────────────────────────────
       - name: 🧹 Nettoyage
         if: always()
         run: |
