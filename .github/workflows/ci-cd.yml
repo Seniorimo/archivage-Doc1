@@ -1,16 +1,27 @@
 # ===========================================================================
-# GITHUB ACTIONS — Java Application CI (VERSION CORRIGÉE)
+# GITHUB ACTIONS — Java Application CI (VERSION FINALE)
 # Rôle : UNIQUEMENT CI — Build, Tests, Sanity Check Docker
 #
 # ⚠️  TOUTES les briques sécurité (Gitleaks, Trivy, SonarQube, SBOM,
 #     ZAP, Nuclei, OPA) restent sur JENKINS — ce fichier n'en fait AUCUNE.
 #
-# Corrections par rapport à la version initiale :
+# Corrections appliquées :
 #   [P1] ✅ Service MySQL déclaré → l'app ne crashe plus au démarrage
-#   [P1] ✅ Tests unitaires réellement exécutés (mvn test, sans -DskipTests)
+#   [P1] ✅ Tests via "mvn verify" (fix JaCoCo — "jacoco:report" seul = erreur)
 #   [P1] ✅ Health check HTTP réel sur /actuator/health (fini le sleep 15)
 #   [P2] ✅ --network host sur le conteneur → accès au MySQL du service GHA
 #   [P2] ✅ Nettoyage systématique (if: always())
+#
+# PRÉ-REQUIS pom.xml — le plugin JaCoCo doit être déclaré :
+#   <plugin>
+#     <groupId>org.jacoco</groupId>
+#     <artifactId>jacoco-maven-plugin</artifactId>
+#     <version>0.8.12</version>
+#     <executions>
+#       <execution><id>prepare-agent</id><goals><goal>prepare-agent</goal></goals></execution>
+#       <execution><id>report</id><phase>verify</phase><goals><goal>report</goal></goals></execution>
+#     </executions>
+#   </plugin>
 # ===========================================================================
 
 name: Java Application CI
@@ -26,7 +37,7 @@ jobs:
     name: Build & Test Spring Boot App
     runs-on: ubuntu-latest
 
-    # ── Service MySQL ──────────────────────────────────────────────────────
+    # ── Service MySQL ────────────────────────────────────────────────────────
     # [FIX] Ajout du service MySQL — était absent, l'app crashait au démarrage
     services:
       mysql:
@@ -45,11 +56,11 @@ jobs:
           --health-retries=12
 
     steps:
-      # ── Checkout ──────────────────────────────────────────────────────────
+      # ── Checkout ────────────────────────────────────────────────────────────
       - name: 📥 Checkout Code
         uses: actions/checkout@v4
 
-      # ── JDK ───────────────────────────────────────────────────────────────
+      # ── JDK ─────────────────────────────────────────────────────────────────
       - name: ☕ Set up JDK 17
         uses: actions/setup-java@v4
         with:
@@ -57,34 +68,38 @@ jobs:
           distribution: 'temurin'
           cache: maven
 
-      # ── Tests unitaires ───────────────────────────────────────────────────
-      # [FIX] Tests réellement exécutés avec la BDD MySQL disponible
-      # (était : mvn clean install -DskipTests → aucun test lancé)
-      - name: 🧪 Tests unitaires (JUnit + JaCoCo)
-        run: mvn -B test jacoco:report
+      # ── Tests unitaires + JaCoCo ─────────────────────────────────────────────
+      # [FIX] "mvn verify" au lieu de "mvn test jacoco:report"
+      #   → "jacoco:report" seul échoue si le plugin n'est pas dans les groupIds Maven
+      #   → "verify" exécute automatiquement : prepare-agent → test → report
+      #   (nécessite que jacoco-maven-plugin soit déclaré dans pom.xml)
+      - name: 🧪 Tests unitaires + Couverture JaCoCo
+        run: mvn -B verify
         env:
           SPRING_DATASOURCE_URL: jdbc:mysql://127.0.0.1:3306/archivage_db
           SPRING_DATASOURCE_USERNAME: archivage_user
           SPRING_DATASOURCE_PASSWORD: archivage_pass
 
+      # ── Publication des résultats ────────────────────────────────────────────
       - name: 📊 Publication des résultats de tests
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test-results
+          name: test-and-coverage-results
           path: |
             target/surefire-reports/*.xml
             target/site/jacoco/
 
-      # ── Build JAR ─────────────────────────────────────────────────────────
+      # ── Build JAR ────────────────────────────────────────────────────────────
+      # -DskipTests : les tests ont déjà tourné au-dessus, pas besoin de les relancer
       - name: 🔨 Build JAR (Maven package)
         run: mvn -B clean package -DskipTests
 
-      # ── Build Image Docker ────────────────────────────────────────────────
+      # ── Build Image Docker ───────────────────────────────────────────────────
       - name: 🐳 Build image Docker
         run: docker build -t archivage-app:${{ github.sha }} .
 
-      # ── Sanity Check ──────────────────────────────────────────────────────
+      # ── Sanity Check ─────────────────────────────────────────────────────────
       # [FIX] --network host → le conteneur atteint le MySQL du service GHA
       # [FIX] Boucle curl sur /actuator/health (plus de sleep 15 aveugle)
       - name: 🚀 Sanity Check — démarrage de l'application
@@ -116,7 +131,7 @@ jobs:
             exit 1
           fi
 
-      # ── Nettoyage ─────────────────────────────────────────────────────────
+      # ── Nettoyage ────────────────────────────────────────────────────────────
       - name: 🧹 Nettoyage
         if: always()
         run: |
