@@ -9,26 +9,26 @@ pipeline {
     }
 
     environment {
-        APP_PORT        = '8081'
-        MYSQL_ROOT_PASS = 'root'
-        MYSQL_DATABASE  = 'archivage_db'
-        MYSQL_USER      = 'archivage_user'
-        MYSQL_PASS      = 'archivage_pass'
-        DOCKER_NETWORK  = 'archivage-net'
-        MYSQL_CONTAINER = 'mysql-archivage'
-        APP_CONTAINER   = 'app-archivage'
+        APP_PORT         = '8081'
+        MYSQL_ROOT_PASS  = 'root'
+        MYSQL_DATABASE   = 'archivage_db'
+        MYSQL_USER       = 'archivage_user'
+        MYSQL_PASS       = 'archivage_pass'
+        DOCKER_NETWORK   = 'archivage-net'
+        MYSQL_CONTAINER  = 'mysql-archivage'
+        APP_CONTAINER    = 'app-archivage'
 
-        SONAR_HOST_URL   = 'http://host.docker.internal:9000'
-        SONAR_PROJECT_KEY= 'archivage-Doc'
+        SONAR_HOST_URL    = 'http://host.docker.internal:9000'
+        SONAR_PROJECT_KEY = 'archivage-Doc'
 
-        MAVEN_IMAGE    = 'maven:3.9.9-eclipse-temurin-17'
-        JRE_IMAGE      = 'eclipse-temurin:17-jre'
-        MYSQL_IMAGE    = 'mysql:8.0'
-        CURL_IMAGE     = 'curlimages/curl:8.7.1'
-        GITLEAKS_IMAGE = 'zricethezav/gitleaks:latest'
-        TRIVY_IMAGE    = 'ghcr.io/aquasecurity/trivy:latest'
-        ZAP_IMAGE      = 'ghcr.io/zaproxy/zaproxy:stable'
-        OPA_IMAGE      = 'openpolicyagent/opa:latest'
+        MAVEN_IMAGE     = 'maven:3.9.9-eclipse-temurin-17'
+        JRE_IMAGE       = 'eclipse-temurin:17-jre'
+        MYSQL_IMAGE     = 'mysql:8.0'
+        CURL_IMAGE      = 'curlimages/curl:8.7.1'
+        GITLEAKS_IMAGE  = 'zricethezav/gitleaks:latest'
+        TRIVY_IMAGE     = 'ghcr.io/aquasecurity/trivy:latest'
+        ZAP_IMAGE       = 'ghcr.io/zaproxy/zaproxy:stable'
+        OPA_IMAGE       = 'openpolicyagent/opa:latest'
     }
 
     stages {
@@ -57,7 +57,9 @@ pipeline {
                       "$MAVEN_IMAGE" \
                       sh -lc "mvn -B -f '$WORKSPACE/pom.xml' -Dmaven.repo.local=/var/jenkins_home/.m2/repository clean package -DskipTests"
 
-                    ls -1 "$WORKSPACE"/target/*.jar | grep -v '\\.original$' >/dev/null
+                    JAR_PATH=$(find "$WORKSPACE/target" -maxdepth 1 -type f -name "*.jar" ! -name "*.original" | head -n 1)
+                    echo "JAR_PATH=$JAR_PATH"
+                    test -n "$JAR_PATH"
                 '''
             }
         }
@@ -99,20 +101,6 @@ pipeline {
                           . || true
 
                         test -s reports/trivy/trivy-report.json || echo '{"Results":[]}' > reports/trivy/trivy-report.json
-
-                        docker run --rm \
-                          --volumes-from jenkins \
-                          -w "$WORKSPACE" \
-                          -v "$WORKSPACE/.trivycache:/root/.cache/trivy" \
-                          "$TRIVY_IMAGE" fs \
-                          --scanners vuln \
-                          --severity LOW,MEDIUM,HIGH,CRITICAL \
-                          --format template \
-                          --template "@contrib/html.tpl" \
-                          --output reports/trivy/trivy-report.html \
-                          . || true
-
-                        test -s reports/trivy/trivy-report.html || echo '<html><body><h2>Trivy report unavailable</h2></body></html>' > reports/trivy/trivy-report.html
                     '''
                 }
             }
@@ -123,12 +111,24 @@ pipeline {
                 catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
                     withCredentials([string(credentialsId: 'sonar-token', variable: 'SONAR_TOKEN')]) {
                         sh '''
+                            test -d "$WORKSPACE/target/classes"
+                            test -n "$SONAR_TOKEN"
+
                             docker run --rm \
                               --volumes-from jenkins \
                               --add-host=host.docker.internal:host-gateway \
                               -w "$WORKSPACE" \
                               "$MAVEN_IMAGE" \
-                              sh -lc "mvn -B -f '$WORKSPACE/pom.xml' -Dmaven.repo.local=/var/jenkins_home/.m2/repository clean compile org.sonarsource.scanner.maven:sonar-maven-plugin:4.0.0.4121:sonar -DskipTests -Dsonar.projectKey=$SONAR_PROJECT_KEY -Dsonar.host.url=$SONAR_HOST_URL -Dsonar.token=$SONAR_TOKEN -Dsonar.java.binaries=target/classes -Dsonar.qualitygate.wait=false" || true
+                              sh -lc "mvn -B \
+                                -f '$WORKSPACE/pom.xml' \
+                                -Dmaven.repo.local=/var/jenkins_home/.m2/repository \
+                                org.sonarsource.scanner.maven:sonar-maven-plugin:4.0.0.4121:sonar \
+                                -DskipTests \
+                                -Dsonar.projectKey=$SONAR_PROJECT_KEY \
+                                -Dsonar.host.url=$SONAR_HOST_URL \
+                                -Dsonar.login=$SONAR_TOKEN \
+                                -Dsonar.java.binaries=target/classes \
+                                -Dsonar.qualitygate.wait=false" || true
                         '''
                     }
                 }
@@ -194,7 +194,8 @@ pipeline {
                 sh '''
                     docker rm -f "$APP_CONTAINER" 2>/dev/null || true
 
-                    JAR_PATH=$(ls -1 "$WORKSPACE"/target/*.jar | grep -v '\\.original$' | head -n 1)
+                    JAR_PATH=$(find "$WORKSPACE/target" -maxdepth 1 -type f -name "*.jar" ! -name "*.original" | head -n 1)
+                    echo "JAR_PATH=$JAR_PATH"
                     test -n "$JAR_PATH"
 
                     docker run -d \
