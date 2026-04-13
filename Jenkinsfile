@@ -1,33 +1,5 @@
-/* ===========================================================================
- * PIPELINE DEVSECOPS — ARCHIVAGE DOC (VERSION FINALE v3)
- *
- * Corrections v3 :
- *   ✅ HOST_WS calculé dynamiquement (sed sur WORKSPACE) — plus de nom de job
- *      hardcodé → fonctionne quel que soit le nom du job Jenkins
- *   ✅ JENKINS_VOLUME_ROOT = '/var/lib/docker/volumes/jenkins_home/_data'
- *      (confirmé via docker inspect jenkins)
- *   ✅ Backslashes corrigés : \\\\ → \ dans tous les blocs sh
- *   ✅ Maven exécuté directement (tools directive) — résout le DinD path issue
- *   ✅ Outils sécurité (Gitleaks, Trivy, ZAP, OPA, Syft) restent en Docker
- *
- * PRÉ-REQUIS JENKINS :
- *   1. Maven "Maven-3.9" configuré dans Global Tool Configuration
- *   2. JDK "JDK-17" configuré dans Global Tool Configuration
- *   3. Credentials :
- *       ID "sonar-token"           → Secret Text
- *       ID "mysql-root-password"   → Secret Text
- *       ID "mysql-app-credentials" → Username/Password
- *   4. Plugins : SonarQube Scanner, HTML Publisher, JUnit
- *   5. Fichier policy/security.rego présent dans le repo Git
- * =========================================================================== */
-
 pipeline {
     agent any
-
-    tools {
-        maven 'Maven-3.9'
-        jdk   'JDK-17'
-    }
 
     options {
         skipDefaultCheckout(true)
@@ -44,72 +16,83 @@ pipeline {
         MYSQL_CONTAINER     = 'mysql-archivage'
         APP_CONTAINER       = 'app-archivage'
         APP_IMAGE           = "archivage-app:${BUILD_NUMBER}"
-        // Racine du volume Jenkins sur l'hôte (confirmé via docker inspect jenkins)
-        // Calcul dynamique dans chaque sh : HOST_WS = JENKINS_VOLUME_ROOT + WORKSPACE sans /var/jenkins_home
         JENKINS_VOLUME_ROOT = '/var/lib/docker/volumes/jenkins_home/_data'
     }
 
     stages {
 
-        // ════════════════════════════════════════════════════════════════════
         stage('Checkout') {
-        // ════════════════════════════════════════════════════════════════════
-            steps { checkout scm }
+            steps {
+                checkout scm
+            }
         }
 
-        // ════════════════════════════════════════════════════════════════════
         stage('Tests Unitaires') {
-        // ════════════════════════════════════════════════════════════════════
             steps {
-                sh '''
+                sh '''#!/bin/sh
+                    set -eu
+                    HOST_WS="${JENKINS_VOLUME_ROOT}${WORKSPACE#/var/jenkins_home}"
+
                     echo "--------------------------------------------------------"
                     echo " [1/7] TESTS UNITAIRES (JUnit + JaCoCo)"
                     echo "--------------------------------------------------------"
-                    mvn -q -B verify \
-                        -Dmaven.repo.local="${JENKINS_HOME}/.m2/repository"
+                    echo "WORKSPACE Jenkins : ${WORKSPACE}"
+                    echo "WORKSPACE Hote    : ${HOST_WS}"
+
+                    docker run --rm \
+                      -v "${HOST_WS}:/workspace" \
+                      -v "${JENKINS_VOLUME_ROOT}/.m2:/root/.m2" \
+                      -w /workspace \
+                      maven:3.9.9-eclipse-temurin-17 \
+                      mvn -q -B verify -Dmaven.repo.local=/root/.m2/repository
                 '''
             }
             post {
                 always {
-                    junit allowEmptyResults: true,
-                          testResults: 'target/surefire-reports/*.xml'
+                    junit allowEmptyResults: true, testResults: 'target/surefire-reports/*.xml'
                     publishHTML(target: [
-                        allowMissing: true, alwaysLinkToLastBuild: true, keepAll: true,
-                        reportDir: 'target/site/jacoco', reportFiles: 'index.html',
+                        allowMissing: true,
+                        alwaysLinkToLastBuild: true,
+                        keepAll: true,
+                        reportDir: 'target/site/jacoco',
+                        reportFiles: 'index.html',
                         reportName: 'JaCoCo Coverage'
                     ])
                 }
             }
         }
 
-        // ════════════════════════════════════════════════════════════════════
         stage('Build & Package') {
-        // ════════════════════════════════════════════════════════════════════
             steps {
-                sh '''
+                sh '''#!/bin/sh
+                    set -eu
+                    HOST_WS="${JENKINS_VOLUME_ROOT}${WORKSPACE#/var/jenkins_home}"
+
                     echo "--------------------------------------------------------"
                     echo " [2/7] COMPILATION (Maven package)"
                     echo "--------------------------------------------------------"
-                    mvn -q -B -T 1C package -DskipTests \
-                        -Dmaven.repo.local="${JENKINS_HOME}/.m2/repository"
+
+                    docker run --rm \
+                      -v "${HOST_WS}:/workspace" \
+                      -v "${JENKINS_VOLUME_ROOT}/.m2:/root/.m2" \
+                      -w /workspace \
+                      maven:3.9.9-eclipse-temurin-17 \
+                      mvn -q -B -T 1C package -DskipTests -Dmaven.repo.local=/root/.m2/repository
                 '''
             }
         }
 
-        // ════════════════════════════════════════════════════════════════════
         stage('Analyses Statiques (SAST/SCA)') {
-        // ════════════════════════════════════════════════════════════════════
             parallel {
 
-                // ── Secrets ──────────────────────────────────────────────────
                 stage('Secrets (Gitleaks)') {
                     steps {
                         catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
-                            sh '''
-                                # Chemin hôte dynamique — indépendant du nom du job
-                                HOST_WS="${JENKINS_VOLUME_ROOT}$(echo ${WORKSPACE} | sed 's|/var/jenkins_home||')"
+                            sh '''#!/bin/sh
+                                set -eu
+                                HOST_WS="${JENKINS_VOLUME_ROOT}${WORKSPACE#/var/jenkins_home}"
+
                                 echo " [3A] SCAN DES SECRETS (Gitleaks)"
-                                echo " Workspace hote : ${HOST_WS}"
                                 mkdir -p "${WORKSPACE}/reports/gitleaks"
 
                                 docker run --rm \
@@ -117,6 +100,7 @@ pipeline {
                                   -v "${HOST_WS}:/workspace:ro" \
                                   zricethezav/gitleaks:latest detect \
                                     --source /workspace \
+                                    --log-opts="--all" \
                                     --report-format json \
                                     --report-path /workspace/reports/gitleaks/gitleaks-report.json \
                                     --exit-code 0
@@ -125,14 +109,14 @@ pipeline {
                     }
                 }
 
-                // ── SCA ───────────────────────────────────────────────────────
                 stage('SCA (Trivy FS)') {
                     steps {
                         catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
-                            sh '''
-                                HOST_WS="${JENKINS_VOLUME_ROOT}$(echo ${WORKSPACE} | sed 's|/var/jenkins_home||')"
+                            sh '''#!/bin/sh
+                                set -eu
+                                HOST_WS="${JENKINS_VOLUME_ROOT}${WORKSPACE#/var/jenkins_home}"
+
                                 echo " [3B] SCAN DES DEPENDANCES (Trivy FS)"
-                                echo " Workspace hote : ${HOST_WS}"
                                 mkdir -p "${WORKSPACE}/reports/trivy" "${WORKSPACE}/.trivycache"
 
                                 docker run --rm \
@@ -150,15 +134,23 @@ pipeline {
                     }
                 }
 
-                // ── SAST ──────────────────────────────────────────────────────
                 stage('SAST (SonarQube)') {
-                // Maven direct — pas de docker run ici
                     steps {
                         withCredentials([string(credentialsId: 'sonar-token', variable: 'SONAR_TOKEN')]) {
-                            sh '''
+                            sh '''#!/bin/sh
+                                set -eu
+                                HOST_WS="${JENKINS_VOLUME_ROOT}${WORKSPACE#/var/jenkins_home}"
+
                                 echo " [3C] ANALYSE QUALITE (SonarQube)"
-                                mvn -q -B \
-                                    -Dmaven.repo.local="${JENKINS_HOME}/.m2/repository" \
+
+                                docker run --rm \
+                                  --add-host=host.docker.internal:host-gateway \
+                                  -v "${HOST_WS}:/workspace" \
+                                  -v "${JENKINS_VOLUME_ROOT}/.m2:/root/.m2" \
+                                  -w /workspace \
+                                  maven:3.9.9-eclipse-temurin-17 \
+                                  mvn -q -B \
+                                    -Dmaven.repo.local=/root/.m2/repository \
                                     org.sonarsource.scanner.maven:sonar-maven-plugin:4.0.0.4121:sonar \
                                     -Dsonar.projectKey=archivage-Doc \
                                     -Dsonar.host.url=http://host.docker.internal:9000 \
@@ -169,14 +161,14 @@ pipeline {
                     }
                 }
 
-                // ── SBOM ──────────────────────────────────────────────────────
                 stage('SBOM (CycloneDX / Syft)') {
                     steps {
                         catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
-                            sh '''
-                                HOST_WS="${JENKINS_VOLUME_ROOT}$(echo ${WORKSPACE} | sed 's|/var/jenkins_home||')"
+                            sh '''#!/bin/sh
+                                set -eu
+                                HOST_WS="${JENKINS_VOLUME_ROOT}${WORKSPACE#/var/jenkins_home}"
+
                                 echo " [3D] GENERATION SBOM (Syft)"
-                                echo " Workspace hote : ${HOST_WS}"
                                 mkdir -p "${WORKSPACE}/reports/sbom"
 
                                 docker run --rm \
@@ -193,39 +185,35 @@ pipeline {
             }
         }
 
-        // ════════════════════════════════════════════════════════════════════
         stage('SonarQube Quality Gate') {
-        // ════════════════════════════════════════════════════════════════════
             steps {
-                withSonarQubeEnv('SonarQube') {
+                timeout(time: 10, unit: 'MINUTES') {
                     waitForQualityGate abortPipeline: true
                 }
             }
         }
 
-        // ════════════════════════════════════════════════════════════════════
         stage('Build Image Docker') {
-        // ════════════════════════════════════════════════════════════════════
             steps {
-                sh '''
+                sh '''#!/bin/sh
+                    set -eu
                     echo "--------------------------------------------------------"
                     echo " [4/7] BUILD IMAGE DOCKER"
                     echo "--------------------------------------------------------"
                     docker build -t "${APP_IMAGE}" "${WORKSPACE}"
-                    echo " Image construite : ${APP_IMAGE}"
+                    echo "Image construite : ${APP_IMAGE}"
                 '''
             }
         }
 
-        // ════════════════════════════════════════════════════════════════════
         stage('Trivy Image Scan') {
-        // ════════════════════════════════════════════════════════════════════
             steps {
                 catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
-                    sh '''
-                        HOST_WS="${JENKINS_VOLUME_ROOT}$(echo ${WORKSPACE} | sed 's|/var/jenkins_home||')"
+                    sh '''#!/bin/sh
+                        set -eu
+                        HOST_WS="${JENKINS_VOLUME_ROOT}${WORKSPACE#/var/jenkins_home}"
+
                         echo " [5/7] SCAN IMAGE DOCKER (Trivy)"
-                        echo " Workspace hote : ${HOST_WS}"
                         mkdir -p "${WORKSPACE}/reports/trivy" "${WORKSPACE}/.trivycache"
 
                         docker run --rm \
@@ -243,17 +231,19 @@ pipeline {
             }
         }
 
-        // ════════════════════════════════════════════════════════════════════
         stage('Deploy (Test Env)') {
-        // ════════════════════════════════════════════════════════════════════
             steps {
                 withCredentials([
                     string(credentialsId: 'mysql-root-password', variable: 'MYSQL_ROOT_PASS'),
-                    usernamePassword(credentialsId: 'mysql-app-credentials',
-                                     usernameVariable: 'MYSQL_USER',
-                                     passwordVariable: 'MYSQL_PASS')
+                    usernamePassword(
+                        credentialsId: 'mysql-app-credentials',
+                        usernameVariable: 'MYSQL_USER',
+                        passwordVariable: 'MYSQL_PASS'
+                    )
                 ]) {
-                    sh '''
+                    sh '''#!/bin/sh
+                        set -eu
+
                         echo "--------------------------------------------------------"
                         echo " [6/7] DEPLOIEMENT ENVIRONNEMENT DE TEST"
                         echo "--------------------------------------------------------"
@@ -272,14 +262,22 @@ pipeline {
                           -e MYSQL_PASSWORD="${MYSQL_PASS}" \
                           mysql:8.0
 
-                        echo " Attente demarrage MySQL..."
-                        for i in $(seq 1 20); do
-                          docker exec "${MYSQL_CONTAINER}" \
-                            mysqladmin ping -h localhost -u"${MYSQL_USER}" -p"${MYSQL_PASS}" --silent \
-                            2>/dev/null && break
-                          echo "  Tentative ${i}/20..."
+                        echo "Attente demarrage MySQL..."
+                        OK_MYSQL=0
+                        for i in $(seq 1 24); do
+                          if docker exec "${MYSQL_CONTAINER}" mysqladmin ping -h localhost -u"${MYSQL_USER}" -p"${MYSQL_PASS}" --silent >/dev/null 2>&1; then
+                            OK_MYSQL=1
+                            break
+                          fi
+                          echo "  Tentative ${i}/24..."
                           sleep 5
                         done
+
+                        if [ "${OK_MYSQL}" -ne 1 ]; then
+                          echo "MySQL n'a pas demarre correctement"
+                          docker logs "${MYSQL_CONTAINER}" || true
+                          exit 1
+                        fi
 
                         docker run -d \
                           --name "${APP_CONTAINER}" \
@@ -294,13 +292,12 @@ pipeline {
                           -e JWT_SECRET=***REMOVED*** \
                           "${APP_IMAGE}"
 
-                        echo " Attente demarrage Spring Boot..."
+                        echo "Attente demarrage Spring Boot..."
                         READY=0
                         for i in $(seq 1 24); do
-                          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-                            http://localhost:${APP_PORT}/actuator/health 2>/dev/null || echo "000")
+                          STATUS=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:${APP_PORT}/actuator/health" 2>/dev/null || echo "000")
                           if echo "${STATUS}" | grep -qE "^(200|302|401|403)$"; then
-                            echo " Application disponible (HTTP ${STATUS})"
+                            echo "Application disponible (HTTP ${STATUS})"
                             READY=1
                             break
                           fi
@@ -309,8 +306,8 @@ pipeline {
                         done
 
                         if [ "${READY}" -ne 1 ]; then
-                          echo " Timeout - logs :"
-                          docker logs "${APP_CONTAINER}" 2>&1
+                          echo "Timeout - logs application :"
+                          docker logs "${APP_CONTAINER}" 2>&1 || true
                           exit 1
                         fi
                     '''
@@ -318,18 +315,17 @@ pipeline {
             }
         }
 
-        // ════════════════════════════════════════════════════════════════════
         stage('DAST & Policy') {
-        // ════════════════════════════════════════════════════════════════════
             parallel {
 
                 stage('DAST (OWASP ZAP)') {
                     steps {
                         catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
-                            sh '''
-                                HOST_WS="${JENKINS_VOLUME_ROOT}$(echo ${WORKSPACE} | sed 's|/var/jenkins_home||')"
+                            sh '''#!/bin/sh
+                                set -eu
+                                HOST_WS="${JENKINS_VOLUME_ROOT}${WORKSPACE#/var/jenkins_home}"
+
                                 echo " [7A] DAST - OWASP ZAP Baseline Scan"
-                                echo " Workspace hote : ${HOST_WS}"
                                 mkdir -p "${WORKSPACE}/reports/zap"
 
                                 docker run --rm \
@@ -349,8 +345,11 @@ pipeline {
                     post {
                         always {
                             publishHTML(target: [
-                                allowMissing: true, alwaysLinkToLastBuild: true, keepAll: true,
-                                reportDir: 'reports/zap', reportFiles: 'zap-report.html',
+                                allowMissing: true,
+                                alwaysLinkToLastBuild: true,
+                                keepAll: true,
+                                reportDir: 'reports/zap',
+                                reportFiles: 'zap-report.html',
                                 reportName: 'ZAP DAST Report'
                             ])
                         }
@@ -360,20 +359,21 @@ pipeline {
                 stage('Policy (OPA)') {
                     steps {
                         catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
-                            sh '''
-                                HOST_WS="${JENKINS_VOLUME_ROOT}$(echo ${WORKSPACE} | sed 's|/var/jenkins_home||')"
+                            sh '''#!/bin/sh
+                                set -eu
+                                HOST_WS="${JENKINS_VOLUME_ROOT}${WORKSPACE#/var/jenkins_home}"
+
                                 echo " [7B] POLICY CHECK (OPA)"
-                                echo " Workspace hote : ${HOST_WS}"
                                 mkdir -p "${WORKSPACE}/reports/opa"
 
                                 if [ ! -f "${WORKSPACE}/policy/security.rego" ]; then
-                                  echo " ERREUR : policy/security.rego introuvable"
+                                  echo "ERREUR : policy/security.rego introuvable"
                                   exit 1
                                 fi
 
                                 TRIVY_REPORT="${WORKSPACE}/reports/trivy/trivy-fs-report.json"
                                 if [ ! -f "${TRIVY_REPORT}" ]; then
-                                  echo " Rapport Trivy absent - OPA ignore"
+                                  echo "Rapport Trivy absent - OPA ignore"
                                   exit 0
                                 fi
 
@@ -387,14 +387,15 @@ pipeline {
                                     "data.security.allow" \
                                     --format raw)
 
-                                echo " Resultat OPA : ${OPA_RESULT}"
+                                echo "Resultat OPA : ${OPA_RESULT}"
                                 echo "${OPA_RESULT}" > "${WORKSPACE}/reports/opa/opa-result.txt"
 
                                 if [ "${OPA_RESULT}" != "true" ]; then
-                                  echo " POLICY VIOLATION : allow=false"
+                                  echo "POLICY VIOLATION : allow=false"
                                   exit 1
                                 fi
-                                echo " Policy validee (allow=true)"
+
+                                echo "Policy validee (allow=true)"
                             '''
                         }
                     }
@@ -405,7 +406,7 @@ pipeline {
 
     post {
         always {
-            sh '''
+            sh '''#!/bin/sh
                 echo "--------------------------------------------------------"
                 echo " NETTOYAGE"
                 echo "--------------------------------------------------------"
@@ -415,8 +416,14 @@ pipeline {
             '''
             archiveArtifacts artifacts: 'reports/**/*', allowEmptyArchive: true
         }
-        success  { echo ' PIPELINE DEVSECOPS TERMINE AVEC SUCCES' }
-        failure  { echo ' PIPELINE ECHOUE - consultez les rapports' }
-        unstable { echo ' PIPELINE INSTABLE - verifiez les stages UNSTABLE' }
+        success {
+            echo 'PIPELINE DEVSECOPS TERMINE AVEC SUCCES'
+        }
+        failure {
+            echo 'PIPELINE ECHOUE - consultez les rapports'
+        }
+        unstable {
+            echo 'PIPELINE INSTABLE - verifiez les stages UNSTABLE'
+        }
     }
 }
