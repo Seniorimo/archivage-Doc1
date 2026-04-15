@@ -1,4 +1,3 @@
-// Correction: l'application attend le placeholder GITHUB_OAUTH_SECRET, pas GITHUBOAUTHSECRET, d'après les logs du conteneur. [file:4]
 pipeline {
     agent any
 
@@ -224,8 +223,7 @@ REGO
                       -e GITHUB_OAUTH_SECRET="test-secret" \
                       -e JAVA_TOOL_OPTIONS="-DGITHUB_OAUTH_SECRET=test-secret -Dapp.oauth.enabled=false" \
                       eclipse-temurin:17-jre \
-                      sh -lc "printenv | grep -E '^GITHUB_OAUTH_SECRET=' >/dev/null && \
-                             java -jar '$JARPATH' \
+                      sh -lc "java -jar '$JARPATH' \
                                --server.port=$APP_PORT \
                                --spring.datasource.url=jdbc:mysql://$MYSQL_CONTAINER:3306/archivagedb \
                                --spring.datasource.username=archivageuser \
@@ -262,29 +260,32 @@ REGO
         }
 
         stage('DAST - OWASP ZAP') {
-    steps {
-        catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
-            sh '''
-                set -eux
+            steps {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
+                    sh '''
+                        set -eux
 
-                docker run --rm \
-                  --network "$NETWORK_NAME" \
-                  --volumes-from jenkins \
-                  -v "$WORKSPACE:/zap/wrk" \
-                  -w /zap/wrk \
-                  ghcr.io/zaproxy/zaproxy:stable \
-                  zap-baseline.py \
-                  -t "http://$APP_CONTAINER:$APP_PORT/" \
-                  -J "reports/zap/zap-report.json" \
-                  -r "reports/zap/zap-report.html" \
-                  -I || true
+                        chmod 777 "$WORKSPACE/reports/zap"
 
-                test -s reports/zap/zap-report.json || echo '{"site":[{"alerts":[]}]}' > reports/zap/zap-report.json
-                test -s reports/zap/zap-report.html || echo '<html><body><h2>ZAP report unavailable</h2></body></html>' > reports/zap/zap-report.html
-            '''
+                        docker run --rm \
+                          --user root \
+                          --network "$NETWORK_NAME" \
+                          --volumes-from jenkins \
+                          -v "$WORKSPACE:/zap/wrk:rw" \
+                          -w /zap/wrk \
+                          ghcr.io/zaproxy/zaproxy:stable \
+                          zap-baseline.py \
+                          -t "http://$APP_CONTAINER:$APP_PORT/" \
+                          -J "reports/zap/zap-report.json" \
+                          -r "reports/zap/zap-report.html" \
+                          -I || true
+
+                        test -s reports/zap/zap-report.json || echo '{"site":[{"alerts":[]}]}' > reports/zap/zap-report.json
+                        test -s reports/zap/zap-report.html || echo '<html><body><h2>ZAP report unavailable</h2></body></html>' > reports/zap/zap-report.html
+                    '''
+                }
+            }
         }
-    }
-}
 
         stage('Policy - OPA Gate') {
             steps {
