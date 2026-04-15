@@ -217,6 +217,7 @@ REGO
                       --name "$APP_CONTAINER" \
                       --network "$NETWORK_NAME" \
                       --volumes-from jenkins \
+                      --restart on-failure:5 \
                       -w "$WORKSPACE" \
                       eclipse-temurin:17-jre \
                       sh -lc "java -jar '$JARPATH' \
