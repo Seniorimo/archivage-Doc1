@@ -37,16 +37,16 @@ pipeline {
                     docker network inspect "$NETWORK_NAME" >/dev/null 2>&1 || docker network create "$NETWORK_NAME"
 
                     cat > policy/security-gate.rego <<'REGO'
-                    package security
+package security
 
-                    default allow := false
+default allow := false
 
-                    allow if {
-                      count(input.gitleaks) == 0
-                      input.trivy.critical == 0
-                      input.zap.high == 0
-                    }
-                    REGO
+allow if {
+  count(input.gitleaks) == 0
+  input.trivy.critical == 0
+  input.zap.high == 0
+}
+REGO
                 '''
             }
         }
@@ -126,10 +126,12 @@ pipeline {
                             test -d "$WORKSPACE/target/classes"
                             test -f "$WORKSPACE/.jarpath"
 
+                            # CORRECTION APPLIQUÉE : Pont réseau vers host.docker.internal et URL en HTTP
                             docker run --rm \
                               --network "$NETWORK_NAME" \
                               --volumes-from jenkins \
-                              -e SONAR_HOST_URL="$SONAR_HOST_URL" \
+                              --add-host=host.docker.internal:host-gateway \
+                              -e SONAR_HOST_URL="http://host.docker.internal:9000" \
                               -e SONAR_AUTH_TOKEN="$SONAR_AUTH_TOKEN" \
                               -w "$WORKSPACE" \
                               maven:3.9.9-eclipse-temurin-17 \
@@ -138,7 +140,7 @@ pipeline {
                                 org.sonarsource.scanner.maven:sonar-maven-plugin:4.0.0.4121:sonar \
                                 -DskipTests \
                                 -Dsonar.projectKey='$APP_NAME' \
-                                -Dsonar.host.url='$SONAR_HOST_URL' \
+                                -Dsonar.host.url='http://host.docker.internal:9000' \
                                 -Dsonar.login='$SONAR_AUTH_TOKEN' \
                                 -Dsonar.java.binaries='target/classes' \
                                 -Dsonar.qualitygate.wait=false"
