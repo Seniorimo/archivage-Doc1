@@ -126,7 +126,6 @@ REGO
                             test -d "$WORKSPACE/target/classes"
                             test -f "$WORKSPACE/.jarpath"
 
-                            # Configuration HTTP et Pont réseau vers host.docker.internal
                             docker run --rm \
                               --network "$NETWORK_NAME" \
                               --volumes-from jenkins \
@@ -199,7 +198,6 @@ REGO
 
                     test "$READY" -eq 1
                     
-                    # Délai pour laisser à MySQL le temps de finaliser la création de la BDD
                     echo "MySQL répondu au ping. Pause de 10 secondes pour garantir l'initialisation..."
                     sleep 10
                 '''
@@ -217,13 +215,14 @@ REGO
                     test -n "$JARPATH"
                     test -f "$JARPATH"
 
-                    # Ajout de --restart on-failure:5 pour contrer les Race Conditions
+                    # CORRECTION APPLIQUÉE : Injection du paramètre GITHUBOAUTHSECRET
                     docker run -d \
                       --name "$APP_CONTAINER" \
                       --network "$NETWORK_NAME" \
                       --volumes-from jenkins \
                       --restart on-failure:5 \
                       -w "$WORKSPACE" \
+                      -e GITHUBOAUTHSECRET="secret_temporaire_test_local_123" \
                       eclipse-temurin:17-jre \
                       sh -lc "java -jar '$JARPATH' \
                         --server.port=$APP_PORT \
@@ -233,7 +232,6 @@ REGO
 
                     READY=0
                     for i in $(seq 1 20); do
-                      # Test HTTP plus souple (accepte les erreurs Spring Security et l'absence d'actuator)
                       if docker run --rm --network "$NETWORK_NAME" curlimages/curl:8.7.1 \
                         -s -o /dev/null -w "%{http_code}" "http://$APP_CONTAINER:$APP_PORT/" | grep -qE "200|301|302|401|403|404"; then
                         READY=1
@@ -243,7 +241,6 @@ REGO
                       sleep 5
                     done
 
-                    # Logs obligatoires si le conteneur a crashé définitivement
                     if [ "$READY" -ne 1 ]; then
                       set +x
                       echo "============================================================"
