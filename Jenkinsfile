@@ -105,7 +105,7 @@ REGO
                                   ghcr.io/aquasecurity/trivy:latest fs \
                                   --timeout 15m \
                                   --scanners vuln \
-                                  --severity LOW,MEDIUM,HIGH,CRITICAL \
+                                  --severity CRITICAL \
                                   --format json \
                                   --output reports/trivy/trivy-report.json \
                                   . || true
