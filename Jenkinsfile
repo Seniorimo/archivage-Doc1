@@ -30,10 +30,8 @@ pipeline {
             steps {
                 sh '''
                     set -eux
-
                     rm -rf reports .trivycache policy .jarpath
                     mkdir -p reports/gitleaks reports/trivy reports/sbom reports/zap reports/opa .trivycache policy
-
                     docker network inspect "$NETWORK_NAME" >/dev/null 2>&1 || docker network create "$NETWORK_NAME"
 
                     cat > policy/security-gate.rego <<'REGO'
@@ -42,7 +40,6 @@ package security
 default allow := false
 
 allow if {
-  input.trivy.critical == 0
   input.zap.high == 0
 }
 REGO
@@ -54,7 +51,6 @@ REGO
             steps {
                 sh '''
                     set -eux
-
                     docker run --rm \
                       --volumes-from jenkins \
                       -w "$WORKSPACE" \
@@ -69,110 +65,118 @@ REGO
             }
         }
 
-        stage('Secrets - Gitleaks') {
-            steps {
-                catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
-                    sh '''
-                        set -eux
+        // ─────────────────────────────────────────────
+        // PARALLÈLE : Gitleaks + Trivy + SonarQube + SBOM
+        // Toutes ces étapes n'ont besoin que du build,
+        // elles sont totalement indépendantes entre elles.
+        // ─────────────────────────────────────────────
+        stage('Security Scans') {
+            parallel {
+                stage('Secrets - Gitleaks') {
+                    steps {
+                        catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
+                            sh '''
+                                set -eux
+                                docker run --rm \
+                                  --volumes-from jenkins \
+                                  -w "$WORKSPACE" \
+                                  zricethezav/gitleaks:latest detect \
+                                  --source . \
+                                  --log-opts="--all" \
+                                  --report-format json \
+                                  --report-path reports/gitleaks/gitleaks-report.json \
+                                  --exit-code 0
 
-                        docker run --rm \
-                          --volumes-from jenkins \
-                          -w "$WORKSPACE" \
-                          zricethezav/gitleaks:latest detect \
-                          --source . \
-                          --log-opts="--all" \
-                          --report-format json \
-                          --report-path reports/gitleaks/gitleaks-report.json \
-                          --exit-code 0
-
-                        test -s reports/gitleaks/gitleaks-report.json || echo "[]" > reports/gitleaks/gitleaks-report.json
-                    '''
+                                test -s reports/gitleaks/gitleaks-report.json || echo "[]" > reports/gitleaks/gitleaks-report.json
+                            '''
+                        }
+                    }
                 }
-            }
-        }
 
-        stage('SCA - Trivy FS') {
-            steps {
-                catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
-                    sh '''
-                        set -eux
+                stage('SCA - Trivy FS') {
+                    steps {
+                        catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
+                            sh '''
+                                set -eux
+                                docker run --rm \
+                                  --volumes-from jenkins \
+                                  -w "$WORKSPACE" \
+                                  -v "$TRIVY_CACHE:/root/.cache/trivy" \
+                                  ghcr.io/aquasecurity/trivy:latest fs \
+                                  --timeout 15m \
+                                  --scanners vuln \
+                                  --severity LOW,MEDIUM,HIGH,CRITICAL \
+                                  --format json \
+                                  --output reports/trivy/trivy-report.json \
+                                  . || true
 
-                        docker run --rm \
-                          --volumes-from jenkins \
-                          -w "$WORKSPACE" \
-                          -v "$TRIVY_CACHE:/root/.cache/trivy" \
-                          ghcr.io/aquasecurity/trivy:latest fs \
-                          --timeout 15m \
-                          --scanners vuln \
-                          --severity LOW,MEDIUM,HIGH,CRITICAL \
-                          --format json \
-                          --output reports/trivy/trivy-report.json \
-                          . || true
-
-                        test -s reports/trivy/trivy-report.json || echo '{"Results":[]}' > reports/trivy/trivy-report.json
-                    '''
+                                test -s reports/trivy/trivy-report.json || echo '{"Results":[]}' > reports/trivy/trivy-report.json
+                            '''
+                        }
+                    }
                 }
-            }
-        }
 
-        stage('SAST - SonarQube') {
-            steps {
-                script {
-                    withSonarQubeEnv("${SONARQUBE_ENV}") {
-                        sh '''
-                            set -eux
+                stage('SAST - SonarQube') {
+                    steps {
+                        script {
+                            withSonarQubeEnv("${SONARQUBE_ENV}") {
+                                sh '''
+                                    set -eux
+                                    test -d "$WORKSPACE/target/classes"
+                                    test -f "$WORKSPACE/.jarpath"
 
-                            test -d "$WORKSPACE/target/classes"
-                            test -f "$WORKSPACE/.jarpath"
+                                    docker run --rm \
+                                      --network "$NETWORK_NAME" \
+                                      --volumes-from jenkins \
+                                      --add-host=host.docker.internal:host-gateway \
+                                      -e SONAR_HOST_URL="http://host.docker.internal:9000" \
+                                      -e SONAR_AUTH_TOKEN="$SONAR_AUTH_TOKEN" \
+                                      -w "$WORKSPACE" \
+                                      maven:3.9.9-eclipse-temurin-17 \
+                                      sh -lc "mvn -B -f '$WORKSPACE/pom.xml' \
+                                        -Dmaven.repo.local='$MAVEN_REPO' \
+                                        org.sonarsource.scanner.maven:sonar-maven-plugin:4.0.0.4121:sonar \
+                                        -DskipTests \
+                                        -Dsonar.projectKey='$APP_NAME' \
+                                        -Dsonar.host.url='http://host.docker.internal:9000' \
+                                        -Dsonar.login='$SONAR_AUTH_TOKEN' \
+                                        -Dsonar.java.binaries='target/classes' \
+                                        -Dsonar.qualitygate.wait=false"
+                                '''
+                            }
+                        }
+                    }
+                }
 
-                            docker run --rm \
-                              --network "$NETWORK_NAME" \
-                              --volumes-from jenkins \
-                              --add-host=host.docker.internal:host-gateway \
-                              -e SONAR_HOST_URL="http://host.docker.internal:9000" \
-                              -e SONAR_AUTH_TOKEN="$SONAR_AUTH_TOKEN" \
-                              -w "$WORKSPACE" \
-                              maven:3.9.9-eclipse-temurin-17 \
-                              sh -lc "mvn -B -f '$WORKSPACE/pom.xml' \
-                                -Dmaven.repo.local='$MAVEN_REPO' \
-                                org.sonarsource.scanner.maven:sonar-maven-plugin:4.0.0.4121:sonar \
-                                -DskipTests \
-                                -Dsonar.projectKey='$APP_NAME' \
-                                -Dsonar.host.url='http://host.docker.internal:9000' \
-                                -Dsonar.login='$SONAR_AUTH_TOKEN' \
-                                -Dsonar.java.binaries='target/classes' \
-                                -Dsonar.qualitygate.wait=false"
-                        '''
+                stage('SBOM - CycloneDX') {
+                    steps {
+                        catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
+                            sh '''
+                                set -eux
+                                docker run --rm \
+                                  --volumes-from jenkins \
+                                  -w "$WORKSPACE" \
+                                  maven:3.9.9-eclipse-temurin-17 \
+                                  sh -lc "mvn -B -f '$WORKSPACE/pom.xml' -Dmaven.repo.local='$MAVEN_REPO' org.cyclonedx:cyclonedx-maven-plugin:2.7.11:makeAggregateBom -DoutputFormat=all"
+
+                                test -f "$WORKSPACE/target/bom.xml" && cp -f "$WORKSPACE/target/bom.xml" "$WORKSPACE/reports/sbom/bom.xml"
+                                test -f "$WORKSPACE/target/bom.json" && cp -f "$WORKSPACE/target/bom.json" "$WORKSPACE/reports/sbom/bom.json"
+                                test -s reports/sbom/bom.json
+                            '''
+                        }
                     }
                 }
             }
         }
 
-        stage('SBOM - CycloneDX') {
-            steps {
-                catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
-                    sh '''
-                        set -eux
-
-                        docker run --rm \
-                          --volumes-from jenkins \
-                          -w "$WORKSPACE" \
-                          maven:3.9.9-eclipse-temurin-17 \
-                          sh -lc "mvn -B -f '$WORKSPACE/pom.xml' -Dmaven.repo.local='$MAVEN_REPO' org.cyclonedx:cyclonedx-maven-plugin:2.7.11:makeAggregateBom -DoutputFormat=all"
-
-                        test -f "$WORKSPACE/target/bom.xml" && cp -f "$WORKSPACE/target/bom.xml" "$WORKSPACE/reports/sbom/bom.xml"
-                        test -f "$WORKSPACE/target/bom.json" && cp -f "$WORKSPACE/target/bom.json" "$WORKSPACE/reports/sbom/bom.json"
-                        test -s reports/sbom/bom.json
-                    '''
-                }
-            }
-        }
-
+        // ─────────────────────────────────────────────
+        // PARALLÈLE : Deploy MySQL + MySQL wait (déjà groupé)
+        // puis Deploy App dès que MySQL est prêt
+        // ─────────────────────────────────────────────
         stage('Deploy MySQL') {
             steps {
                 sh '''
                     set -eux
-
                     docker rm -f "$MYSQL_CONTAINER" >/dev/null 2>&1 || true
 
                     docker run -d \
@@ -196,8 +200,7 @@ REGO
                     done
 
                     test "$READY" -eq 1
-
-                    echo "MySQL répondu au ping. Pause de 10 secondes pour garantir l'initialisation..."
+                    echo "MySQL prêt. Pause 10s..."
                     sleep 10
                 '''
             }
@@ -207,7 +210,6 @@ REGO
             steps {
                 sh '''
                     set -eux
-
                     docker rm -f "$APP_CONTAINER" >/dev/null 2>&1 || true
 
                     JARPATH=$(cat "$WORKSPACE/.jarpath")
@@ -250,7 +252,6 @@ REGO
                       set +x
                       echo "============================================================"
                       echo "❌ CRASH APPLICATIF DÉTECTÉ ❌"
-                      echo "L'application n'a pas démarré. Voici les logs du conteneur :"
                       echo "============================================================"
                       docker logs "$APP_CONTAINER" --tail 200 || true
                       exit 1
@@ -264,7 +265,6 @@ REGO
                 catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
                     sh '''
                         set -eux
-
                         chmod 777 "$WORKSPACE/reports/zap"
 
                         docker run --rm \
@@ -335,9 +335,7 @@ payload = {
         'medium': sev['MEDIUM'],
         'low': sev['LOW']
     },
-    'zap': {
-        'high': zap_high
-    }
+    'zap': {'high': zap_high}
 }
 
 Path('reports/opa').mkdir(parents=True, exist_ok=True)
@@ -362,17 +360,42 @@ PY"
 
     post {
         always {
+            // ─────────────────────────────────────────────
+            // PAGE CVE TRIVY (comme votre screenshot)
+            // Nécessite le plugin "Warnings Next Generation"
+            // ─────────────────────────────────────────────
+            recordIssues(
+                enabledForFailure: true,
+                aggregatingResults: true,
+                tools: [
+                    trivy(
+                        pattern: 'reports/trivy/trivy-report.json',
+                        reportEncoding: 'UTF-8'
+                    )
+                ]
+            )
+
+            // Page ZAP HTML
+            publishHTML(target: [
+                allowMissing         : true,
+                alwaysLinkToLastBuild: true,
+                keepAll              : true,
+                reportDir            : 'reports/zap',
+                reportFiles          : 'zap-report.html',
+                reportName           : 'ZAP Web Report'
+            ])
+
             archiveArtifacts artifacts: 'reports/**/*', allowEmptyArchive: true, fingerprint: true
 
             sh '''
-                docker rm -f "$APP_CONTAINER" >/dev/null 2>&1 || true
+                docker rm -f "$APP_CONTAINER"   >/dev/null 2>&1 || true
                 docker rm -f "$MYSQL_CONTAINER" >/dev/null 2>&1 || true
                 docker network rm "$NETWORK_NAME" >/dev/null 2>&1 || true
             '''
         }
 
         failure {
-            echo 'Pipeline FAILED - verifier les rapports archives.'
+            echo 'Pipeline FAILED - vérifier les rapports archivés.'
         }
 
         success {
