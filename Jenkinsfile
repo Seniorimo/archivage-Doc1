@@ -1,3 +1,4 @@
+// Correction principale : injection du secret GitHub via Jenkins Credentials + JAVA_TOOL_OPTIONS + variable d'environnement pour corriger l'erreur GITHUBOAUTHSECRET observée dans les logs [file:2]
 pipeline {
     agent any
 
@@ -197,7 +198,7 @@ REGO
                     done
 
                     test "$READY" -eq 1
-                    
+
                     echo "MySQL répondu au ping. Pause de 10 secondes pour garantir l'initialisation..."
                     sleep 10
                 '''
@@ -206,51 +207,59 @@ REGO
 
         stage('Deploy App') {
             steps {
-                sh '''
-                    set -eux
+                withCredentials([string(credentialsId: 'github-oauth-secret', variable: 'GITHUB_OAUTH_SECRET')]) {
+                    sh '''
+                        set -eux
 
-                    docker rm -f "$APP_CONTAINER" >/dev/null 2>&1 || true
+                        docker rm -f "$APP_CONTAINER" >/dev/null 2>&1 || true
 
-                    JARPATH=$(cat "$WORKSPACE/.jarpath")
-                    test -n "$JARPATH"
-                    test -f "$JARPATH"
+                        JARPATH=$(cat "$WORKSPACE/.jarpath")
+                        test -n "$JARPATH"
+                        test -f "$JARPATH"
+                        test -n "$GITHUB_OAUTH_SECRET"
 
-                    # CORRECTION APPLIQUÉE : Injection du paramètre GITHUBOAUTHSECRET
-                    docker run -d \
-                      --name "$APP_CONTAINER" \
-                      --network "$NETWORK_NAME" \
-                      --volumes-from jenkins \
-                      --restart on-failure:5 \
-                      -w "$WORKSPACE" \
-                      -e GITHUBOAUTHSECRET="secret_temporaire_test_local_123" \
-                      eclipse-temurin:17-jre \
-                      sh -lc "java -jar '$JARPATH' \
-                        --server.port=$APP_PORT \
-                        --spring.datasource.url=jdbc:mysql://$MYSQL_CONTAINER:3306/archivagedb \
-                        --spring.datasource.username=archivageuser \
-                        --spring.datasource.password=archivagepass"
+                        docker run -d \
+                          --name "$APP_CONTAINER" \
+                          --network "$NETWORK_NAME" \
+                          --volumes-from jenkins \
+                          --restart on-failure:5 \
+                          -w "$WORKSPACE" \
+                          -e GITHUBOAUTHSECRET="$GITHUB_OAUTH_SECRET" \
+                          -e JAVA_TOOL_OPTIONS="-DGITHUBOAUTHSECRET=$GITHUB_OAUTH_SECRET" \
+                          eclipse-temurin:17-jre \
+                          sh -lc "printenv | grep -E '^GITHUBOAUTHSECRET=' >/dev/null && \
+                                 java -jar '$JARPATH' \
+                                   --server.port=$APP_PORT \
+                                   --spring.datasource.url=jdbc:mysql://$MYSQL_CONTAINER:3306/archivagedb \
+                                   --spring.datasource.username=archivageuser \
+                                   --spring.datasource.password=archivagepass"
 
-                    READY=0
-                    for i in $(seq 1 20); do
-                      if docker run --rm --network "$NETWORK_NAME" curlimages/curl:8.7.1 \
-                        -s -o /dev/null -w "%{http_code}" "http://$APP_CONTAINER:$APP_PORT/" | grep -qE "200|301|302|401|403|404"; then
-                        READY=1
-                        break
-                      fi
-                      echo "Waiting for app health ($i/20)..."
-                      sleep 5
-                    done
+                        READY=0
+                        for i in $(seq 1 30); do
+                          CODE=$(docker run --rm --network "$NETWORK_NAME" curlimages/curl:8.7.1 \
+                            -s -o /dev/null -w "%{http_code}" "http://$APP_CONTAINER:$APP_PORT/" || true)
 
-                    if [ "$READY" -ne 1 ]; then
-                      set +x
-                      echo "============================================================"
-                      echo "❌ CRASH APPLICATIF DÉTECTÉ ❌"
-                      echo "L'application n'a pas démarré. Voici les logs du conteneur :"
-                      echo "============================================================"
-                      docker logs "$APP_CONTAINER" --tail 100
-                      exit 1
-                    fi
-                '''
+                          if echo "$CODE" | grep -qE "200|301|302|401|403|404"; then
+                            READY=1
+                            break
+                          fi
+
+                          echo "Waiting for app health ($i/30)..."
+                          docker ps -a --filter "name=$APP_CONTAINER" --format 'table {{.Names}}\t{{.Status}}' || true
+                          sleep 5
+                        done
+
+                        if [ "$READY" -ne 1 ]; then
+                          set +x
+                          echo "============================================================"
+                          echo "❌ CRASH APPLICATIF DÉTECTÉ ❌"
+                          echo "L'application n'a pas démarré. Voici les logs du conteneur :"
+                          echo "============================================================"
+                          docker logs "$APP_CONTAINER" --tail 200 || true
+                          exit 1
+                        fi
+                    '''
+                }
             }
         }
 
@@ -266,7 +275,7 @@ REGO
                           -w "$WORKSPACE" \
                           ghcr.io/zaproxy/zaproxy:stable \
                           zap-baseline.py \
-                          -t "http://$APP_CONTAINER:$APP_PORT" \
+                          -t "http://$APP_CONTAINER:$APP_PORT/" \
                           -J "reports/zap/zap-report.json" \
                           -r "reports/zap/zap-report.html" \
                           -I || true
