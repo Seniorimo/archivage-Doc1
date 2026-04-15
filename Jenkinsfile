@@ -1,3 +1,4 @@
+// Correction: l'application attend le placeholder GITHUB_OAUTH_SECRET, pas GITHUBOAUTHSECRET, d'après les logs du conteneur. [file:4]
 pipeline {
     agent any
 
@@ -221,17 +222,17 @@ REGO
                       --volumes-from jenkins \
                       --restart on-failure:5 \
                       -w "$WORKSPACE" \
-                      -e GITHUBOAUTHSECRET="test-secret" \
-                      -e JAVA_TOOL_OPTIONS="-DGITHUBOAUTHSECRET=test-secret -Dapp.oauth.enabled=false" \
+                      -e GITHUB_OAUTH_SECRET="test-secret" \
+                      -e JAVA_TOOL_OPTIONS="-DGITHUB_OAUTH_SECRET=test-secret -Dapp.oauth.enabled=false" \
                       eclipse-temurin:17-jre \
-                      sh -lc "printenv | grep -E '^GITHUBOAUTHSECRET=' >/dev/null && \
+                      sh -lc "printenv | grep -E '^GITHUB_OAUTH_SECRET=' >/dev/null && \
                              java -jar '$JARPATH' \
                                --server.port=$APP_PORT \
                                --spring.datasource.url=jdbc:mysql://$MYSQL_CONTAINER:3306/archivagedb \
                                --spring.datasource.username=archivageuser \
                                --spring.datasource.password=archivagepass \
                                --app.oauth.enabled=false \
-                               --GITHUBOAUTHSECRET=test-secret"
+                               --GITHUB_OAUTH_SECRET=test-secret"
 
                     READY=0
                     for i in $(seq 1 30); do
