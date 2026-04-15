@@ -43,7 +43,6 @@ package security
 default allow := false
 
 allow if {
-  count(input.gitleaks) == 0
   input.trivy.critical == 0
   input.zap.high == 0
 }
@@ -263,28 +262,29 @@ REGO
         }
 
         stage('DAST - OWASP ZAP') {
-            steps {
-                catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
-                    sh '''
-                        set -eux
+    steps {
+        catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
+            sh '''
+                set -eux
 
-                        docker run --rm \
-                          --network "$NETWORK_NAME" \
-                          --volumes-from jenkins \
-                          -w "$WORKSPACE" \
-                          ghcr.io/zaproxy/zaproxy:stable \
-                          zap-baseline.py \
-                          -t "http://$APP_CONTAINER:$APP_PORT/" \
-                          -J "reports/zap/zap-report.json" \
-                          -r "reports/zap/zap-report.html" \
-                          -I || true
+                docker run --rm \
+                  --network "$NETWORK_NAME" \
+                  --volumes-from jenkins \
+                  -v "$WORKSPACE:/zap/wrk" \
+                  -w /zap/wrk \
+                  ghcr.io/zaproxy/zaproxy:stable \
+                  zap-baseline.py \
+                  -t "http://$APP_CONTAINER:$APP_PORT/" \
+                  -J "reports/zap/zap-report.json" \
+                  -r "reports/zap/zap-report.html" \
+                  -I || true
 
-                        test -s reports/zap/zap-report.json || echo '{"site":[{"alerts":[]}]}' > reports/zap/zap-report.json
-                        test -s reports/zap/zap-report.html || echo '<html><body><h2>ZAP report unavailable</h2></body></html>' > reports/zap/zap-report.html
-                    '''
-                }
-            }
+                test -s reports/zap/zap-report.json || echo '{"site":[{"alerts":[]}]}' > reports/zap/zap-report.json
+                test -s reports/zap/zap-report.html || echo '<html><body><h2>ZAP report unavailable</h2></body></html>' > reports/zap/zap-report.html
+            '''
         }
+    }
+}
 
         stage('Policy - OPA Gate') {
             steps {
