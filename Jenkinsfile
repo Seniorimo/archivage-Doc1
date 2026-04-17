@@ -331,30 +331,31 @@ PYEOF
             }
         }
 
+        // ----------------------------------------------------------------
+        // CHANGEMENT : chemins absolus, --volumes-from seul (sans /zap/wrk)
+        // ----------------------------------------------------------------
         stage('DAST - OWASP ZAP') {
             steps {
                 catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
                     sh '''
                         set -eux
+                        mkdir -p "$WORKSPACE/reports/zap"
                         chmod 777 "$WORKSPACE/reports/zap"
-                        touch "$WORKSPACE/reports/zap/zap-report.json"
-                        touch "$WORKSPACE/reports/zap/zap-report.html"
 
                         docker run --rm \
                           --user root \
                           --network "$NETWORK_NAME" \
                           --volumes-from jenkins \
-                          -v "$WORKSPACE:/zap/wrk:rw" \
-                          -w /zap/wrk \
+                          -w "$WORKSPACE" \
                           ghcr.io/zaproxy/zaproxy:stable \
                           zap-baseline.py \
                           -t "http://$APP_CONTAINER:$APP_PORT/" \
-                          -J "reports/zap/zap-report.json" \
-                          -r "reports/zap/zap-report.html" \
+                          -J "$WORKSPACE/reports/zap/zap-report.json" \
+                          -r "$WORKSPACE/reports/zap/zap-report.html" \
                           -I || true
 
-                        test -s reports/zap/zap-report.json || echo '{"site":[{"alerts":[]}]}' > reports/zap/zap-report.json
-                        test -s reports/zap/zap-report.html || echo '<html><body><h2>ZAP report unavailable</h2></body></html>' > reports/zap/zap-report.html
+                        test -s "$WORKSPACE/reports/zap/zap-report.json" || echo '{"site":[{"alerts":[]}]}' > "$WORKSPACE/reports/zap/zap-report.json"
+                        test -s "$WORKSPACE/reports/zap/zap-report.html" || echo '<html><body><h2>ZAP report unavailable</h2></body></html>' > "$WORKSPACE/reports/zap/zap-report.html"
                     '''
                 }
             }
