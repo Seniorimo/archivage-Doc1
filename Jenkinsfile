@@ -120,12 +120,12 @@ if len(payload["gitleaks"]) > 0:
 sys.exit(0)
 PYEOF
 
-                    cat > reports/opa/zap_to_html.py <<'ZAPEOF'
+                    cat > reports/zap/zap_to_html.py <<'ZAPEOF'
 import json
 from pathlib import Path
 
-src = Path("reports/zap/zap-report.json")
-out = Path("reports/zap/zap-report.html")
+src = Path("zap-report.json")
+out = Path("zap-report.html")
 
 try:
     data = json.loads(src.read_text(encoding="utf-8"))
@@ -218,10 +218,10 @@ ZAPEOF
             steps {
                 sh '''
                     set -eux
-                    docker run --rm \
-                      --volumes-from jenkins \
-                      -w "$WORKSPACE" \
-                      maven:3.9.9-eclipse-temurin-17 \
+                    docker run --rm \\
+                      --volumes-from jenkins \\
+                      -w "$WORKSPACE" \\
+                      maven:3.9.9-eclipse-temurin-17 \\
                       sh -lc "mvn -B -f '$WORKSPACE/pom.xml' -Dmaven.repo.local='$MAVEN_REPO' clean package -DskipTests"
 
                     JARPATH=$(find "$WORKSPACE/target" -maxdepth 1 -type f -name "*.jar" ! -name "*.original" | head -n 1)
@@ -242,14 +242,14 @@ ZAPEOF
                         catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
                             sh '''
                                 set -eux
-                                docker run --rm \
-                                  --volumes-from jenkins \
-                                  -w "$WORKSPACE" \
-                                  zricethezav/gitleaks:latest detect \
-                                  --source . \
-                                  --log-opts="--all" \
-                                  --report-format json \
-                                  --report-path reports/gitleaks/gitleaks-report.json \
+                                docker run --rm \\
+                                  --volumes-from jenkins \\
+                                  -w "$WORKSPACE" \\
+                                  zricethezav/gitleaks:latest detect \\
+                                  --source . \\
+                                  --log-opts="--all" \\
+                                  --report-format json \\
+                                  --report-path reports/gitleaks/gitleaks-report.json \\
                                   --exit-code 0
 
                                 test -s reports/gitleaks/gitleaks-report.json || echo "[]" > reports/gitleaks/gitleaks-report.json
@@ -263,16 +263,16 @@ ZAPEOF
                         catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
                             sh '''
                                 set -eux
-                                docker run --rm \
-                                  --volumes-from jenkins \
-                                  -w "$WORKSPACE" \
-                                  -v "$TRIVY_CACHE:/root/.cache/trivy" \
-                                  ghcr.io/aquasecurity/trivy:latest fs \
-                                  --timeout 15m \
-                                  --scanners vuln \
-                                  --severity CRITICAL,HIGH \
-                                  --format json \
-                                  --output reports/trivy/trivy-report.json \
+                                docker run --rm \\
+                                  --volumes-from jenkins \\
+                                  -w "$WORKSPACE" \\
+                                  -v "$TRIVY_CACHE:/root/.cache/trivy" \\
+                                  ghcr.io/aquasecurity/trivy:latest fs \\
+                                  --timeout 15m \\
+                                  --scanners vuln \\
+                                  --severity CRITICAL,HIGH \\
+                                  --format json \\
+                                  --output reports/trivy/trivy-report.json \\
                                   . || true
 
                                 test -s reports/trivy/trivy-report.json || echo '{"Results":[]}' > reports/trivy/trivy-report.json
@@ -291,22 +291,22 @@ ZAPEOF
                                         test -d "$WORKSPACE/target/classes"
                                         test -f "$WORKSPACE/.jarpath"
 
-                                        docker run --rm \
-                                          --network "$NETWORK_NAME" \
-                                          --volumes-from jenkins \
-                                          --add-host=host.docker.internal:host-gateway \
-                                          -e SONAR_HOST_URL="http://host.docker.internal:9000" \
-                                          -e SONAR_AUTH_TOKEN="$SONAR_AUTH_TOKEN" \
-                                          -w "$WORKSPACE" \
-                                          maven:3.9.9-eclipse-temurin-17 \
-                                          sh -lc "mvn -B -f '$WORKSPACE/pom.xml' \
-                                            -Dmaven.repo.local='$MAVEN_REPO' \
-                                            org.sonarsource.scanner.maven:sonar-maven-plugin:4.0.0.4121:sonar \
-                                            -DskipTests \
-                                            -Dsonar.projectKey='$APP_NAME' \
-                                            -Dsonar.host.url='http://host.docker.internal:9000' \
-                                            -Dsonar.login='$SONAR_AUTH_TOKEN' \
-                                            -Dsonar.java.binaries='target/classes' \
+                                        docker run --rm \\
+                                          --network "$NETWORK_NAME" \\
+                                          --volumes-from jenkins \\
+                                          --add-host=host.docker.internal:host-gateway \\
+                                          -e SONAR_HOST_URL="http://host.docker.internal:9000" \\
+                                          -e SONAR_AUTH_TOKEN="$SONAR_AUTH_TOKEN" \\
+                                          -w "$WORKSPACE" \\
+                                          maven:3.9.9-eclipse-temurin-17 \\
+                                          sh -lc "mvn -B -f '$WORKSPACE/pom.xml' \\
+                                            -Dmaven.repo.local='$MAVEN_REPO' \\
+                                            org.sonarsource.scanner.maven:sonar-maven-plugin:4.0.0.4121:sonar \\
+                                            -DskipTests \\
+                                            -Dsonar.projectKey='$APP_NAME' \\
+                                            -Dsonar.host.url='http://host.docker.internal:9000' \\
+                                            -Dsonar.login='$SONAR_AUTH_TOKEN' \\
+                                            -Dsonar.java.binaries='target/classes' \\
                                             -Dsonar.qualitygate.wait=false"
                                     '''
                                 }
@@ -320,10 +320,10 @@ ZAPEOF
                         catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
                             sh '''
                                 set -eux
-                                docker run --rm \
-                                  --volumes-from jenkins \
-                                  -w "$WORKSPACE" \
-                                  maven:3.9.9-eclipse-temurin-17 \
+                                docker run --rm \\
+                                  --volumes-from jenkins \\
+                                  -w "$WORKSPACE" \\
+                                  maven:3.9.9-eclipse-temurin-17 \\
                                   sh -lc "mvn -B -f '$WORKSPACE/pom.xml' -Dmaven.repo.local='$MAVEN_REPO' org.cyclonedx:cyclonedx-maven-plugin:2.7.11:makeAggregateBom -DoutputFormat=all"
 
                                 test -f "$WORKSPACE/target/bom.xml" && cp -f "$WORKSPACE/target/bom.xml" "$WORKSPACE/reports/sbom/bom.xml"
@@ -342,18 +342,18 @@ ZAPEOF
                     set -eux
                     docker rm -f "$MYSQL_CONTAINER" >/dev/null 2>&1 || true
 
-                    docker run -d \
-                      --name "$MYSQL_CONTAINER" \
-                      --network "$NETWORK_NAME" \
-                      -e MYSQL_ROOT_PASSWORD=root \
-                      -e MYSQL_DATABASE=archivage_doc \
-                      -e MYSQL_USER=archivage_user \
-                      -e MYSQL_PASSWORD=archivage_pass \
+                    docker run -d \\
+                      --name "$MYSQL_CONTAINER" \\
+                      --network "$NETWORK_NAME" \\
+                      -e MYSQL_ROOT_PASSWORD=root \\
+                      -e MYSQL_DATABASE=archivage_doc \\
+                      -e MYSQL_USER=archivage_user \\
+                      -e MYSQL_PASSWORD=archivage_pass \\
                       mysql:8.0
 
                     READY=0
                     for i in $(seq 1 30); do
-                      if docker run --rm --network "$NETWORK_NAME" mysql:8.0 \
+                      if docker run --rm --network "$NETWORK_NAME" mysql:8.0 \\
                         mysqladmin ping -h"$MYSQL_CONTAINER" -uroot -proot --silent; then
                         READY=1
                         break
@@ -377,22 +377,22 @@ ZAPEOF
 
                     mkdir -p "$WORKSPACE/uploads"
 
-                    docker run -d \
-                      --name "$APP_CONTAINER" \
-                      --network "$NETWORK_NAME" \
-                      --restart on-failure:5 \
-                      -v "$WORKSPACE/uploads:/app/uploads" \
-                      -e SPRING_PROFILES_ACTIVE=docker \
-                      -e SPRING_DATASOURCE_URL="jdbc:mysql://$MYSQL_CONTAINER:3306/archivage_doc?useUnicode=true&allowPublicKeyRetrieval=true&useSSL=false&serverTimezone=UTC" \
-                      -e SPRING_DATASOURCE_USERNAME="archivage_user" \
-                      -e SPRING_DATASOURCE_PASSWORD="archivage_pass" \
-                      -e GITHUB_OAUTH_SECRET="test-secret" \
-                      -e JWT_SECRET="***REMOVED***" \
+                    docker run -d \\
+                      --name "$APP_CONTAINER" \\
+                      --network "$NETWORK_NAME" \\
+                      --restart on-failure:5 \\
+                      -v "$WORKSPACE/uploads:/app/uploads" \\
+                      -e SPRING_PROFILES_ACTIVE=docker \\
+                      -e SPRING_DATASOURCE_URL="jdbc:mysql://$MYSQL_CONTAINER:3306/archivage_doc?useUnicode=true&allowPublicKeyRetrieval=true&useSSL=false&serverTimezone=UTC" \\
+                      -e SPRING_DATASOURCE_USERNAME="archivage_user" \\
+                      -e SPRING_DATASOURCE_PASSWORD="archivage_pass" \\
+                      -e GITHUB_OAUTH_SECRET="test-secret" \\
+                      -e JWT_SECRET="***REMOVED***" \\
                       "$DOCKER_IMAGE"
 
                     READY=0
                     for i in $(seq 1 30); do
-                      CODE=$(docker run --rm --network "$NETWORK_NAME" curlimages/curl:8.7.1 \
+                      CODE=$(docker run --rm --network "$NETWORK_NAME" curlimages/curl:8.7.1 \\
                         -s -o /dev/null -w "%{http_code}" "http://$APP_CONTAINER:$APP_PORT/actuator/health" || true)
 
                       if echo "$CODE" | grep -qE "200|301|302|401|403|404"; then
@@ -401,7 +401,7 @@ ZAPEOF
                       fi
 
                       echo "Waiting for app health ($i/30)..."
-                      docker ps -a --filter "name=$APP_CONTAINER" --format 'table {{.Names}}\t{{.Status}}' || true
+                      docker ps -a --filter "name=$APP_CONTAINER" --format 'table {{.Names}}\\t{{.Status}}' || true
                       sleep 5
                     done
 
@@ -425,35 +425,33 @@ ZAPEOF
                         mkdir -p "$WORKSPACE/reports/zap"
                         chmod 777 "$WORKSPACE/reports/zap"
 
-                        # ZAP écrit dans /zap/wrk — on monte reports/zap directement dessus
-                        # Chemins -J et -r relatifs à /zap/wrk
-                        docker run --rm \
-                          --user root \
-                          --network "$NETWORK_NAME" \
-                          -v "$WORKSPACE/reports/zap:/zap/wrk:rw" \
-                          ghcr.io/zaproxy/zaproxy:stable \
-                          zap-baseline.py \
-                         -t "http://$APP_CONTAINER:$APP_PORT/" \
-                         -J "zap-report.json" \
-                         -a \
-                         -j \
-                         -I || true
-
+                        # ZAP écrit dans son workdir /zap/wrk
+                        # On monte reports/zap directement sur /zap/wrk
+                        # Les fichiers -J et -r sont donc relatifs à /zap/wrk = reports/zap
+                        docker run --rm \\
+                          --user root \\
+                          --network "$NETWORK_NAME" \\
+                          -v "$WORKSPACE/reports/zap:/zap/wrk:rw" \\
+                          ghcr.io/zaproxy/zaproxy:stable \\
+                          zap-baseline.py \\
+                          -t "http://$APP_CONTAINER:$APP_PORT/" \\
+                          -J "zap-report.json" \\
+                          -a -j -I || true
 
                         chmod -R 777 "$WORKSPACE/reports/zap/" || true
 
-                        test -s "$WORKSPACE/reports/zap/zap-report.json" \
+                        # Fallback si ZAP n'a rien produit
+                        test -s "$WORKSPACE/reports/zap/zap-report.json" \\
                           || echo '{"site":[{"alerts":[]}]}' > "$WORKSPACE/reports/zap/zap-report.json"
 
-                        # Génération du rapport HTML self-contained depuis le JSON
-                        # (sans dépendance externe → pas de blocage CSP Jenkins)
-                        docker run --rm \
-                          --volumes-from jenkins \
-                          -w "$WORKSPACE" \
-                          python:3.12-alpine \
-                          python reports/opa/zap_to_html.py
+                        # Génération HTML depuis le JSON — script lancé depuis reports/zap/
+                        docker run --rm \\
+                          --volumes-from jenkins \\
+                          -w "$WORKSPACE/reports/zap" \\
+                          python:3.12-alpine \\
+                          python zap_to_html.py
 
-                        echo "=== Rapport ZAP HTML généré ==="
+                        echo "=== Contenu reports/zap ==="
                         ls -lah "$WORKSPACE/reports/zap/"
                     '''
                 }
@@ -465,20 +463,20 @@ ZAPEOF
                 sh '''
                     set -eux
 
-                    docker run --rm \
-                      --volumes-from jenkins \
-                      -w "$WORKSPACE" \
-                      python:3.12-alpine \
+                    docker run --rm \\
+                      --volumes-from jenkins \\
+                      -w "$WORKSPACE" \\
+                      python:3.12-alpine \\
                       python reports/opa/build_input.py
 
-                    docker run --rm \
-                      --volumes-from jenkins \
-                      -w "$WORKSPACE" \
-                      openpolicyagent/opa:latest \
-                      eval \
-                      --format raw \
-                      --data "$WORKSPACE/policy/security-gate.rego" \
-                      --input "$WORKSPACE/reports/opa/input.json" \
+                    docker run --rm \\
+                      --volumes-from jenkins \\
+                      -w "$WORKSPACE" \\
+                      openpolicyagent/opa:latest \\
+                      eval \\
+                      --format raw \\
+                      --data "$WORKSPACE/policy/security-gate.rego" \\
+                      --input "$WORKSPACE/reports/opa/input.json" \\
                       "data.security.allow" | tee "$WORKSPACE/reports/opa/opa-result.txt"
 
                     if ! grep -qx "true" "$WORKSPACE/reports/opa/opa-result.txt"; then
