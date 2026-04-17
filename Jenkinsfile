@@ -33,15 +33,16 @@ pipeline {
                     set -eux
                     rm -rf reports .trivycache policy .jarpath
                     mkdir -p reports/gitleaks reports/trivy reports/sbom reports/zap reports/opa .trivycache policy
+
                     docker network inspect "$NETWORK_NAME" >/dev/null 2>&1 || docker network create "$NETWORK_NAME"
 
                     cat > policy/security-gate.rego <<'REGO'
 package security
 
 # Pipeline bloque si :
-#   - au moins 1 vulnérabilité CRITICAL dans les dépendances (Trivy)
-#   - au moins 1 secret dans l'historique Git (Gitleaks)
-#   - au moins 1 alerte HIGH détectée par ZAP (DAST)
+#   - au moins 1 vulnerabilite CRITICAL dans les dependances (Trivy)
+#   - au moins 1 secret dans l historique Git (Gitleaks)
+#   - au moins 1 alerte HIGH detectee par ZAP (DAST)
 
 default allow := false
 
@@ -51,6 +52,78 @@ allow if {
     input.zap.high == 0
 }
 REGO
+
+                    cat > reports/opa/build_input.py <<'PYEOF'
+import json
+import sys
+from pathlib import Path
+
+def load_json(path, default):
+    p = Path(path)
+    if not p.exists() or p.stat().st_size == 0:
+        return default
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return default
+
+gitleaks = load_json("reports/gitleaks/gitleaks-report.json", [])
+trivy    = load_json("reports/trivy/trivy-report.json", {"Results": []})
+zap      = load_json("reports/zap/zap-report.json", {"site": [{"alerts": []}]})
+
+sev = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
+for result in trivy.get("Results", []):
+    for v in result.get("Vulnerabilities", []) or []:
+        s = (v.get("Severity") or "").upper()
+        if s in sev:
+            sev[s] += 1
+
+zap_high = 0
+for site in zap.get("site", []) or []:
+    for alert in site.get("alerts", []) or []:
+        if str(alert.get("riskcode", "")).strip() == "3":
+            zap_high += 1
+
+payload = {
+    "gitleaks": gitleaks if isinstance(gitleaks, list) else [],
+    "trivy": {
+        "critical": sev["CRITICAL"],
+        "high":     sev["HIGH"],
+        "medium":   sev["MEDIUM"],
+        "low":      sev["LOW"]
+    },
+    "zap": {"high": zap_high}
+}
+
+Path("reports/opa").mkdir(parents=True, exist_ok=True)
+Path("reports/opa/input.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+print("=== OPA INPUT SUMMARY ===")
+print("  Gitleaks secrets : " + str(len(payload["gitleaks"])))
+print("  Trivy CRITICAL   : " + str(sev["CRITICAL"]))
+print("  Trivy HIGH       : " + str(sev["HIGH"]))
+print("  ZAP HIGH         : " + str(zap_high))
+print("=========================")
+
+if sev["CRITICAL"] > 0:
+    print("[DETAIL] CVE CRITICAL detectees :")
+    for result in trivy.get("Results", []):
+        for v in result.get("Vulnerabilities", []) or []:
+            if (v.get("Severity") or "").upper() == "CRITICAL":
+                print("  " + v.get("VulnerabilityID", "?")
+                      + "  " + v.get("PkgName", "?")
+                      + "  " + v.get("InstalledVersion", "?")
+                      + " -> fix: " + v.get("FixedVersion", "N/A"))
+
+if len(payload["gitleaks"]) > 0:
+    print("[DETAIL] Secrets Gitleaks :")
+    for leak in payload["gitleaks"][:10]:
+        print("  Rule: " + str(leak.get("RuleID", "?"))
+              + "  File: " + str(leak.get("File", "?"))
+              + "  Commit: " + str(leak.get("Commit", "?"))[:8])
+
+sys.exit(0)
+PYEOF
                 '''
             }
         }
@@ -59,10 +132,10 @@ REGO
             steps {
                 sh '''
                     set -eux
-                    docker run --rm \\
-                      --volumes-from jenkins \\
-                      -w "$WORKSPACE" \\
-                      maven:3.9.9-eclipse-temurin-17 \\
+                    docker run --rm \
+                      --volumes-from jenkins \
+                      -w "$WORKSPACE" \
+                      maven:3.9.9-eclipse-temurin-17 \
                       sh -lc "mvn -B -f '$WORKSPACE/pom.xml' -Dmaven.repo.local='$MAVEN_REPO' clean package -DskipTests"
 
                     JARPATH=$(find "$WORKSPACE/target" -maxdepth 1 -type f -name "*.jar" ! -name "*.original" | head -n 1)
@@ -83,14 +156,14 @@ REGO
                         catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
                             sh '''
                                 set -eux
-                                docker run --rm \\
-                                  --volumes-from jenkins \\
-                                  -w "$WORKSPACE" \\
-                                  zricethezav/gitleaks:latest detect \\
-                                  --source . \\
-                                  --log-opts="--all" \\
-                                  --report-format json \\
-                                  --report-path reports/gitleaks/gitleaks-report.json \\
+                                docker run --rm \
+                                  --volumes-from jenkins \
+                                  -w "$WORKSPACE" \
+                                  zricethezav/gitleaks:latest detect \
+                                  --source . \
+                                  --log-opts="--all" \
+                                  --report-format json \
+                                  --report-path reports/gitleaks/gitleaks-report.json \
                                   --exit-code 0
 
                                 test -s reports/gitleaks/gitleaks-report.json || echo "[]" > reports/gitleaks/gitleaks-report.json
@@ -104,16 +177,16 @@ REGO
                         catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
                             sh '''
                                 set -eux
-                                docker run --rm \\
-                                  --volumes-from jenkins \\
-                                  -w "$WORKSPACE" \\
-                                  -v "$TRIVY_CACHE:/root/.cache/trivy" \\
-                                  ghcr.io/aquasecurity/trivy:latest fs \\
-                                  --timeout 15m \\
-                                  --scanners vuln \\
-                                  --severity CRITICAL,HIGH \\
-                                  --format json \\
-                                  --output reports/trivy/trivy-report.json \\
+                                docker run --rm \
+                                  --volumes-from jenkins \
+                                  -w "$WORKSPACE" \
+                                  -v "$TRIVY_CACHE:/root/.cache/trivy" \
+                                  ghcr.io/aquasecurity/trivy:latest fs \
+                                  --timeout 15m \
+                                  --scanners vuln \
+                                  --severity CRITICAL,HIGH \
+                                  --format json \
+                                  --output reports/trivy/trivy-report.json \
                                   . || true
 
                                 test -s reports/trivy/trivy-report.json || echo '{"Results":[]}' > reports/trivy/trivy-report.json
@@ -132,22 +205,22 @@ REGO
                                         test -d "$WORKSPACE/target/classes"
                                         test -f "$WORKSPACE/.jarpath"
 
-                                        docker run --rm \\
-                                          --network "$NETWORK_NAME" \\
-                                          --volumes-from jenkins \\
-                                          --add-host=host.docker.internal:host-gateway \\
-                                          -e SONAR_HOST_URL="http://host.docker.internal:9000" \\
-                                          -e SONAR_AUTH_TOKEN="$SONAR_AUTH_TOKEN" \\
-                                          -w "$WORKSPACE" \\
-                                          maven:3.9.9-eclipse-temurin-17 \\
-                                          sh -lc "mvn -B -f '$WORKSPACE/pom.xml' \\
-                                            -Dmaven.repo.local='$MAVEN_REPO' \\
-                                            org.sonarsource.scanner.maven:sonar-maven-plugin:4.0.0.4121:sonar \\
-                                            -DskipTests \\
-                                            -Dsonar.projectKey='$APP_NAME' \\
-                                            -Dsonar.host.url='http://host.docker.internal:9000' \\
-                                            -Dsonar.login='$SONAR_AUTH_TOKEN' \\
-                                            -Dsonar.java.binaries='target/classes' \\
+                                        docker run --rm \
+                                          --network "$NETWORK_NAME" \
+                                          --volumes-from jenkins \
+                                          --add-host=host.docker.internal:host-gateway \
+                                          -e SONAR_HOST_URL="http://host.docker.internal:9000" \
+                                          -e SONAR_AUTH_TOKEN="$SONAR_AUTH_TOKEN" \
+                                          -w "$WORKSPACE" \
+                                          maven:3.9.9-eclipse-temurin-17 \
+                                          sh -lc "mvn -B -f '$WORKSPACE/pom.xml' \
+                                            -Dmaven.repo.local='$MAVEN_REPO' \
+                                            org.sonarsource.scanner.maven:sonar-maven-plugin:4.0.0.4121:sonar \
+                                            -DskipTests \
+                                            -Dsonar.projectKey='$APP_NAME' \
+                                            -Dsonar.host.url='http://host.docker.internal:9000' \
+                                            -Dsonar.login='$SONAR_AUTH_TOKEN' \
+                                            -Dsonar.java.binaries='target/classes' \
                                             -Dsonar.qualitygate.wait=false"
                                     '''
                                 }
@@ -161,10 +234,10 @@ REGO
                         catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
                             sh '''
                                 set -eux
-                                docker run --rm \\
-                                  --volumes-from jenkins \\
-                                  -w "$WORKSPACE" \\
-                                  maven:3.9.9-eclipse-temurin-17 \\
+                                docker run --rm \
+                                  --volumes-from jenkins \
+                                  -w "$WORKSPACE" \
+                                  maven:3.9.9-eclipse-temurin-17 \
                                   sh -lc "mvn -B -f '$WORKSPACE/pom.xml' -Dmaven.repo.local='$MAVEN_REPO' org.cyclonedx:cyclonedx-maven-plugin:2.7.11:makeAggregateBom -DoutputFormat=all"
 
                                 test -f "$WORKSPACE/target/bom.xml" && cp -f "$WORKSPACE/target/bom.xml" "$WORKSPACE/reports/sbom/bom.xml"
@@ -183,18 +256,18 @@ REGO
                     set -eux
                     docker rm -f "$MYSQL_CONTAINER" >/dev/null 2>&1 || true
 
-                    docker run -d \\
-                      --name "$MYSQL_CONTAINER" \\
-                      --network "$NETWORK_NAME" \\
-                      -e MYSQL_ROOT_PASSWORD=root \\
-                      -e MYSQL_DATABASE=archivage_doc \\
-                      -e MYSQL_USER=archivage_user \\
-                      -e MYSQL_PASSWORD=archivage_pass \\
+                    docker run -d \
+                      --name "$MYSQL_CONTAINER" \
+                      --network "$NETWORK_NAME" \
+                      -e MYSQL_ROOT_PASSWORD=root \
+                      -e MYSQL_DATABASE=archivage_doc \
+                      -e MYSQL_USER=archivage_user \
+                      -e MYSQL_PASSWORD=archivage_pass \
                       mysql:8.0
 
                     READY=0
                     for i in $(seq 1 30); do
-                      if docker run --rm --network "$NETWORK_NAME" mysql:8.0 \\
+                      if docker run --rm --network "$NETWORK_NAME" mysql:8.0 \
                         mysqladmin ping -h"$MYSQL_CONTAINER" -uroot -proot --silent; then
                         READY=1
                         break
@@ -204,7 +277,7 @@ REGO
                     done
 
                     test "$READY" -eq 1
-                    echo "MySQL prêt. Pause 10s..."
+                    echo "MySQL pret. Pause 10s..."
                     sleep 10
                 '''
             }
@@ -218,22 +291,22 @@ REGO
 
                     mkdir -p "$WORKSPACE/uploads"
 
-                    docker run -d \\
-                      --name "$APP_CONTAINER" \\
-                      --network "$NETWORK_NAME" \\
-                      --restart on-failure:5 \\
-                      -v "$WORKSPACE/uploads:/app/uploads" \\
-                      -e SPRING_PROFILES_ACTIVE=docker \\
-                      -e SPRING_DATASOURCE_URL="jdbc:mysql://$MYSQL_CONTAINER:3306/archivage_doc?useUnicode=true&allowPublicKeyRetrieval=true&useSSL=false&serverTimezone=UTC" \\
-                      -e SPRING_DATASOURCE_USERNAME="archivage_user" \\
-                      -e SPRING_DATASOURCE_PASSWORD="archivage_pass" \\
-                      -e GITHUB_OAUTH_SECRET="test-secret" \\
-                      -e JWT_SECRET="***REMOVED***" \\
+                    docker run -d \
+                      --name "$APP_CONTAINER" \
+                      --network "$NETWORK_NAME" \
+                      --restart on-failure:5 \
+                      -v "$WORKSPACE/uploads:/app/uploads" \
+                      -e SPRING_PROFILES_ACTIVE=docker \
+                      -e SPRING_DATASOURCE_URL="jdbc:mysql://$MYSQL_CONTAINER:3306/archivage_doc?useUnicode=true&allowPublicKeyRetrieval=true&useSSL=false&serverTimezone=UTC" \
+                      -e SPRING_DATASOURCE_USERNAME="archivage_user" \
+                      -e SPRING_DATASOURCE_PASSWORD="archivage_pass" \
+                      -e GITHUB_OAUTH_SECRET="test-secret" \
+                      -e JWT_SECRET="***REMOVED***" \
                       "$DOCKER_IMAGE"
 
                     READY=0
                     for i in $(seq 1 30); do
-                      CODE=$(docker run --rm --network "$NETWORK_NAME" curlimages/curl:8.7.1 \\
+                      CODE=$(docker run --rm --network "$NETWORK_NAME" curlimages/curl:8.7.1 \
                         -s -o /dev/null -w "%{http_code}" "http://$APP_CONTAINER:$APP_PORT/actuator/health" || true)
 
                       if echo "$CODE" | grep -qE "200|301|302|401|403|404"; then
@@ -242,14 +315,14 @@ REGO
                       fi
 
                       echo "Waiting for app health ($i/30)..."
-                      docker ps -a --filter "name=$APP_CONTAINER" --format 'table {{.Names}}\\t{{.Status}}' || true
+                      docker ps -a --filter "name=$APP_CONTAINER" --format 'table {{.Names}}\t{{.Status}}' || true
                       sleep 5
                     done
 
                     if [ "$READY" -ne 1 ]; then
                       set +x
                       echo "============================================================"
-                      echo "CRASH APPLICATIF DÉTECTÉ"
+                      echo "CRASH APPLICATIF DETECTE"
                       echo "============================================================"
                       docker logs "$APP_CONTAINER" --tail 200 || true
                       exit 1
@@ -264,18 +337,20 @@ REGO
                     sh '''
                         set -eux
                         chmod 777 "$WORKSPACE/reports/zap"
+                        touch "$WORKSPACE/reports/zap/zap-report.json"
+                        touch "$WORKSPACE/reports/zap/zap-report.html"
 
-                        docker run --rm \\
-                          --user root \\
-                          --network "$NETWORK_NAME" \\
-                          --volumes-from jenkins \\
-                          -v "$WORKSPACE:/zap/wrk:rw" \\
-                          -w /zap/wrk \\
-                          ghcr.io/zaproxy/zaproxy:stable \\
-                          zap-baseline.py \\
-                          -t "http://$APP_CONTAINER:$APP_PORT/" \\
-                          -J "reports/zap/zap-report.json" \\
-                          -r "reports/zap/zap-report.html" \\
+                        docker run --rm \
+                          --user root \
+                          --network "$NETWORK_NAME" \
+                          --volumes-from jenkins \
+                          -v "$WORKSPACE:/zap/wrk:rw" \
+                          -w /zap/wrk \
+                          ghcr.io/zaproxy/zaproxy:stable \
+                          zap-baseline.py \
+                          -t "http://$APP_CONTAINER:$APP_PORT/" \
+                          -J "reports/zap/zap-report.json" \
+                          -r "reports/zap/zap-report.html" \
                           -I || true
 
                         test -s reports/zap/zap-report.json || echo '{"site":[{"alerts":[]}]}' > reports/zap/zap-report.json
@@ -290,101 +365,28 @@ REGO
                 sh '''
                     set -eux
 
-                    docker run --rm \\
-                      --volumes-from jenkins \\
-                      -w "$WORKSPACE" \\
-                      python:3.12-alpine \\
-                      sh -lc "python - <<'PY'
-import json, sys
-from pathlib import Path
+                    docker run --rm \
+                      --volumes-from jenkins \
+                      -w "$WORKSPACE" \
+                      python:3.12-alpine \
+                      python reports/opa/build_input.py
 
-def load_json(path, default):
-    p = Path(path)
-    if not p.exists() or p.stat().st_size == 0:
-        return default
-    try:
-        return json.loads(p.read_text(encoding='utf-8'))
-    except Exception:
-        return default
-
-gitleaks = load_json('reports/gitleaks/gitleaks-report.json', [])
-trivy    = load_json('reports/trivy/trivy-report.json', {'Results': []})
-zap      = load_json('reports/zap/zap-report.json', {'site': [{'alerts': []}]})
-
-# --- Trivy : compter CRITICAL et HIGH ---
-sev = {'CRITICAL': 0, 'HIGH': 0, 'MEDIUM': 0, 'LOW': 0}
-for result in trivy.get('Results', []):
-    for v in result.get('Vulnerabilities', []) or []:
-        s = (v.get('Severity') or '').upper()
-        if s in sev:
-            sev[s] += 1
-
-# --- ZAP : compter les alertes riskcode == 3 (HIGH) ---
-zap_high = 0
-for site in zap.get('site', []) or []:
-    for alert in site.get('alerts', []) or []:
-        risk = str(alert.get('riskcode', '')).strip()
-        if risk == '3':
-            zap_high += 1
-
-# --- Construction du payload OPA ---
-payload = {
-    'gitleaks': gitleaks if isinstance(gitleaks, list) else [],
-    'trivy': {
-        'critical': sev['CRITICAL'],
-        'high':     sev['HIGH'],
-        'medium':   sev['MEDIUM'],
-        'low':      sev['LOW']
-    },
-    'zap': {'high': zap_high}
-}
-
-Path('reports/opa').mkdir(parents=True, exist_ok=True)
-Path('reports/opa/input.json').write_text(json.dumps(payload, indent=2), encoding='utf-8')
-
-# --- Résumé lisible dans les logs Jenkins ---
-print('=== OPA INPUT SUMMARY ===')
-print(f\"  Gitleaks secrets  : {len(payload['gitleaks'])}\")
-print(f\"  Trivy CRITICAL    : {sev['CRITICAL']}\")
-print(f\"  Trivy HIGH        : {sev['HIGH']}\")
-print(f\"  ZAP HIGH          : {zap_high}\")
-print('=========================')
-
-if sev['CRITICAL'] > 0:
-    print(f\"[DETAIL] {sev['CRITICAL']} vulnerabilite(s) CRITICAL detectee(s) dans les dependances :\")
-    for result in trivy.get('Results', []):
-        for v in result.get('Vulnerabilities', []) or []:
-            if (v.get('Severity') or '').upper() == 'CRITICAL':
-                pkg  = v.get('PkgName', '?')
-                inst = v.get('InstalledVersion', '?')
-                fix  = v.get('FixedVersion', 'N/A')
-                cve  = v.get('VulnerabilityID', '?')
-                print(f\"    {cve}  {pkg}  {inst}  -> fix: {fix}\")
-
-if len(payload['gitleaks']) > 0:
-    print(f\"[DETAIL] {len(payload['gitleaks'])} secret(s) detecte(s) par Gitleaks :\")
-    for leak in payload['gitleaks'][:10]:
-        print(f\"    Rule: {leak.get('RuleID','?')}  File: {leak.get('File','?')}  Commit: {leak.get('Commit','?')[:8]}\")
-
-sys.exit(0)
-PY"
-
-                    docker run --rm \\
-                      --volumes-from jenkins \\
-                      -w "$WORKSPACE" \\
-                      openpolicyagent/opa:latest \\
-                      eval \\
-                      --format raw \\
-                      --data "$WORKSPACE/policy/security-gate.rego" \\
-                      --input "$WORKSPACE/reports/opa/input.json" \\
+                    docker run --rm \
+                      --volumes-from jenkins \
+                      -w "$WORKSPACE" \
+                      openpolicyagent/opa:latest \
+                      eval \
+                      --format raw \
+                      --data "$WORKSPACE/policy/security-gate.rego" \
+                      --input "$WORKSPACE/reports/opa/input.json" \
                       "data.security.allow" | tee "$WORKSPACE/reports/opa/opa-result.txt"
 
-                    if ! grep -qx 'true' "$WORKSPACE/reports/opa/opa-result.txt"; then
+                    if ! grep -qx "true" "$WORKSPACE/reports/opa/opa-result.txt"; then
                         echo ""
                         echo "============================================================"
                         echo "  OPA SECURITY GATE : ECHEC"
-                        echo "  Le pipeline est bloqué. Consultez le résumé ci-dessus."
-                        echo "  Critères de blocage :"
+                        echo "  Le pipeline est bloque. Consultez le resume ci-dessus."
+                        echo "  Criteres de blocage :"
                         echo "    - Trivy CRITICAL > 0"
                         echo "    - Gitleaks secrets > 0"
                         echo "    - ZAP HIGH > 0"
@@ -430,15 +432,15 @@ PY"
         }
 
         failure {
-            echo 'Pipeline FAILED - consulter les rapports archivés et le résumé OPA.'
+            echo 'Pipeline FAILED - consulter les rapports archives et le resume OPA.'
         }
 
         unstable {
-            echo 'Pipeline UNSTABLE - des scans ont détecté des problèmes non bloquants (Gitleaks, Trivy HIGH, SonarQube).'
+            echo 'Pipeline UNSTABLE - des scans ont detecte des problemes non bloquants (Gitleaks, Trivy HIGH, SonarQube).'
         }
 
         success {
-            echo 'Pipeline SUCCESS - tous les security gates sont passés.'
+            echo 'Pipeline SUCCESS - tous les security gates sont passes.'
         }
     }
 }
