@@ -433,9 +433,12 @@ ZAPEOF
                           -v "$WORKSPACE/reports/zap:/zap/wrk:rw" \
                           ghcr.io/zaproxy/zaproxy:stable \
                           zap-baseline.py \
-                          -t "http://$APP_CONTAINER:$APP_PORT/" \
-                          -J "zap-report.json" \
-                          -I || true
+                         -t "http://$APP_CONTAINER:$APP_PORT/" \
+                         -J "zap-report.json" \
+                         -a \
+                         -j \
+                         -I || true
+
 
                         chmod -R 777 "$WORKSPACE/reports/zap/" || true
 
