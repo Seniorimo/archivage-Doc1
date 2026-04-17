@@ -39,11 +39,6 @@ pipeline {
                     cat > policy/security-gate.rego <<'REGO'
 package security
 
-# Pipeline bloque si :
-#   - au moins 1 vulnerabilite CRITICAL dans les dependances (Trivy)
-#   - au moins 1 secret dans l historique Git (Gitleaks)
-#   - au moins 1 alerte HIGH detectee par ZAP (DAST)
-
 default allow := false
 
 allow if {
@@ -124,6 +119,97 @@ if len(payload["gitleaks"]) > 0:
 
 sys.exit(0)
 PYEOF
+
+                    cat > reports/opa/zap_to_html.py <<'ZAPEOF'
+import json
+from pathlib import Path
+
+src = Path("reports/zap/zap-report.json")
+out = Path("reports/zap/zap-report.html")
+
+try:
+    data = json.loads(src.read_text(encoding="utf-8"))
+except Exception:
+    data = {"site": [{"alerts": []}]}
+
+RISK_LABEL = {"3": "HIGH", "2": "MEDIUM", "1": "LOW", "0": "INFO"}
+RISK_COLOR = {"3": "#c0392b", "2": "#e67e22", "1": "#f1c40f", "0": "#2980b9"}
+
+all_alerts = []
+target = ""
+for site in data.get("site", []) or []:
+    if not target:
+        target = site.get("@name", site.get("name", "N/A"))
+    for alert in site.get("alerts", []) or []:
+        all_alerts.append(alert)
+
+all_alerts.sort(key=lambda a: -int(str(a.get("riskcode", "0"))))
+
+rows = ""
+for a in all_alerts:
+    rc   = str(a.get("riskcode", "0"))
+    name = a.get("alert", a.get("name", "?"))
+    desc = a.get("desc", "")[:300].replace("<", "&lt;").replace(">", "&gt;")
+    sol  = a.get("solution", "")[:300].replace("<", "&lt;").replace(">", "&gt;")
+    url  = ""
+    for inst in a.get("instances", [])[:1]:
+        url = inst.get("uri", "")
+    color = RISK_COLOR.get(rc, "#999")
+    label = RISK_LABEL.get(rc, rc)
+    rows += f"""<tr>
+      <td><span style="background:{color};color:#fff;padding:2px 8px;border-radius:4px;font-size:12px">{label}</span></td>
+      <td><strong>{name}</strong><br><small style="color:#555">{url}</small></td>
+      <td style="font-size:12px">{desc}</td>
+      <td style="font-size:12px">{sol}</td>
+    </tr>"""
+
+counts = {"3": 0, "2": 0, "1": 0, "0": 0}
+for a in all_alerts:
+    rc = str(a.get("riskcode", "0"))
+    if rc in counts:
+        counts[rc] += 1
+
+html = f"""<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<title>ZAP Security Report</title>
+<style>
+  body {{ font-family: Arial, sans-serif; margin: 0; padding: 20px; background: #f5f5f5; color: #333; }}
+  h1 {{ color: #2c3e50; border-bottom: 3px solid #e74c3c; padding-bottom: 10px; }}
+  .summary {{ display: flex; gap: 15px; margin: 20px 0; flex-wrap: wrap; }}
+  .badge {{ padding: 15px 25px; border-radius: 8px; color: #fff; text-align: center; min-width: 100px; }}
+  .badge .num {{ font-size: 2em; font-weight: bold; }}
+  .badge .lbl {{ font-size: 12px; }}
+  table {{ width: 100%; border-collapse: collapse; background: #fff; box-shadow: 0 1px 4px rgba(0,0,0,0.1); }}
+  th {{ background: #2c3e50; color: #fff; padding: 10px; text-align: left; }}
+  td {{ padding: 10px; border-bottom: 1px solid #eee; vertical-align: top; }}
+  tr:hover {{ background: #fafafa; }}
+  .meta {{ background: #fff; padding: 15px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 1px 4px rgba(0,0,0,0.1); }}
+</style>
+</head>
+<body>
+<h1>ZAP Baseline Scan — Security Report</h1>
+<div class="meta">
+  <strong>Cible :</strong> {target}<br>
+  <strong>Total alertes :</strong> {len(all_alerts)}
+</div>
+<div class="summary">
+  <div class="badge" style="background:#c0392b"><div class="num">{counts["3"]}</div><div class="lbl">HIGH</div></div>
+  <div class="badge" style="background:#e67e22"><div class="num">{counts["2"]}</div><div class="lbl">MEDIUM</div></div>
+  <div class="badge" style="background:#c8a200"><div class="num">{counts["1"]}</div><div class="lbl">LOW</div></div>
+  <div class="badge" style="background:#2980b9"><div class="num">{counts["0"]}</div><div class="lbl">INFO</div></div>
+</div>
+<table>
+  <thead><tr><th>Risque</th><th>Alerte</th><th>Description</th><th>Solution</th></tr></thead>
+  <tbody>{rows if rows else '<tr><td colspan="4" style="text-align:center;padding:30px;color:#27ae60"><strong>Aucune alerte detectee</strong></td></tr>'}</tbody>
+</table>
+</body>
+</html>"""
+
+out.write_text(html, encoding="utf-8")
+print("Rapport HTML ZAP genere : " + str(out))
+ZAPEOF
                 '''
             }
         }
@@ -336,13 +422,11 @@ PYEOF
                 catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
                     sh '''
                         set -eux
-
-                        # Dossier ZAP accessible en écriture par root (user ZAP)
                         mkdir -p "$WORKSPACE/reports/zap"
                         chmod 777 "$WORKSPACE/reports/zap"
 
-                        # ZAP utilise /zap/wrk comme workdir interne — on monte le dossier zap dedans
-                        # Les chemins -J et -r sont relatifs à /zap/wrk
+                        # ZAP écrit dans /zap/wrk — on monte reports/zap directement dessus
+                        # Chemins -J et -r relatifs à /zap/wrk
                         docker run --rm \
                           --user root \
                           --network "$NETWORK_NAME" \
@@ -351,18 +435,23 @@ PYEOF
                           zap-baseline.py \
                           -t "http://$APP_CONTAINER:$APP_PORT/" \
                           -J "zap-report.json" \
-                          -r "zap-report.html" \
                           -I || true
 
-                        # Forcer les permissions après écriture root
-                        chmod 644 "$WORKSPACE/reports/zap/zap-report.json" 2>/dev/null || true
-                        chmod 644 "$WORKSPACE/reports/zap/zap-report.html" 2>/dev/null || true
+                        chmod -R 777 "$WORKSPACE/reports/zap/" || true
 
-                        echo "=== Contenu reports/zap apres ZAP ==="
+                        test -s "$WORKSPACE/reports/zap/zap-report.json" \
+                          || echo '{"site":[{"alerts":[]}]}' > "$WORKSPACE/reports/zap/zap-report.json"
+
+                        # Génération du rapport HTML self-contained depuis le JSON
+                        # (sans dépendance externe → pas de blocage CSP Jenkins)
+                        docker run --rm \
+                          --volumes-from jenkins \
+                          -w "$WORKSPACE" \
+                          python:3.12-alpine \
+                          python reports/opa/zap_to_html.py
+
+                        echo "=== Rapport ZAP HTML généré ==="
                         ls -lah "$WORKSPACE/reports/zap/"
-
-                        test -s "$WORKSPACE/reports/zap/zap-report.json" || echo '{"site":[{"alerts":[]}]}' > "$WORKSPACE/reports/zap/zap-report.json"
-                        test -s "$WORKSPACE/reports/zap/zap-report.html" || echo '<html><body><h2>ZAP report unavailable</h2></body></html>' > "$WORKSPACE/reports/zap/zap-report.html"
                     '''
                 }
             }
