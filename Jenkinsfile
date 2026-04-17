@@ -331,28 +331,35 @@ PYEOF
             }
         }
 
-        // ----------------------------------------------------------------
-        // CHANGEMENT : chemins absolus, --volumes-from seul (sans /zap/wrk)
-        // ----------------------------------------------------------------
         stage('DAST - OWASP ZAP') {
             steps {
                 catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
                     sh '''
                         set -eux
+
+                        # Dossier ZAP accessible en écriture par root (user ZAP)
                         mkdir -p "$WORKSPACE/reports/zap"
                         chmod 777 "$WORKSPACE/reports/zap"
 
+                        # ZAP utilise /zap/wrk comme workdir interne — on monte le dossier zap dedans
+                        # Les chemins -J et -r sont relatifs à /zap/wrk
                         docker run --rm \
                           --user root \
                           --network "$NETWORK_NAME" \
-                          --volumes-from jenkins \
-                          -w "$WORKSPACE" \
+                          -v "$WORKSPACE/reports/zap:/zap/wrk:rw" \
                           ghcr.io/zaproxy/zaproxy:stable \
                           zap-baseline.py \
                           -t "http://$APP_CONTAINER:$APP_PORT/" \
-                          -J "$WORKSPACE/reports/zap/zap-report.json" \
-                          -r "$WORKSPACE/reports/zap/zap-report.html" \
+                          -J "zap-report.json" \
+                          -r "zap-report.html" \
                           -I || true
+
+                        # Forcer les permissions après écriture root
+                        chmod 644 "$WORKSPACE/reports/zap/zap-report.json" 2>/dev/null || true
+                        chmod 644 "$WORKSPACE/reports/zap/zap-report.html" 2>/dev/null || true
+
+                        echo "=== Contenu reports/zap apres ZAP ==="
+                        ls -lah "$WORKSPACE/reports/zap/"
 
                         test -s "$WORKSPACE/reports/zap/zap-report.json" || echo '{"site":[{"alerts":[]}]}' > "$WORKSPACE/reports/zap/zap-report.json"
                         test -s "$WORKSPACE/reports/zap/zap-report.html" || echo '<html><body><h2>ZAP report unavailable</h2></body></html>' > "$WORKSPACE/reports/zap/zap-report.html"
