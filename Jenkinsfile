@@ -13,7 +13,8 @@ pipeline {
         APP_CONTAINER   = 'app-archivage'
         MYSQL_CONTAINER = 'mysql-archivage'
         NETWORK_NAME    = 'archivage-net'
-        APP_PORT        = '8081'
+        APP_PORT        = '8090'
+        DOCKER_IMAGE    = "archivage-app:${env.BUILD_NUMBER}"
         MAVEN_REPO      = '/var/jenkins_home/.m2/repository'
         TRIVY_CACHE     = "${WORKSPACE}/.trivycache"
         SONARQUBE_ENV   = 'sonar'
@@ -61,15 +62,13 @@ REGO
                     test -n "$JARPATH"
                     test -f "$JARPATH"
                     echo "$JARPATH" > "$WORKSPACE/.jarpath"
+
+                    docker build -t "$DOCKER_IMAGE" "$WORKSPACE"
+                    echo "Image Docker construite : $DOCKER_IMAGE"
                 '''
             }
         }
 
-        // ─────────────────────────────────────────────
-        // PARALLÈLE : Gitleaks + Trivy + SonarQube + SBOM
-        // Toutes ces étapes n'ont besoin que du build,
-        // elles sont totalement indépendantes entre elles.
-        // ─────────────────────────────────────────────
         stage('Security Scans') {
             parallel {
                 stage('Secrets - Gitleaks') {
@@ -169,10 +168,6 @@ REGO
             }
         }
 
-        // ─────────────────────────────────────────────
-        // PARALLÈLE : Deploy MySQL + MySQL wait (déjà groupé)
-        // puis Deploy App dès que MySQL est prêt
-        // ─────────────────────────────────────────────
         stage('Deploy MySQL') {
             steps {
                 sh '''
@@ -183,9 +178,9 @@ REGO
                       --name "$MYSQL_CONTAINER" \
                       --network "$NETWORK_NAME" \
                       -e MYSQL_ROOT_PASSWORD=root \
-                      -e MYSQL_DATABASE=archivagedb \
-                      -e MYSQL_USER=archivageuser \
-                      -e MYSQL_PASSWORD=archivagepass \
+                      -e MYSQL_DATABASE=archivage_doc \
+                      -e MYSQL_USER=archivage_user \
+                      -e MYSQL_PASSWORD=archivage_pass \
                       mysql:8.0
 
                     READY=0
@@ -212,31 +207,25 @@ REGO
                     set -eux
                     docker rm -f "$APP_CONTAINER" >/dev/null 2>&1 || true
 
-                    JARPATH=$(cat "$WORKSPACE/.jarpath")
-                    test -n "$JARPATH"
-                    test -f "$JARPATH"
+                    mkdir -p "$WORKSPACE/uploads"
 
                     docker run -d \
                       --name "$APP_CONTAINER" \
                       --network "$NETWORK_NAME" \
-                      --volumes-from jenkins \
                       --restart on-failure:5 \
-                      -w "$WORKSPACE" \
+                      -v "$WORKSPACE/uploads:/app/uploads" \
+                      -e SPRING_PROFILES_ACTIVE=docker \
+                      -e SPRING_DATASOURCE_URL="jdbc:mysql://$MYSQL_CONTAINER:3306/archivage_doc?useUnicode=true&allowPublicKeyRetrieval=true&useSSL=false&serverTimezone=UTC" \
+                      -e SPRING_DATASOURCE_USERNAME="archivage_user" \
+                      -e SPRING_DATASOURCE_PASSWORD="archivage_pass" \
                       -e GITHUB_OAUTH_SECRET="test-secret" \
-                      -e JAVA_TOOL_OPTIONS="-DGITHUB_OAUTH_SECRET=test-secret -Dapp.oauth.enabled=false" \
-                      eclipse-temurin:17-jre \
-                      sh -lc "java -jar '$JARPATH' \
-                               --server.port=$APP_PORT \
-                               --spring.datasource.url=jdbc:mysql://$MYSQL_CONTAINER:3306/archivagedb \
-                               --spring.datasource.username=archivageuser \
-                               --spring.datasource.password=archivagepass \
-                               --app.oauth.enabled=false \
-                               --GITHUB_OAUTH_SECRET=test-secret"
+                      -e JWT_SECRET="***REMOVED***" \
+                      "$DOCKER_IMAGE"
 
                     READY=0
                     for i in $(seq 1 30); do
                       CODE=$(docker run --rm --network "$NETWORK_NAME" curlimages/curl:8.7.1 \
-                        -s -o /dev/null -w "%{http_code}" "http://$APP_CONTAINER:$APP_PORT/" || true)
+                        -s -o /dev/null -w "%{http_code}" "http://$APP_CONTAINER:$APP_PORT/actuator/health" || true)
 
                       if echo "$CODE" | grep -qE "200|301|302|401|403|404"; then
                         READY=1
@@ -251,7 +240,7 @@ REGO
                     if [ "$READY" -ne 1 ]; then
                       set +x
                       echo "============================================================"
-                      echo "❌ CRASH APPLICATIF DÉTECTÉ ❌"
+                      echo "CRASH APPLICATIF DÉTECTÉ"
                       echo "============================================================"
                       docker logs "$APP_CONTAINER" --tail 200 || true
                       exit 1
@@ -360,10 +349,6 @@ PY"
 
     post {
         always {
-            // ─────────────────────────────────────────────
-            // PAGE CVE TRIVY (comme votre screenshot)
-            // Nécessite le plugin "Warnings Next Generation"
-            // ─────────────────────────────────────────────
             recordIssues(
                 enabledForFailure: true,
                 aggregatingResults: true,
@@ -375,7 +360,6 @@ PY"
                 ]
             )
 
-            // Page ZAP HTML
             publishHTML(target: [
                 allowMissing         : true,
                 alwaysLinkToLastBuild: true,
