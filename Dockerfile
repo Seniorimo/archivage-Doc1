@@ -37,7 +37,7 @@ COPY --chown=spring:spring ${JAR_FILE} app.jar
 
 USER spring:spring
 
-EXPOSE 8080
+EXPOSE 8090
 
 # ---------------------------------------------------------------------------
 # HEALTHCHECK — Spring Boot Actuator (/actuator/health)
@@ -47,7 +47,7 @@ HEALTHCHECK --interval=30s \
             --start-period=60s \
             --retries=3 \
   CMD wget --no-verbose --tries=1 --spider \
-      http://localhost:8080/actuator/health || exit 1
+      http://localhost:8090/actuator/health || exit 1
 
 # ---------------------------------------------------------------------------
 # ENTRYPOINT — flags JVM container-aware
