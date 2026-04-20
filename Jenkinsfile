@@ -30,7 +30,9 @@ pipeline {
         stage('Prepare Workspace') {
             steps {
                 sh '''
-                    set -eux
+                    set -eu
+
+                    echo "=== PREPARE WORKSPACE ==="
                     rm -rf reports .trivycache policy .jarpath
                     mkdir -p reports/gitleaks reports/trivy reports/sbom reports/zap reports/opa .trivycache policy
 
@@ -210,6 +212,8 @@ html = f"""<!DOCTYPE html>
 out.write_text(html, encoding="utf-8")
 print("Rapport HTML ZAP genere : " + str(out))
 ZAPEOF
+
+                    echo "Workspace prepare avec succes."
                 '''
             }
         }
@@ -217,18 +221,24 @@ ZAPEOF
         stage('Build & Package') {
             steps {
                 sh '''
-                    set -eux
+                    set -eu
+
+                    echo "=== BUILD & PACKAGE ==="
+                    echo "[1/3] Compilation Maven..."
                     docker run --rm \
                       --volumes-from jenkins \
                       -w "$WORKSPACE" \
                       maven:3.9.9-eclipse-temurin-17 \
                       sh -lc "mvn -B -f '$WORKSPACE/pom.xml' -Dmaven.repo.local='$MAVEN_REPO' clean package -DskipTests"
 
+                    echo "[2/3] Verification du JAR genere..."
                     JARPATH=$(find "$WORKSPACE/target" -maxdepth 1 -type f -name "*.jar" ! -name "*.original" | head -n 1)
                     test -n "$JARPATH"
                     test -f "$JARPATH"
                     echo "$JARPATH" > "$WORKSPACE/.jarpath"
+                    echo "JAR detecte : $(basename "$JARPATH")"
 
+                    echo "[3/3] Build image Docker..."
                     docker build -t "$DOCKER_IMAGE" "$WORKSPACE"
                     echo "Image Docker construite : $DOCKER_IMAGE"
                 '''
@@ -241,7 +251,10 @@ ZAPEOF
                     steps {
                         catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
                             sh '''
-                                set -eux
+                                set -eu
+
+                                echo "=== GITLEAKS ==="
+                                echo "Scan des secrets sur l'historique Git..."
                                 docker run --rm \
                                   --volumes-from jenkins \
                                   -w "$WORKSPACE" \
@@ -253,6 +266,7 @@ ZAPEOF
                                   --exit-code 0
 
                                 test -s reports/gitleaks/gitleaks-report.json || echo "[]" > reports/gitleaks/gitleaks-report.json
+                                echo "Rapport Gitleaks disponible : reports/gitleaks/gitleaks-report.json"
                             '''
                         }
                     }
@@ -262,7 +276,10 @@ ZAPEOF
                     steps {
                         catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
                             sh '''
-                                set -eux
+                                set -eu
+
+                                echo "=== TRIVY FS ==="
+                                echo "[1/2] Generation du rapport JSON..."
                                 docker run --rm \
                                   --volumes-from jenkins \
                                   -w "$WORKSPACE" \
@@ -274,7 +291,7 @@ ZAPEOF
                                   --format json \
                                   --output reports/trivy/trivy-report.json .
 
-                                echo "--- RAPPORT DE SECURITE TRIVY (VUE TABLEAU) ---"
+                                echo "[2/2] Affichage du tableau Trivy dans la console..."
                                 docker run --rm \
                                   --volumes-from jenkins \
                                   -w "$WORKSPACE" \
@@ -295,11 +312,25 @@ ZAPEOF
                             catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
                                 withSonarQubeEnv("${SONARQUBE_ENV}") {
                                     sh '''
-                                        set -eux
-                                        JARPATH=$(cat "$WORKSPACE/.jarpath" 2>/dev/null || echo "")
-                                        test -n "$JARPATH" && test -f "$JARPATH"
-                                        test -d "$WORKSPACE/target/classes"
+                                        set -eu
 
+                                        echo "========================================"
+                                        echo "SONARQUBE - ANALYSE STATIQUE"
+                                        echo "========================================"
+
+                                        echo "[1/4] Verification des prerequis..."
+                                        JARPATH=$(cat "$WORKSPACE/.jarpath" 2>/dev/null || echo "")
+                                        test -n "$JARPATH"
+                                        test -f "$JARPATH"
+                                        test -d "$WORKSPACE/target/classes"
+                                        echo "JAR detecte     : $(basename "$JARPATH")"
+                                        echo "Classes compilees: target/classes"
+
+                                        echo "[2/4] Connexion au serveur SonarQube..."
+                                        echo "Projet cible    : $APP_NAME"
+                                        echo "Serveur cible   : http://host.docker.internal:9000"
+
+                                        echo "[3/4] Lancement de l'analyse Maven Sonar..."
                                         docker run --rm \
                                           --network "$NETWORK_NAME" \
                                           --volumes-from jenkins \
@@ -317,6 +348,10 @@ ZAPEOF
                                             -Dsonar.login='$SONAR_AUTH_TOKEN' \
                                             -Dsonar.java.binaries='target/classes' \
                                             -Dsonar.qualitygate.wait=false"
+
+                                        echo "[4/4] Analyse SonarQube terminee."
+                                        echo "Consultez le dashboard SonarQube pour le detail."
+                                        echo "========================================"
                                     '''
                                 }
                             }
@@ -328,7 +363,10 @@ ZAPEOF
                     steps {
                         catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
                             sh '''
-                                set -eux
+                                set -eu
+
+                                echo "=== CYCLONEDX SBOM ==="
+                                echo "Generation du SBOM XML + JSON..."
                                 docker run --rm \
                                   --volumes-from jenkins \
                                   -w "$WORKSPACE" \
@@ -338,6 +376,7 @@ ZAPEOF
                                 test -f "$WORKSPACE/target/bom.xml" && cp -f "$WORKSPACE/target/bom.xml" "$WORKSPACE/reports/sbom/bom.xml"
                                 test -f "$WORKSPACE/target/bom.json" && cp -f "$WORKSPACE/target/bom.json" "$WORKSPACE/reports/sbom/bom.json"
                                 test -s reports/sbom/bom.json
+                                echo "SBOM genere : reports/sbom/bom.xml + reports/sbom/bom.json"
                             '''
                         }
                     }
@@ -348,7 +387,9 @@ ZAPEOF
         stage('Deploy MySQL') {
             steps {
                 sh '''
-                    set -eux
+                    set -eu
+
+                    echo "=== DEPLOY MYSQL ==="
                     docker rm -f "$MYSQL_CONTAINER" >/dev/null 2>&1 || true
 
                     docker run -d \
@@ -358,7 +399,7 @@ ZAPEOF
                       -e MYSQL_DATABASE=archivage_doc \
                       -e MYSQL_USER=archivage_user \
                       -e MYSQL_PASSWORD=archivage_pass \
-                      mysql:8.0
+                      mysql:8.0 >/dev/null
 
                     READY=0
                     for i in $(seq 1 30); do
@@ -381,7 +422,9 @@ ZAPEOF
         stage('Deploy App') {
             steps {
                 sh '''
-                    set -eux
+                    set -eu
+
+                    echo "=== DEPLOY APP ==="
                     docker rm -f "$APP_CONTAINER" >/dev/null 2>&1 || true
 
                     mkdir -p "$WORKSPACE/uploads"
@@ -397,7 +440,7 @@ ZAPEOF
                       -e SPRING_DATASOURCE_PASSWORD="archivage_pass" \
                       -e GITHUB_OAUTH_SECRET="test-secret" \
                       -e JWT_SECRET="***REMOVED***" \
-                      "$DOCKER_IMAGE"
+                      "$DOCKER_IMAGE" >/dev/null
 
                     READY=0
                     for i in $(seq 1 30); do
@@ -406,6 +449,7 @@ ZAPEOF
 
                       if echo "$CODE" | grep -qE "200|301|302|401|403|404"; then
                         READY=1
+                        echo "Application repond avec HTTP $CODE"
                         break
                       fi
 
@@ -415,7 +459,6 @@ ZAPEOF
                     done
 
                     if [ "$READY" -ne 1 ]; then
-                      set +x
                       echo "============================================================"
                       echo "CRASH APPLICATIF DETECTE"
                       echo "============================================================"
@@ -430,7 +473,9 @@ ZAPEOF
             steps {
                 catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
                     sh '''
-                        set -eux
+                        set -eu
+
+                        echo "=== ZAP BASELINE ==="
                         mkdir -p "$WORKSPACE/reports/zap"
                         chmod 777 "$WORKSPACE/reports/zap"
 
@@ -455,7 +500,7 @@ ZAPEOF
                           python:3.12-alpine \
                           python zap_to_html.py
 
-                        echo "=== Contenu reports/zap ==="
+                        echo "Contenu reports/zap :"
                         ls -lah "$WORKSPACE/reports/zap/"
                     '''
                 }
@@ -465,14 +510,17 @@ ZAPEOF
         stage('Policy - OPA Gate') {
             steps {
                 sh '''
-                    set -eux
+                    set -eu
 
+                    echo "=== OPA SECURITY GATE ==="
+                    echo "[1/2] Construction de l'input OPA..."
                     docker run --rm \
                       --volumes-from jenkins \
                       -w "$WORKSPACE" \
                       python:3.12-alpine \
                       python reports/opa/build_input.py
 
+                    echo "[2/2] Evaluation de la policy..."
                     docker run --rm \
                       --volumes-from jenkins \
                       -w "$WORKSPACE" \
@@ -527,6 +575,7 @@ ZAPEOF
             archiveArtifacts artifacts: 'reports/**/*', allowEmptyArchive: true, fingerprint: true
 
             sh '''
+                set +e
                 docker rm -f "$APP_CONTAINER"   >/dev/null 2>&1 || true
                 docker rm -f "$MYSQL_CONTAINER" >/dev/null 2>&1 || true
                 docker network rm "$NETWORK_NAME" >/dev/null 2>&1 || true
