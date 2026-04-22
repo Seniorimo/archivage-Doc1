@@ -9,10 +9,9 @@
 #   ✅ Profil "docker" activé pour le sanity check → MySQL + port 8090
 #   ✅ Health check sur port 8090 (aligné avec application-docker.properties)
 #   ✅ Volume /tmp/archivage-uploads monté → fix AccessDeniedException uploads
-#   ✅ Secrets via GitHub Secrets (DB_PASSWORD, GITHUB_OAUTH_SECRET, JWT_SECRET)
+#   ✅ Secrets GitHub utilisés uniquement là où ils sont supportés
 #
 # SECRETS GITHUB À CONFIGURER (Settings > Secrets > Actions) :
-#   DB_PASSWORD          → mot de passe MySQL de test
 #   GITHUB_OAUTH_SECRET  → client-secret GitHub OAuth
 #   JWT_SECRET           → secret JWT de l'application
 # ===========================================================================
@@ -30,12 +29,9 @@ jobs:
     name: Build & Test Spring Boot App
     runs-on: ubuntu-latest
 
-    env:
-      DB_HOST: 127.0.0.1
-      DB_PORT: 3306
-      DB_NAME: archivage_doc
-      DB_USER: archivage_user
-
+    # ── Service MySQL (utilisé par mvn verify ET sanity check) ───────────
+    # Note: on garde un mot de passe fixe ici, car secrets n'est pas supporté
+    # dans jobs.<job_id>.services
     services:
       mysql:
         image: mysql:8.0
@@ -43,19 +39,21 @@ jobs:
           MYSQL_ROOT_PASSWORD: root
           MYSQL_DATABASE: archivage_doc
           MYSQL_USER: archivage_user
-          MYSQL_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          MYSQL_PASSWORD: archivage_pass
         ports:
           - 3306:3306
         options: >-
-          --health-cmd="mysqladmin ping -h localhost -u archivage_user -p${{ secrets.DB_PASSWORD }} --silent"
+          --health-cmd="mysqladmin ping -h localhost -u archivage_user -parchivage_pass --silent"
           --health-interval=10s
           --health-timeout=5s
           --health-retries=12
 
     steps:
+      # ── Checkout ──────────────────────────────────────────────────────
       - name: 📥 Checkout Code
         uses: actions/checkout@v4
 
+      # ── JDK ───────────────────────────────────────────────────────────
       - name: ☕ Set up JDK 17
         uses: actions/setup-java@v4
         with:
@@ -63,16 +61,18 @@ jobs:
           distribution: "temurin"
           cache: maven
 
+      # ── Tests unitaires + JaCoCo ──────────────────────────────────────
       - name: 🧪 Tests unitaires + Couverture JaCoCo
         run: mvn -B verify
         env:
           SPRING_DATASOURCE_URL: jdbc:mysql://127.0.0.1:3306/archivage_doc?serverTimezone=UTC&allowPublicKeyRetrieval=true&useSSL=false
           SPRING_DATASOURCE_USERNAME: archivage_user
-          SPRING_DATASOURCE_PASSWORD: ${{ secrets.DB_PASSWORD }}
-          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          SPRING_DATASOURCE_PASSWORD: archivage_pass
+          DB_PASSWORD: archivage_pass
           GITHUB_OAUTH_SECRET: ${{ secrets.GITHUB_OAUTH_SECRET }}
           JWT_SECRET: ${{ secrets.JWT_SECRET }}
 
+      # ── Publication des résultats ─────────────────────────────────────
       - name: 📊 Publication des résultats de tests
         if: always()
         uses: actions/upload-artifact@v4
@@ -82,19 +82,18 @@ jobs:
             target/surefire-reports/*.xml
             target/site/jacoco/
 
+      # ── Build JAR ─────────────────────────────────────────────────────
       - name: 🔨 Build JAR (Maven package)
         run: mvn -B clean package -DskipTests
 
+      # ── Build Image Docker ────────────────────────────────────────────
       - name: 🐳 Build image Docker
         run: docker build -t archivage-app:${{ github.sha }} .
 
+      # ── Sanity Check ──────────────────────────────────────────────────
+      # Profil "docker" → MySQL 127.0.0.1 (service GitHub Actions) + port 8090
+      # Volume uploads → fix AccessDeniedException FileStorageServiceImpl
       - name: 🚀 Sanity Check — démarrage de l'application
-        env:
-          SPRING_DATASOURCE_URL: jdbc:mysql://127.0.0.1:3306/archivage_doc?useUnicode=true&allowPublicKeyRetrieval=true&useSSL=false&serverTimezone=UTC
-          SPRING_DATASOURCE_USERNAME: archivage_user
-          SPRING_DATASOURCE_PASSWORD: ${{ secrets.DB_PASSWORD }}
-          GITHUB_OAUTH_SECRET: ${{ secrets.GITHUB_OAUTH_SECRET }}
-          JWT_SECRET: ${{ secrets.JWT_SECRET }}
         run: |
           set -eu
 
@@ -104,11 +103,11 @@ jobs:
             --network host \
             -v /tmp/archivage-uploads:/app/uploads \
             -e SPRING_PROFILES_ACTIVE=docker \
-            -e SPRING_DATASOURCE_URL="${SPRING_DATASOURCE_URL}" \
-            -e SPRING_DATASOURCE_USERNAME="${SPRING_DATASOURCE_USERNAME}" \
-            -e SPRING_DATASOURCE_PASSWORD="${SPRING_DATASOURCE_PASSWORD}" \
-            -e GITHUB_OAUTH_SECRET="${GITHUB_OAUTH_SECRET}" \
-            -e JWT_SECRET="${JWT_SECRET}" \
+            -e SPRING_DATASOURCE_URL="jdbc:mysql://127.0.0.1:3306/archivage_doc?useUnicode=true&allowPublicKeyRetrieval=true&useSSL=false&serverTimezone=UTC" \
+            -e SPRING_DATASOURCE_USERNAME="archivage_user" \
+            -e SPRING_DATASOURCE_PASSWORD="archivage_pass" \
+            -e GITHUB_OAUTH_SECRET="${{ secrets.GITHUB_OAUTH_SECRET }}" \
+            -e JWT_SECRET="${{ secrets.JWT_SECRET }}" \
             archivage-app:${{ github.sha }}
 
           echo "⏳ Attente du démarrage de Spring Boot..."
@@ -141,6 +140,7 @@ jobs:
             exit 1
           fi
 
+      # ── Nettoyage ─────────────────────────────────────────────────────
       - name: 🧹 Nettoyage
         if: always()
         run: |
