@@ -1,6 +1,3 @@
-Vous avez raison : le pipeline casse **avant tout le reste** parce que le stage `Validate Credentials` demande un credential Jenkins avec l’ID `mysql-root-password`, et Jenkins indique clairement que cet ID n’existe pas.  Le correctif propre ici est de **supprimer ce stage** ou d’arrêter de valider ce credential MySQL tant qu’il n’existe pas, car c’est lui qui bloque `Prepare Workspace`, `Build`, `Scans` et tout le reste. [ppl-ai-file-upload.s3.amazonaws](https://ppl-ai-file-upload.s3.amazonaws.com/web/direct-files/attachments/57183042/7b83b2ab-d133-4e9e-8817-dedb25a3321f/paste.txt)
-
-```groovy
 pipeline {
     agent any
 
@@ -333,7 +330,7 @@ ZAPEOF
                                             -DskipTests \
                                             -Dsonar.projectKey='$APP_NAME' \
                                             -Dsonar.host.url='http://host.docker.internal:9000' \
-                                            -Dsonar.token='$SONAR_AUTH_TOKEN' \
+                                            -Dsonar.login='$SONAR_AUTH_TOKEN' \
                                             -Dsonar.java.binaries='target/classes' \
                                             -Dsonar.qualitygate.wait=false"
                                     '''
@@ -575,4 +572,3 @@ ZAPEOF
         }
     }
 }
-```
