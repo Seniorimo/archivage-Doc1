@@ -17,7 +17,6 @@ pipeline {
         DOCKER_IMAGE    = "archivage-app:${env.BUILD_NUMBER}"
         MAVEN_REPO      = '/var/jenkins_home/.m2/repository'
         TRIVY_CACHE     = "${WORKSPACE}/.trivycache"
-        SONARQUBE_ENV   = 'sonar'
     }
 
     stages {
@@ -310,7 +309,7 @@ ZAPEOF
                     steps {
                         script {
                             catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
-                                withSonarQubeEnv("${SONARQUBE_ENV}") {
+                                withCredentials([string(credentialsId: 'sonar-token', variable: 'SONAR_TOKEN')]) {
                                     sh '''
                                         set -eu
 
@@ -335,8 +334,7 @@ ZAPEOF
                                           --network "$NETWORK_NAME" \
                                           --volumes-from jenkins \
                                           --add-host=host.docker.internal:host-gateway \
-                                          -e SONAR_HOST_URL="http://host.docker.internal:9000" \
-                                          -e SONAR_AUTH_TOKEN="$SONAR_AUTH_TOKEN" \
+                                          -e SONAR_TOKEN="$SONAR_TOKEN" \
                                           -w "$WORKSPACE" \
                                           maven:3.9.9-eclipse-temurin-17 \
                                           sh -lc "mvn -B -f '$WORKSPACE/pom.xml' \
@@ -345,7 +343,7 @@ ZAPEOF
                                             -DskipTests \
                                             -Dsonar.projectKey='$APP_NAME' \
                                             -Dsonar.host.url='http://host.docker.internal:9000' \
-                                            -Dsonar.login='$SONAR_AUTH_TOKEN' \
+                                            -Dsonar.token='$SONAR_TOKEN' \
                                             -Dsonar.java.binaries='target/classes' \
                                             -Dsonar.qualitygate.wait=false"
 
@@ -386,86 +384,97 @@ ZAPEOF
 
         stage('Deploy MySQL') {
             steps {
-                sh '''
-                    set -eu
+                withCredentials([
+                    string(credentialsId: 'mysql-root-password', variable: 'MYSQL_ROOT_PWD'),
+                    string(credentialsId: 'mysql-user-password', variable: 'MYSQL_USER_PWD')
+                ]) {
+                    sh '''
+                        set -eu
 
-                    echo "=== DEPLOY MYSQL ==="
-                    docker rm -f "$MYSQL_CONTAINER" >/dev/null 2>&1 || true
+                        echo "=== DEPLOY MYSQL ==="
+                        docker rm -f "$MYSQL_CONTAINER" >/dev/null 2>&1 || true
 
-                    docker run -d \
-                      --name "$MYSQL_CONTAINER" \
-                      --network "$NETWORK_NAME" \
-                      -e MYSQL_ROOT_PASSWORD=root \
-                      -e MYSQL_DATABASE=archivage_doc \
-                      -e MYSQL_USER=archivage_user \
-                      -e MYSQL_PASSWORD=archivage_pass \
-                      mysql:8.0 >/dev/null
+                        docker run -d \
+                          --name "$MYSQL_CONTAINER" \
+                          --network "$NETWORK_NAME" \
+                          -e MYSQL_ROOT_PASSWORD="$MYSQL_ROOT_PWD" \
+                          -e MYSQL_DATABASE=archivage_doc \
+                          -e MYSQL_USER=archivage_user \
+                          -e MYSQL_PASSWORD="$MYSQL_USER_PWD" \
+                          mysql:8.0 >/dev/null
 
-                    READY=0
-                    for i in $(seq 1 30); do
-                      if docker run --rm --network "$NETWORK_NAME" mysql:8.0 \
-                        mysqladmin ping -h"$MYSQL_CONTAINER" -uroot -proot --silent; then
-                        READY=1
-                        break
-                      fi
-                      echo "Waiting for MySQL ($i/30)..."
-                      sleep 5
-                    done
+                        READY=0
+                        for i in $(seq 1 30); do
+                          if docker run --rm --network "$NETWORK_NAME" mysql:8.0 \
+                            mysqladmin ping -h"$MYSQL_CONTAINER" -uroot -p"$MYSQL_ROOT_PWD" --silent; then
+                            READY=1
+                            break
+                          fi
+                          echo "Waiting for MySQL ($i/30)..."
+                          sleep 5
+                        done
 
-                    test "$READY" -eq 1
-                    echo "MySQL pret. Pause 10s..."
-                    sleep 10
-                '''
+                        test "$READY" -eq 1
+                        echo "MySQL pret. Pause 10s..."
+                        sleep 10
+                    '''
+                }
             }
         }
 
         stage('Deploy App') {
             steps {
-                sh '''
-                    set -eu
+                withCredentials([
+                    string(credentialsId: 'mysql-user-password',   variable: 'MYSQL_USER_PWD'),
+                    string(credentialsId: 'github-oauth-secret',   variable: 'GH_OAUTH_SECRET'),
+                    string(credentialsId: 'jwt-secret',            variable: 'APP_JWT_SECRET')
+                ]) {
+                    sh '''
+                        set -eu
 
-                    echo "=== DEPLOY APP ==="
-                    docker rm -f "$APP_CONTAINER" >/dev/null 2>&1 || true
+                        echo "=== DEPLOY APP ==="
+                        docker rm -f "$APP_CONTAINER" >/dev/null 2>&1 || true
 
-                    mkdir -p "$WORKSPACE/uploads"
+                        mkdir -p "$WORKSPACE/uploads"
 
-                    docker run -d \
-                      --name "$APP_CONTAINER" \
-                      --network "$NETWORK_NAME" \
-                      --restart on-failure:5 \
-                      -v "$WORKSPACE/uploads:/app/uploads" \
-                      -e SPRING_PROFILES_ACTIVE=docker \
-                      -e SPRING_DATASOURCE_URL="jdbc:mysql://$MYSQL_CONTAINER:3306/archivage_doc?useUnicode=true&allowPublicKeyRetrieval=true&useSSL=false&serverTimezone=UTC" \
-                      -e SPRING_DATASOURCE_USERNAME="archivage_user" \
-                      -e SPRING_DATASOURCE_PASSWORD="archivage_pass" \
-                      -e GITHUB_OAUTH_SECRET="test-secret" \
-                      -e JWT_SECRET="***REMOVED***" \
-                      "$DOCKER_IMAGE" >/dev/null
+                        docker run -d \
+                          --name "$APP_CONTAINER" \
+                          --network "$NETWORK_NAME" \
+                          --restart on-failure:5 \
+                          -v "$WORKSPACE/uploads:/app/uploads" \
+                          -e SPRING_PROFILES_ACTIVE=docker \
+                          -e SPRING_DATASOURCE_URL="jdbc:mysql://$MYSQL_CONTAINER:3306/archivage_doc?useUnicode=true&allowPublicKeyRetrieval=true&useSSL=false&serverTimezone=UTC" \
+                          -e SPRING_DATASOURCE_USERNAME="archivage_user" \
+                          -e SPRING_DATASOURCE_PASSWORD="$MYSQL_USER_PWD" \
+                          -e GITHUB_OAUTH_SECRET="$GH_OAUTH_SECRET" \
+                          -e JWT_SECRET="$APP_JWT_SECRET" \
+                          "$DOCKER_IMAGE" >/dev/null
 
-                    READY=0
-                    for i in $(seq 1 30); do
-                      CODE=$(docker run --rm --network "$NETWORK_NAME" curlimages/curl:8.7.1 \
-                        -s -o /dev/null -w "%{http_code}" "http://$APP_CONTAINER:$APP_PORT/actuator/health" || true)
+                        READY=0
+                        for i in $(seq 1 30); do
+                          CODE=$(docker run --rm --network "$NETWORK_NAME" curlimages/curl:8.7.1 \
+                            -s -o /dev/null -w "%{http_code}" "http://$APP_CONTAINER:$APP_PORT/actuator/health" || true)
 
-                      if echo "$CODE" | grep -qE "200|301|302|401|403|404"; then
-                        READY=1
-                        echo "Application repond avec HTTP $CODE"
-                        break
-                      fi
+                          if echo "$CODE" | grep -qE "200|301|302|401|403|404"; then
+                            READY=1
+                            echo "Application repond avec HTTP $CODE"
+                            break
+                          fi
 
-                      echo "Waiting for app health ($i/30)..."
-                      docker ps -a --filter "name=$APP_CONTAINER" --format 'table {{.Names}}\t{{.Status}}' || true
-                      sleep 5
-                    done
+                          echo "Waiting for app health ($i/30)..."
+                          docker ps -a --filter "name=$APP_CONTAINER" --format 'table {{.Names}}\t{{.Status}}' || true
+                          sleep 5
+                        done
 
-                    if [ "$READY" -ne 1 ]; then
-                      echo "============================================================"
-                      echo "CRASH APPLICATIF DETECTE"
-                      echo "============================================================"
-                      docker logs "$APP_CONTAINER" --tail 200 || true
-                      exit 1
-                    fi
-                '''
+                        if [ "$READY" -ne 1 ]; then
+                          echo "============================================================"
+                          echo "CRASH APPLICATIF DETECTE"
+                          echo "============================================================"
+                          docker logs "$APP_CONTAINER" --tail 200 || true
+                          exit 1
+                        fi
+                    '''
+                }
             }
         }
 
