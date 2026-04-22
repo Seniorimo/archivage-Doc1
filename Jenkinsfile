@@ -9,20 +9,51 @@ pipeline {
     }
 
     environment {
-        APP_NAME        = 'archivage-Doc'
-        APP_CONTAINER   = 'app-archivage'
-        MYSQL_CONTAINER = 'mysql-archivage'
-        NETWORK_NAME    = 'archivage-net'
-        APP_PORT        = '8090'
-        DOCKER_IMAGE    = "archivage-app:${env.BUILD_NUMBER}"
-        MAVEN_REPO      = '/var/jenkins_home/.m2/repository'
-        TRIVY_CACHE     = "${WORKSPACE}/.trivycache"
+        APP_NAME             = 'archivage-Doc'
+        APP_CONTAINER        = 'app-archivage'
+        MYSQL_CONTAINER      = 'mysql-archivage'
+        NETWORK_NAME         = 'archivage-net'
+        APP_PORT             = '8090'
+        DOCKER_IMAGE         = "archivage-app:${env.BUILD_NUMBER}"
+        MAVEN_REPO           = '/var/jenkins_home/.m2/repository'
+        TRIVY_CACHE          = "${WORKSPACE}/.trivycache"
+        SONAR_HOST_DOCKER    = 'http://host.docker.internal:9000'
+
+        SONAR_TOKEN_CRED     = 'sonar-token'
+        MYSQL_ROOT_CRED      = 'mysql-root-password'
+        MYSQL_USER_CRED      = 'mysql-user-password'
+        GITHUB_SECRET_CRED   = 'github-oauth-secret'
+        JWT_SECRET_CRED      = 'jwt-secret'
     }
 
     stages {
         stage('Checkout') {
             steps {
                 checkout scm
+            }
+        }
+
+        stage('Validate Credentials') {
+            steps {
+                withCredentials([
+                    string(credentialsId: 'sonar-token',          variable: 'CHK_SONAR_TOKEN'),
+                    string(credentialsId: 'mysql-root-password',  variable: 'CHK_MYSQL_ROOT'),
+                    string(credentialsId: 'mysql-user-password',  variable: 'CHK_MYSQL_USER'),
+                    string(credentialsId: 'github-oauth-secret',  variable: 'CHK_GITHUB_SECRET'),
+                    string(credentialsId: 'jwt-secret',           variable: 'CHK_JWT_SECRET')
+                ]) {
+                    sh '''
+                        set -eu
+
+                        echo "=== VALIDATE JENKINS CREDENTIALS ==="
+                        test -n "$CHK_SONAR_TOKEN"
+                        test -n "$CHK_MYSQL_ROOT"
+                        test -n "$CHK_MYSQL_USER"
+                        test -n "$CHK_GITHUB_SECRET"
+                        test -n "$CHK_JWT_SECRET"
+                        echo "Tous les credentials Jenkins requis sont disponibles."
+                    '''
+                }
             }
         }
 
@@ -309,7 +340,9 @@ ZAPEOF
                     steps {
                         script {
                             catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
-                                withCredentials([string(credentialsId: 'sonar-token', variable: 'SONAR_TOKEN')]) {
+                                withCredentials([
+                                    string(credentialsId: 'sonar-token', variable: 'SONAR_TOKEN')
+                                ]) {
                                     sh '''
                                         set -eu
 
@@ -322,12 +355,13 @@ ZAPEOF
                                         test -n "$JARPATH"
                                         test -f "$JARPATH"
                                         test -d "$WORKSPACE/target/classes"
-                                        echo "JAR detecte     : $(basename "$JARPATH")"
+                                        test -n "$SONAR_TOKEN"
+                                        echo "JAR detecte      : $(basename "$JARPATH")"
                                         echo "Classes compilees: target/classes"
 
                                         echo "[2/4] Connexion au serveur SonarQube..."
-                                        echo "Projet cible    : $APP_NAME"
-                                        echo "Serveur cible   : http://host.docker.internal:9000"
+                                        echo "Projet cible     : $APP_NAME"
+                                        echo "Serveur cible    : $SONAR_HOST_DOCKER"
 
                                         echo "[3/4] Lancement de l'analyse Maven Sonar..."
                                         docker run --rm \
@@ -342,8 +376,9 @@ ZAPEOF
                                             org.sonarsource.scanner.maven:sonar-maven-plugin:4.0.0.4121:sonar \
                                             -DskipTests \
                                             -Dsonar.projectKey='$APP_NAME' \
-                                            -Dsonar.host.url='http://host.docker.internal:9000' \
-                                            -Dsonar.token='$SONAR_TOKEN' \
+                                            -Dsonar.host.url='$SONAR_HOST_DOCKER' \
+                                            -Dsonar.login='$SONAR_TOKEN' \
+                                            -Dsonar.password='' \
                                             -Dsonar.java.binaries='target/classes' \
                                             -Dsonar.qualitygate.wait=false"
 
@@ -425,9 +460,9 @@ ZAPEOF
         stage('Deploy App') {
             steps {
                 withCredentials([
-                    string(credentialsId: 'mysql-user-password',   variable: 'MYSQL_USER_PWD'),
-                    string(credentialsId: 'github-oauth-secret',   variable: 'GH_OAUTH_SECRET'),
-                    string(credentialsId: 'jwt-secret',            variable: 'APP_JWT_SECRET')
+                    string(credentialsId: 'mysql-user-password', variable: 'MYSQL_USER_PWD'),
+                    string(credentialsId: 'github-oauth-secret', variable: 'GH_OAUTH_SECRET'),
+                    string(credentialsId: 'jwt-secret',          variable: 'APP_JWT_SECRET')
                 ]) {
                     sh '''
                         set -eu
@@ -455,14 +490,14 @@ ZAPEOF
                           CODE=$(docker run --rm --network "$NETWORK_NAME" curlimages/curl:8.7.1 \
                             -s -o /dev/null -w "%{http_code}" "http://$APP_CONTAINER:$APP_PORT/actuator/health" || true)
 
-                          if echo "$CODE" | grep -qE "200|301|302|401|403|404"; then
+                          if echo "$CODE" | grep -qE "200|301|302|401|403"; then
                             READY=1
                             echo "Application repond avec HTTP $CODE"
                             break
                           fi
 
                           echo "Waiting for app health ($i/30)..."
-                          docker ps -a --filter "name=$APP_CONTAINER" --format 'table {{.Names}}\t{{.Status}}' || true
+                          docker ps -a --filter "name=$APP_CONTAINER" --format 'table {{.Names}}\\t{{.Status}}' || true
                           sleep 5
                         done
 
@@ -585,7 +620,7 @@ ZAPEOF
 
             sh '''
                 set +e
-                docker rm -f "$APP_CONTAINER"   >/dev/null 2>&1 || true
+                docker rm -f "$APP_CONTAINER" >/dev/null 2>&1 || true
                 docker rm -f "$MYSQL_CONTAINER" >/dev/null 2>&1 || true
                 docker network rm "$NETWORK_NAME" >/dev/null 2>&1 || true
             '''
