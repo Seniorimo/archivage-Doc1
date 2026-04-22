@@ -9,27 +9,33 @@
 #   ✅ Profil "docker" activé pour le sanity check → MySQL + port 8090
 #   ✅ Health check sur port 8090 (aligné avec application-docker.properties)
 #   ✅ Volume /tmp/archivage-uploads monté → fix AccessDeniedException uploads
-#   ✅ Secrets via GitHub Secrets (DB_PASSWORD, GITHUB_OAUTH_SECRET)
+#   ✅ Secrets via GitHub Secrets (DB_PASSWORD, GITHUB_OAUTH_SECRET, JWT_SECRET)
 #
 # SECRETS GITHUB À CONFIGURER (Settings > Secrets > Actions) :
-#   DB_PASSWORD          → mot de passe MySQL de test (ex: archivage_pass)
-#   GITHUB_OAUTH_SECRET  → client-secret GitHub OAuth (si tests OAuth)
+#   DB_PASSWORD          → mot de passe MySQL de test
+#   GITHUB_OAUTH_SECRET  → client-secret GitHub OAuth
+#   JWT_SECRET           → secret JWT de l'application
 # ===========================================================================
 
 name: Java Application CI
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
   pull_request:
-    branches: [ "main" ]
+    branches: ["main"]
 
 jobs:
   build-and-test:
     name: Build & Test Spring Boot App
     runs-on: ubuntu-latest
 
-    # ── Service MySQL (utilisé par mvn verify ET sanity check) ───────────
+    env:
+      DB_HOST: 127.0.0.1
+      DB_PORT: 3306
+      DB_NAME: archivage_doc
+      DB_USER: archivage_user
+
     services:
       mysql:
         image: mysql:8.0
@@ -37,40 +43,36 @@ jobs:
           MYSQL_ROOT_PASSWORD: root
           MYSQL_DATABASE: archivage_doc
           MYSQL_USER: archivage_user
-          MYSQL_PASSWORD: archivage_pass
+          MYSQL_PASSWORD: ${{ secrets.DB_PASSWORD }}
         ports:
           - 3306:3306
         options: >-
-          --health-cmd="mysqladmin ping -h localhost -u archivage_user -parchivage_pass --silent"
+          --health-cmd="mysqladmin ping -h localhost -u archivage_user -p${{ secrets.DB_PASSWORD }} --silent"
           --health-interval=10s
           --health-timeout=5s
           --health-retries=12
 
     steps:
-      # ── Checkout ──────────────────────────────────────────────────────
       - name: 📥 Checkout Code
         uses: actions/checkout@v4
 
-      # ── JDK ───────────────────────────────────────────────────────────
       - name: ☕ Set up JDK 17
         uses: actions/setup-java@v4
         with:
-          java-version: '17'
-          distribution: 'temurin'
+          java-version: "17"
+          distribution: "temurin"
           cache: maven
 
-      # ── Tests unitaires + JaCoCo ──────────────────────────────────────
       - name: 🧪 Tests unitaires + Couverture JaCoCo
         run: mvn -B verify
         env:
           SPRING_DATASOURCE_URL: jdbc:mysql://127.0.0.1:3306/archivage_doc?serverTimezone=UTC&allowPublicKeyRetrieval=true&useSSL=false
           SPRING_DATASOURCE_USERNAME: archivage_user
-          SPRING_DATASOURCE_PASSWORD: archivage_pass
-          DB_PASSWORD: archivage_pass
+          SPRING_DATASOURCE_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
           GITHUB_OAUTH_SECRET: ${{ secrets.GITHUB_OAUTH_SECRET }}
-          JWT_SECRET: ***REMOVED***
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
 
-      # ── Publication des résultats ──────────────────────────────────────
       - name: 📊 Publication des résultats de tests
         if: always()
         uses: actions/upload-artifact@v4
@@ -80,34 +82,38 @@ jobs:
             target/surefire-reports/*.xml
             target/site/jacoco/
 
-      # ── Build JAR ─────────────────────────────────────────────────────
       - name: 🔨 Build JAR (Maven package)
         run: mvn -B clean package -DskipTests
 
-      # ── Build Image Docker ─────────────────────────────────────────────
       - name: 🐳 Build image Docker
         run: docker build -t archivage-app:${{ github.sha }} .
 
-      # ── Sanity Check ──────────────────────────────────────────────────
-      # Profil "docker" → MySQL 127.0.0.1 (service GitHub Actions) + port 8090
-      # Volume uploads → fix AccessDeniedException FileStorageServiceImpl
       - name: 🚀 Sanity Check — démarrage de l'application
+        env:
+          SPRING_DATASOURCE_URL: jdbc:mysql://127.0.0.1:3306/archivage_doc?useUnicode=true&allowPublicKeyRetrieval=true&useSSL=false&serverTimezone=UTC
+          SPRING_DATASOURCE_USERNAME: archivage_user
+          SPRING_DATASOURCE_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          GITHUB_OAUTH_SECRET: ${{ secrets.GITHUB_OAUTH_SECRET }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
         run: |
+          set -eu
+
           mkdir -p /tmp/archivage-uploads
 
           docker run -d --name archivage-app \
             --network host \
             -v /tmp/archivage-uploads:/app/uploads \
             -e SPRING_PROFILES_ACTIVE=docker \
-            -e SPRING_DATASOURCE_URL="jdbc:mysql://127.0.0.1:3306/archivage_doc?useUnicode=true&allowPublicKeyRetrieval=true&useSSL=false&serverTimezone=UTC" \
-            -e SPRING_DATASOURCE_USERNAME="archivage_user" \
-            -e SPRING_DATASOURCE_PASSWORD="archivage_pass" \
-            -e GITHUB_OAUTH_SECRET="${{ secrets.GITHUB_OAUTH_SECRET }}" \
-            -e JWT_SECRET="***REMOVED***" \
+            -e SPRING_DATASOURCE_URL="${SPRING_DATASOURCE_URL}" \
+            -e SPRING_DATASOURCE_USERNAME="${SPRING_DATASOURCE_USERNAME}" \
+            -e SPRING_DATASOURCE_PASSWORD="${SPRING_DATASOURCE_PASSWORD}" \
+            -e GITHUB_OAUTH_SECRET="${GITHUB_OAUTH_SECRET}" \
+            -e JWT_SECRET="${JWT_SECRET}" \
             archivage-app:${{ github.sha }}
 
           echo "⏳ Attente du démarrage de Spring Boot..."
           READY=0
+
           for i in $(seq 1 24); do
             STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
               http://localhost:8090/actuator/health 2>/dev/null || echo "000")
@@ -118,23 +124,23 @@ jobs:
               break
             fi
 
-            echo "  ⏳ Tentative ${i}/24 — HTTP ${STATUS}"
+            echo "⏳ Tentative ${i}/24 — HTTP ${STATUS}"
 
             if [ $((i % 5)) -eq 0 ]; then
               echo "--- Docker logs (tentative ${i}) ---"
               docker logs archivage-app --tail 20 2>&1 || true
               echo "---"
             fi
+
             sleep 5
           done
 
           if [ "${READY}" -ne 1 ]; then
             echo "❌ Timeout — logs complets :"
-            docker logs archivage-app 2>&1
+            docker logs archivage-app 2>&1 || true
             exit 1
           fi
 
-      # ── Nettoyage ─────────────────────────────────────────────────────
       - name: 🧹 Nettoyage
         if: always()
         run: |
