@@ -8,17 +8,13 @@ pipeline {
         disableConcurrentBuilds()
     }
 
-    parameters {
-        booleanParam(name: 'FAIL_FAST', defaultValue: false, description: 'Bloquer avant le déploiement si des problèmes critiques sont détectés')
-    }
-
     environment {
         APP_NAME        = 'archivage-Doc'
         APP_CONTAINER   = 'app-archivage'
         MYSQL_CONTAINER = 'mysql-archivage'
         NETWORK_NAME    = 'archivage-net'
         APP_PORT        = '8090'
-        DOCKER_IMAGE    = "archivage-app:${BUILD_NUMBER}"
+        DOCKER_IMAGE    = "archivage-app:${env.BUILD_NUMBER}"
         MAVEN_REPO      = '/var/jenkins_home/.m2/repository'
         TRIVY_CACHE     = "${WORKSPACE}/.trivycache"
         SONARQUBE_ENV   = 'sonar'
@@ -28,34 +24,6 @@ pipeline {
         stage('Checkout') {
             steps {
                 checkout scm
-            }
-        }
-
-        stage('Detect Project Layout') {
-            steps {
-                script {
-                    def pom = sh(
-                        script: '''
-                            set -eu
-                            FOUND="$(find . -maxdepth 5 -name pom.xml | head -n 1 || true)"
-                            if [ -z "$FOUND" ]; then
-                                echo "ERROR: Aucun pom.xml trouvé dans le workspace."
-                                echo "Contenu du workspace:"
-                                find . -maxdepth 3 -type f | sort | head -n 200
-                                exit 1
-                            fi
-                            echo "$FOUND"
-                        ''',
-                        returnStdout: true
-                    ).trim()
-
-                    pom = pom.replaceFirst(/^\.?\//, '')
-                    def ws = pwd()
-                    env.POM_PATH = pom
-                    env.POM_ABS = "${ws}/${pom}"
-
-                    echo "POM détecté : ${env.POM_ABS}"
-                }
             }
         }
 
@@ -257,16 +225,11 @@ ZAPEOF
 
                     echo "=== BUILD & PACKAGE ==="
                     echo "[1/3] Compilation Maven..."
-
-                    test -n "${POM_ABS:-}"
-                    test -f "$POM_ABS"
-
                     docker run --rm \
-                      -v "$WORKSPACE":"$WORKSPACE" \
+                      --volumes-from jenkins \
                       -w "$WORKSPACE" \
-                      -v "$MAVEN_REPO:/root/.m2" \
                       maven:3.9.9-eclipse-temurin-17 \
-                      sh -lc "mvn -B -f '$POM_ABS' -Dmaven.repo.local='$MAVEN_REPO' clean package -DskipTests"
+                      sh -lc "mvn -B -f '$WORKSPACE/pom.xml' -Dmaven.repo.local='$MAVEN_REPO' clean package -DskipTests"
 
                     echo "[2/3] Verification du JAR genere..."
                     JARPATH=$(find "$WORKSPACE/target" -maxdepth 1 -type f -name "*.jar" ! -name "*.original" | head -n 1)
@@ -292,7 +255,7 @@ ZAPEOF
 
                                 echo "=== GITLEAKS ==="
                                 docker run --rm \
-                                  -v "$WORKSPACE":"$WORKSPACE" \
+                                  --volumes-from jenkins \
                                   -w "$WORKSPACE" \
                                   zricethezav/gitleaks:latest detect \
                                   --source . \
@@ -316,7 +279,7 @@ ZAPEOF
 
                                 echo "=== TRIVY FS ==="
                                 docker run --rm \
-                                  -v "$WORKSPACE":"$WORKSPACE" \
+                                  --volumes-from jenkins \
                                   -w "$WORKSPACE" \
                                   -v "$TRIVY_CACHE:/root/.cache/trivy" \
                                   ghcr.io/aquasecurity/trivy:latest fs \
@@ -327,7 +290,7 @@ ZAPEOF
                                   --output reports/trivy/trivy-report.json .
 
                                 docker run --rm \
-                                  -v "$WORKSPACE":"$WORKSPACE" \
+                                  --volumes-from jenkins \
                                   -w "$WORKSPACE" \
                                   -v "$TRIVY_CACHE:/root/.cache/trivy" \
                                   ghcr.io/aquasecurity/trivy:latest fs \
@@ -348,19 +311,20 @@ ZAPEOF
                                     sh '''
                                         set -eu
 
-                                        test -f "$POM_ABS"
+                                        JARPATH=$(cat "$WORKSPACE/.jarpath" 2>/dev/null || echo "")
+                                        test -n "$JARPATH"
+                                        test -f "$JARPATH"
                                         test -d "$WORKSPACE/target/classes"
 
                                         docker run --rm \
                                           --network "$NETWORK_NAME" \
-                                          -v "$WORKSPACE":"$WORKSPACE" \
-                                          -w "$WORKSPACE" \
-                                          -v "$MAVEN_REPO:/root/.m2" \
+                                          --volumes-from jenkins \
                                           --add-host=host.docker.internal:host-gateway \
                                           -e SONAR_HOST_URL="http://host.docker.internal:9000" \
                                           -e SONAR_AUTH_TOKEN="$SONAR_AUTH_TOKEN" \
+                                          -w "$WORKSPACE" \
                                           maven:3.9.9-eclipse-temurin-17 \
-                                          sh -lc "mvn -B -f '$POM_ABS' \
+                                          sh -lc "mvn -B -f '$WORKSPACE/pom.xml' \
                                             -Dmaven.repo.local='$MAVEN_REPO' \
                                             org.sonarsource.scanner.maven:sonar-maven-plugin:4.0.0.4121:sonar \
                                             -DskipTests \
@@ -384,11 +348,10 @@ ZAPEOF
 
                                 echo "=== CYCLONEDX SBOM ==="
                                 docker run --rm \
-                                  -v "$WORKSPACE":"$WORKSPACE" \
+                                  --volumes-from jenkins \
                                   -w "$WORKSPACE" \
-                                  -v "$MAVEN_REPO:/root/.m2" \
                                   maven:3.9.9-eclipse-temurin-17 \
-                                  sh -lc "mvn -B -f '$POM_ABS' -Dmaven.repo.local='$MAVEN_REPO' org.cyclonedx:cyclonedx-maven-plugin:2.7.11:makeAggregateBom -DoutputFormat=all"
+                                  sh -lc "mvn -B -f '$WORKSPACE/pom.xml' -Dmaven.repo.local='$MAVEN_REPO' org.cyclonedx:cyclonedx-maven-plugin:2.7.11:makeAggregateBom -DoutputFormat=all"
 
                                 test -f "$WORKSPACE/target/bom.xml" && cp -f "$WORKSPACE/target/bom.xml" "$WORKSPACE/reports/sbom/bom.xml"
                                 test -f "$WORKSPACE/target/bom.json" && cp -f "$WORKSPACE/target/bom.json" "$WORKSPACE/reports/sbom/bom.json"
@@ -398,36 +361,6 @@ ZAPEOF
                         }
                     }
                 }
-            }
-        }
-
-        stage('Pre-Deploy Gate') {
-            steps {
-                sh '''
-                    set -eu
-
-                    echo "=== PRE-DEPLOY GATE ==="
-                    docker run --rm \
-                      -v "$WORKSPACE":"$WORKSPACE" \
-                      -w "$WORKSPACE" \
-                      python:3.12-alpine \
-                      python reports/opa/build_input.py
-
-                    . reports/opa/summary.env
-
-                    echo "Résumé:"
-                    echo "  Gitleaks  : $GITLEAKS_COUNT"
-                    echo "  Trivy CRIT : $TRIVY_CRITICAL"
-                    echo "  Trivy HIGH : $TRIVY_HIGH"
-                    echo "  ZAP HIGH   : $ZAP_HIGH"
-
-                    if [ "$FAIL_FAST" = "true" ]; then
-                        if [ "$GITLEAKS_COUNT" -gt 0 ] || [ "$TRIVY_CRITICAL" -gt 0 ]; then
-                            echo "FAIL_FAST activé : blocage avant le déploiement."
-                            exit 1
-                        fi
-                    fi
-                '''
             }
         }
 
@@ -541,7 +474,8 @@ ZAPEOF
                           || echo '{"site":[{"alerts":[]}]}' > "$WORKSPACE/reports/zap/zap-report.json"
 
                         docker run --rm \
-                          -v "$WORKSPACE/reports/zap:/zap/wrk:rw" \
+                          --volumes-from jenkins \
+                          -w "$WORKSPACE/reports/zap" \
                           python:3.12-alpine \
                           python zap_to_html.py
 
@@ -552,20 +486,20 @@ ZAPEOF
             }
         }
 
-        stage('OPA Final Gate') {
+        stage('Policy - OPA Gate') {
             steps {
                 sh '''
                     set -eu
 
                     echo "=== OPA SECURITY GATE ==="
                     docker run --rm \
-                      -v "$WORKSPACE":"$WORKSPACE" \
+                      --volumes-from jenkins \
                       -w "$WORKSPACE" \
                       python:3.12-alpine \
                       python reports/opa/build_input.py
 
                     docker run --rm \
-                      -v "$WORKSPACE":"$WORKSPACE" \
+                      --volumes-from jenkins \
                       -w "$WORKSPACE" \
                       openpolicyagent/opa:latest \
                       eval \
@@ -595,6 +529,17 @@ ZAPEOF
 
     post {
         always {
+            recordIssues(
+                enabledForFailure: true,
+                aggregatingResults: true,
+                tools: [
+                    trivy(
+                        pattern: 'reports/trivy/trivy-report.json',
+                        reportEncoding: 'UTF-8'
+                    )
+                ]
+            )
+
             publishHTML(target: [
                 allowMissing         : true,
                 alwaysLinkToLastBuild: true,
@@ -619,7 +564,7 @@ ZAPEOF
         }
 
         unstable {
-            echo 'Pipeline UNSTABLE - des scans ont detecte des problemes non bloquants.'
+            echo 'Pipeline UNSTABLE - des scans ont detecte des problemes non bloquants (Gitleaks, Trivy HIGH, SonarQube).'
         }
 
         success {
