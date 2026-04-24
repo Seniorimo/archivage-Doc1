@@ -14,9 +14,10 @@ pipeline {
         MYSQL_CONTAINER = 'mysql-archivage'
         NETWORK_NAME    = 'archivage-net'
         APP_PORT        = '8090'
+        PROJECT_DIR     = "${WORKSPACE}/src"
         DOCKER_IMAGE    = "archivage-app:${env.BUILD_NUMBER}"
         MAVEN_REPO      = '/var/jenkins_home/.m2/repository'
-        TRIVY_CACHE     = "${WORKSPACE}/.trivycache"
+        TRIVY_CACHE     = "${WORKSPACE}/src/.trivycache"
         SONARQUBE_ENV   = 'sonar'
         JENKINS_UID     = """${sh(returnStdout: true, script: 'id -u').trim()}"""
         JENKINS_GID     = """${sh(returnStdout: true, script: 'id -g').trim()}"""
@@ -36,7 +37,7 @@ pipeline {
                       alpine:3.19 \
                       sh -euxc "
                         find /ws -mindepth 1 -maxdepth 1 -exec rm -rf {} + || true
-                        mkdir -p /ws
+                        mkdir -p /ws/src
                         chown -R ${JENKINS_UID}:${JENKINS_GID} /ws
                         ls -la /ws
                       "
@@ -48,7 +49,10 @@ pipeline {
 
         stage('Checkout') {
             steps {
-                checkout scm
+                dir('src') {
+                    deleteDir()
+                    checkout scm
+                }
             }
         }
 
@@ -56,6 +60,8 @@ pipeline {
             steps {
                 sh '''
                     set -eu
+
+                    cd "$PROJECT_DIR"
 
                     echo "=== PREPARE WORKSPACE ==="
                     rm -rf reports .trivycache policy .jarpath
@@ -247,25 +253,26 @@ ZAPEOF
             steps {
                 sh '''
                     set -eu
+                    cd "$PROJECT_DIR"
 
                     echo "=== BUILD & PACKAGE ==="
                     echo "[1/3] Compilation Maven..."
                     docker run --rm \
                       --user "${JENKINS_UID}:${JENKINS_GID}" \
                       --volumes-from jenkins \
-                      -w "$WORKSPACE" \
+                      -w "$PROJECT_DIR" \
                       maven:3.9.9-eclipse-temurin-17 \
-                      sh -lc "mvn -B -f '$WORKSPACE/pom.xml' -Dmaven.repo.local='$MAVEN_REPO' clean package -DskipTests"
+                      sh -lc "mvn -B -f '$PROJECT_DIR/pom.xml' -Dmaven.repo.local='$MAVEN_REPO' clean package -DskipTests"
 
                     echo "[2/3] Verification du JAR genere..."
-                    JARPATH=$(find "$WORKSPACE/target" -maxdepth 1 -type f -name "*.jar" ! -name "*.original" | head -n 1)
+                    JARPATH=$(find "$PROJECT_DIR/target" -maxdepth 1 -type f -name "*.jar" ! -name "*.original" | head -n 1)
                     test -n "$JARPATH"
                     test -f "$JARPATH"
-                    echo "$JARPATH" > "$WORKSPACE/.jarpath"
+                    echo "$JARPATH" > "$PROJECT_DIR/.jarpath"
                     echo "JAR detecte : $(basename "$JARPATH")"
 
                     echo "[3/3] Build image Docker..."
-                    docker build -t "$DOCKER_IMAGE" "$WORKSPACE"
+                    docker build -t "$DOCKER_IMAGE" "$PROJECT_DIR"
                     echo "Image Docker construite : $DOCKER_IMAGE"
                 '''
             }
@@ -278,11 +285,12 @@ ZAPEOF
                         catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
                             sh '''
                                 set -eu
+                                cd "$PROJECT_DIR"
 
                                 echo "=== GITLEAKS ==="
                                 docker run --rm \
                                   --volumes-from jenkins \
-                                  -w "$WORKSPACE" \
+                                  -w "$PROJECT_DIR" \
                                   zricethezav/gitleaks:latest detect \
                                   --source . \
                                   --log-opts="--all" \
@@ -302,11 +310,12 @@ ZAPEOF
                         catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
                             sh '''
                                 set -eu
+                                cd "$PROJECT_DIR"
 
                                 echo "=== TRIVY FS ==="
                                 docker run --rm \
                                   --volumes-from jenkins \
-                                  -w "$WORKSPACE" \
+                                  -w "$PROJECT_DIR" \
                                   -v "$TRIVY_CACHE:/root/.cache/trivy" \
                                   ghcr.io/aquasecurity/trivy:latest fs \
                                   --no-progress --quiet \
@@ -317,7 +326,7 @@ ZAPEOF
 
                                 docker run --rm \
                                   --volumes-from jenkins \
-                                  -w "$WORKSPACE" \
+                                  -w "$PROJECT_DIR" \
                                   -v "$TRIVY_CACHE:/root/.cache/trivy" \
                                   ghcr.io/aquasecurity/trivy:latest fs \
                                   --no-progress --quiet \
@@ -336,11 +345,12 @@ ZAPEOF
                                 withSonarQubeEnv("${SONARQUBE_ENV}") {
                                     sh '''
                                         set -eu
+                                        cd "$PROJECT_DIR"
 
-                                        JARPATH=$(cat "$WORKSPACE/.jarpath" 2>/dev/null || echo "")
+                                        JARPATH=$(cat "$PROJECT_DIR/.jarpath" 2>/dev/null || echo "")
                                         test -n "$JARPATH"
                                         test -f "$JARPATH"
-                                        test -d "$WORKSPACE/target/classes"
+                                        test -d "$PROJECT_DIR/target/classes"
 
                                         docker run --rm \
                                           --user "${JENKINS_UID}:${JENKINS_GID}" \
@@ -349,9 +359,9 @@ ZAPEOF
                                           --add-host=host.docker.internal:host-gateway \
                                           -e SONAR_HOST_URL="http://host.docker.internal:9000" \
                                           -e SONAR_AUTH_TOKEN="$SONAR_AUTH_TOKEN" \
-                                          -w "$WORKSPACE" \
+                                          -w "$PROJECT_DIR" \
                                           maven:3.9.9-eclipse-temurin-17 \
-                                          sh -lc "mvn -B -f '$WORKSPACE/pom.xml' \
+                                          sh -lc "mvn -B -f '$PROJECT_DIR/pom.xml' \
                                             -Dmaven.repo.local='$MAVEN_REPO' \
                                             org.sonarsource.scanner.maven:sonar-maven-plugin:4.0.0.4121:sonar \
                                             -DskipTests \
@@ -372,17 +382,18 @@ ZAPEOF
                         catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
                             sh '''
                                 set -eu
+                                cd "$PROJECT_DIR"
 
                                 echo "=== CYCLONEDX SBOM ==="
                                 docker run --rm \
                                   --user "${JENKINS_UID}:${JENKINS_GID}" \
                                   --volumes-from jenkins \
-                                  -w "$WORKSPACE" \
+                                  -w "$PROJECT_DIR" \
                                   maven:3.9.9-eclipse-temurin-17 \
-                                  sh -lc "mvn -B -f '$WORKSPACE/pom.xml' -Dmaven.repo.local='$MAVEN_REPO' org.cyclonedx:cyclonedx-maven-plugin:2.7.11:makeAggregateBom -DoutputFormat=all"
+                                  sh -lc "mvn -B -f '$PROJECT_DIR/pom.xml' -Dmaven.repo.local='$MAVEN_REPO' org.cyclonedx:cyclonedx-maven-plugin:2.7.11:makeAggregateBom -DoutputFormat=all"
 
-                                test -f "$WORKSPACE/target/bom.xml" && cp -f "$WORKSPACE/target/bom.xml" "$WORKSPACE/reports/sbom/bom.xml"
-                                test -f "$WORKSPACE/target/bom.json" && cp -f "$WORKSPACE/target/bom.json" "$WORKSPACE/reports/sbom/bom.json"
+                                test -f "$PROJECT_DIR/target/bom.xml" && cp -f "$PROJECT_DIR/target/bom.xml" "$PROJECT_DIR/reports/sbom/bom.xml"
+                                test -f "$PROJECT_DIR/target/bom.json" && cp -f "$PROJECT_DIR/target/bom.json" "$PROJECT_DIR/reports/sbom/bom.json"
                                 test -s reports/sbom/bom.json
                                 echo "SBOM genere : reports/sbom/bom.xml + reports/sbom/bom.json"
                             '''
@@ -434,13 +445,13 @@ ZAPEOF
 
                     echo "=== DEPLOY APP ==="
                     docker rm -f "$APP_CONTAINER" >/dev/null 2>&1 || true
-                    mkdir -p "$WORKSPACE/uploads"
+                    mkdir -p "$PROJECT_DIR/uploads"
 
                     docker run -d \
                       --name "$APP_CONTAINER" \
                       --network "$NETWORK_NAME" \
                       --restart on-failure:5 \
-                      -v "$WORKSPACE/uploads:/app/uploads" \
+                      -v "$PROJECT_DIR/uploads:/app/uploads" \
                       -e SPRING_PROFILES_ACTIVE=docker \
                       -e SPRING_DATASOURCE_URL="jdbc:mysql://$MYSQL_CONTAINER:3306/archivage_doc?useUnicode=true&allowPublicKeyRetrieval=true&useSSL=false&serverTimezone=UTC" \
                       -e SPRING_DATASOURCE_USERNAME="archivage_user" \
@@ -481,15 +492,16 @@ ZAPEOF
                 catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
                     sh '''
                         set -eu
+                        cd "$PROJECT_DIR"
 
                         echo "=== ZAP BASELINE ==="
-                        mkdir -p "$WORKSPACE/reports/zap"
-                        chmod 777 "$WORKSPACE/reports/zap"
+                        mkdir -p "$PROJECT_DIR/reports/zap"
+                        chmod 777 "$PROJECT_DIR/reports/zap"
 
                         docker run --rm \
                           --user root \
                           --network "$NETWORK_NAME" \
-                          -v "$WORKSPACE/reports/zap:/zap/wrk:rw" \
+                          -v "$PROJECT_DIR/reports/zap:/zap/wrk:rw" \
                           ghcr.io/zaproxy/zaproxy:stable \
                           zap-baseline.py \
                           -t "http://$APP_CONTAINER:$APP_PORT/" \
@@ -498,21 +510,21 @@ ZAPEOF
 
                         docker run --rm \
                           -u 0:0 \
-                          -v "$WORKSPACE/reports/zap:/zap/wrk" \
+                          -v "$PROJECT_DIR/reports/zap:/zap/wrk" \
                           alpine:3.19 \
                           sh -c "chown -R ${JENKINS_UID}:${JENKINS_GID} /zap/wrk || true"
 
-                        test -s "$WORKSPACE/reports/zap/zap-report.json" \
-                          || echo '{"site":[{"alerts":[]}]}' > "$WORKSPACE/reports/zap/zap-report.json"
+                        test -s "$PROJECT_DIR/reports/zap/zap-report.json" \
+                          || echo '{"site":[{"alerts":[]}]}' > "$PROJECT_DIR/reports/zap/zap-report.json"
 
                         docker run --rm \
                           --volumes-from jenkins \
-                          -w "$WORKSPACE/reports/zap" \
+                          -w "$PROJECT_DIR/reports/zap" \
                           python:3.12-alpine \
                           python zap_to_html.py
 
                         echo "Contenu reports/zap :"
-                        ls -lah "$WORKSPACE/reports/zap/"
+                        ls -lah "$PROJECT_DIR/reports/zap/"
                     '''
                 }
             }
@@ -526,21 +538,21 @@ ZAPEOF
                     echo "=== OPA SECURITY GATE ==="
                     docker run --rm \
                       --volumes-from jenkins \
-                      -w "$WORKSPACE" \
+                      -w "$PROJECT_DIR" \
                       python:3.12-alpine \
                       python reports/opa/build_input.py
 
                     docker run --rm \
                       --volumes-from jenkins \
-                      -w "$WORKSPACE" \
+                      -w "$PROJECT_DIR" \
                       openpolicyagent/opa:latest \
                       eval \
                       --format raw \
-                      --data "$WORKSPACE/policy/security-gate.rego" \
-                      --input "$WORKSPACE/reports/opa/input.json" \
-                      "data.security.allow" | tee "$WORKSPACE/reports/opa/opa-result.txt"
+                      --data "$PROJECT_DIR/policy/security-gate.rego" \
+                      --input "$PROJECT_DIR/reports/opa/input.json" \
+                      "data.security.allow" | tee "$PROJECT_DIR/reports/opa/opa-result.txt"
 
-                    if ! grep -qx "true" "$WORKSPACE/reports/opa/opa-result.txt"; then
+                    if ! grep -qx "true" "$PROJECT_DIR/reports/opa/opa-result.txt"; then
                         echo ""
                         echo "============================================================"
                         echo "  OPA SECURITY GATE : ECHEC"
@@ -571,13 +583,13 @@ ZAPEOF
             '''
 
             script {
-                if (fileExists('reports/trivy/trivy-report.json')) {
+                if (fileExists('src/reports/trivy/trivy-report.json')) {
                     recordIssues(
                         enabledForFailure: true,
                         aggregatingResults: true,
                         tools: [
                             trivy(
-                                pattern: 'reports/trivy/trivy-report.json',
+                                pattern: 'src/reports/trivy/trivy-report.json',
                                 reportEncoding: 'UTF-8'
                             )
                         ]
@@ -588,12 +600,12 @@ ZAPEOF
             }
 
             script {
-                if (fileExists('reports/zap/zap-report.html')) {
+                if (fileExists('src/reports/zap/zap-report.html')) {
                     publishHTML(target: [
                         allowMissing         : true,
                         alwaysLinkToLastBuild: true,
                         keepAll              : true,
-                        reportDir            : 'reports/zap',
+                        reportDir            : 'src/reports/zap',
                         reportFiles          : 'zap-report.html',
                         reportName           : 'ZAP Web Report'
                     ])
@@ -603,8 +615,8 @@ ZAPEOF
             }
 
             script {
-                if (fileExists('reports')) {
-                    archiveArtifacts artifacts: 'reports/**/*', allowEmptyArchive: true, fingerprint: true
+                if (fileExists('src/reports')) {
+                    archiveArtifacts artifacts: 'src/reports/**/*', allowEmptyArchive: true, fingerprint: true
                 } else {
                     echo 'Dossier reports absent - archivage ignore.'
                 }
