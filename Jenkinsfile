@@ -24,34 +24,34 @@ pipeline {
 
     stages {
 
-        // ─────────────────────────────────────────────────────────
-        // FIX PERMISSIONS : corrige les fichiers root du build précédent
-        // ─────────────────────────────────────────────────────────
-        stage('Fix Workspace Permissions') {
+        stage('Force Clean Workspace') {
             steps {
                 sh '''
-                    echo "=== FIX WORKSPACE PERMISSIONS ==="
+                    set -eux
+
+                    echo "=== FORCE CLEAN WORKSPACE ==="
                     docker run --rm \
+                      -u 0:0 \
                       -v "$WORKSPACE:/ws" \
                       alpine:3.19 \
-                      sh -c "chown -R ${JENKINS_UID}:${JENKINS_GID} /ws 2>/dev/null || true"
-                    echo "Permissions corrigees."
+                      sh -euxc "
+                        find /ws -mindepth 1 -maxdepth 1 -exec rm -rf {} + || true
+                        mkdir -p /ws
+                        chown -R ${JENKINS_UID}:${JENKINS_GID} /ws
+                        ls -la /ws
+                      "
+
+                    echo "Workspace nettoye de force avec succes."
                 '''
             }
         }
 
-        // ─────────────────────────────────────────────────────────
-        // CHECKOUT
-        // ─────────────────────────────────────────────────────────
         stage('Checkout') {
             steps {
                 checkout scm
             }
         }
 
-        // ─────────────────────────────────────────────────────────
-        // PREPARE WORKSPACE
-        // ─────────────────────────────────────────────────────────
         stage('Prepare Workspace') {
             steps {
                 sh '''
@@ -63,7 +63,7 @@ pipeline {
 
                     docker network inspect "$NETWORK_NAME" >/dev/null 2>&1 || docker network create "$NETWORK_NAME"
 
-                    cat > policy/security-gate.rego <<\'REGO\'
+                    cat > policy/security-gate.rego <<'REGO'
 package security
 
 default allow := false
@@ -75,7 +75,7 @@ allow if {
 }
 REGO
 
-                    cat > reports/opa/build_input.py <<\'PYEOF\'
+                    cat > reports/opa/build_input.py <<'PYEOF'
 import json
 import sys
 from pathlib import Path
@@ -147,7 +147,7 @@ if len(payload["gitleaks"]) > 0:
 sys.exit(0)
 PYEOF
 
-                    cat > reports/zap/zap_to_html.py <<\'ZAPEOF\'
+                    cat > reports/zap/zap_to_html.py <<'ZAPEOF'
 import json
 from pathlib import Path
 
@@ -229,7 +229,7 @@ html = f"""<!DOCTYPE html>
 </div>
 <table>
   <thead><tr><th>Risque</th><th>Alerte</th><th>Description</th><th>Solution</th></tr></thead>
-  <tbody>{rows if rows else \'<tr><td colspan="4" style="text-align:center;padding:30px;color:#27ae60"><strong>Aucune alerte detectee</strong></td></tr>\'}</tbody>
+  <tbody>{rows if rows else '<tr><td colspan="4" style="text-align:center;padding:30px;color:#27ae60"><strong>Aucune alerte detectee</strong></td></tr>'}</tbody>
 </table>
 </body>
 </html>"""
@@ -243,9 +243,6 @@ ZAPEOF
             }
         }
 
-        // ─────────────────────────────────────────────────────────
-        // BUILD & PACKAGE
-        // ─────────────────────────────────────────────────────────
         stage('Build & Package') {
             steps {
                 sh '''
@@ -253,7 +250,6 @@ ZAPEOF
 
                     echo "=== BUILD & PACKAGE ==="
                     echo "[1/3] Compilation Maven..."
-                    # --user jenkins uid:gid pour eviter les fichiers root dans target/
                     docker run --rm \
                       --user "${JENKINS_UID}:${JENKINS_GID}" \
                       --volumes-from jenkins \
@@ -275,9 +271,6 @@ ZAPEOF
             }
         }
 
-        // ─────────────────────────────────────────────────────────
-        // SECURITY SCANS (parallèles)
-        // ─────────────────────────────────────────────────────────
         stage('Security Scans') {
             parallel {
                 stage('Secrets - Gitleaks') {
@@ -399,9 +392,6 @@ ZAPEOF
             }
         }
 
-        // ─────────────────────────────────────────────────────────
-        // DEPLOY MYSQL
-        // ─────────────────────────────────────────────────────────
         stage('Deploy MySQL') {
             steps {
                 sh '''
@@ -437,9 +427,6 @@ ZAPEOF
             }
         }
 
-        // ─────────────────────────────────────────────────────────
-        // DEPLOY APP
-        // ─────────────────────────────────────────────────────────
         stage('Deploy App') {
             steps {
                 sh '''
@@ -474,7 +461,7 @@ ZAPEOF
                       fi
 
                       echo "Waiting for app health ($i/30)..."
-                      docker ps -a --filter "name=$APP_CONTAINER" --format 'table {{.Names}}\t{{.Status}}' || true
+                      docker ps -a --filter "name=$APP_CONTAINER" --format 'table {{.Names}}\\t{{.Status}}' || true
                       sleep 5
                     done
 
@@ -489,9 +476,6 @@ ZAPEOF
             }
         }
 
-        // ─────────────────────────────────────────────────────────
-        // DAST - OWASP ZAP
-        // ─────────────────────────────────────────────────────────
         stage('DAST - OWASP ZAP') {
             steps {
                 catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
@@ -512,11 +496,11 @@ ZAPEOF
                           -J "zap-report.json" \
                           -a -j -I || true
 
-                        # Réattribuer les fichiers ZAP (écrits par root) à jenkins
                         docker run --rm \
+                          -u 0:0 \
                           -v "$WORKSPACE/reports/zap:/zap/wrk" \
                           alpine:3.19 \
-                          chown -R ${JENKINS_UID}:${JENKINS_GID} /zap/wrk || true
+                          sh -c "chown -R ${JENKINS_UID}:${JENKINS_GID} /zap/wrk || true"
 
                         test -s "$WORKSPACE/reports/zap/zap-report.json" \
                           || echo '{"site":[{"alerts":[]}]}' > "$WORKSPACE/reports/zap/zap-report.json"
@@ -534,9 +518,6 @@ ZAPEOF
             }
         }
 
-        // ─────────────────────────────────────────────────────────
-        // POLICY - OPA GATE
-        // ─────────────────────────────────────────────────────────
         stage('Policy - OPA Gate') {
             steps {
                 sh '''
@@ -580,41 +561,59 @@ ZAPEOF
 
     post {
         always {
-            // Réattribuer TOUT le workspace à jenkins avant archivage/publication
             sh '''
                 set +e
                 docker run --rm \
+                  -u 0:0 \
                   -v "$WORKSPACE:/ws" \
                   alpine:3.19 \
-                  chown -R ${JENKINS_UID}:${JENKINS_GID} /ws 2>/dev/null || true
+                  sh -c "chown -R ${JENKINS_UID}:${JENKINS_GID} /ws 2>/dev/null || true"
             '''
 
-            recordIssues(
-                enabledForFailure: true,
-                aggregatingResults: true,
-                tools: [
-                    trivy(
-                        pattern: 'reports/trivy/trivy-report.json',
-                        reportEncoding: 'UTF-8'
+            script {
+                if (fileExists('reports/trivy/trivy-report.json')) {
+                    recordIssues(
+                        enabledForFailure: true,
+                        aggregatingResults: true,
+                        tools: [
+                            trivy(
+                                pattern: 'reports/trivy/trivy-report.json',
+                                reportEncoding: 'UTF-8'
+                            )
+                        ]
                     )
-                ]
-            )
+                } else {
+                    echo 'Trivy report absent - publication recordIssues ignoree.'
+                }
+            }
 
-            publishHTML(target: [
-                allowMissing         : true,
-                alwaysLinkToLastBuild: true,
-                keepAll              : true,
-                reportDir            : 'reports/zap',
-                reportFiles          : 'zap-report.html',
-                reportName           : 'ZAP Web Report'
-            ])
+            script {
+                if (fileExists('reports/zap/zap-report.html')) {
+                    publishHTML(target: [
+                        allowMissing         : true,
+                        alwaysLinkToLastBuild: true,
+                        keepAll              : true,
+                        reportDir            : 'reports/zap',
+                        reportFiles          : 'zap-report.html',
+                        reportName           : 'ZAP Web Report'
+                    ])
+                } else {
+                    echo 'ZAP HTML report absent - publication HTML ignoree.'
+                }
+            }
 
-            archiveArtifacts artifacts: 'reports/**/*', allowEmptyArchive: true, fingerprint: true
+            script {
+                if (fileExists('reports')) {
+                    archiveArtifacts artifacts: 'reports/**/*', allowEmptyArchive: true, fingerprint: true
+                } else {
+                    echo 'Dossier reports absent - archivage ignore.'
+                }
+            }
 
             sh '''
                 set +e
-                docker rm -f "$APP_CONTAINER"    >/dev/null 2>&1 || true
-                docker rm -f "$MYSQL_CONTAINER"  >/dev/null 2>&1 || true
+                docker rm -f "$APP_CONTAINER" >/dev/null 2>&1 || true
+                docker rm -f "$MYSQL_CONTAINER" >/dev/null 2>&1 || true
                 docker network rm "$NETWORK_NAME" >/dev/null 2>&1 || true
             '''
         }
