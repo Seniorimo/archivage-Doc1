@@ -22,9 +22,6 @@ pipeline {
         MAVEN_REPO      = '/var/jenkins_home/.m2/repository'
         TRIVY_CACHE     = "${WORKSPACE}/.trivycache"
         SONARQUBE_ENV   = 'sonar'
-
-        POM_PATH        = ''
-        POM_ABS         = ''
     }
 
     stages {
@@ -52,9 +49,10 @@ pipeline {
                         returnStdout: true
                     ).trim()
 
-                    pom = pom.replaceFirst(/^\\.\\/?/, '')
+                    pom = pom.replaceFirst(/^\.?\//, '')
+                    def ws = pwd()
                     env.POM_PATH = pom
-                    env.POM_ABS = "${env.WORKSPACE}/${pom}"
+                    env.POM_ABS = "${ws}/${pom}"
 
                     echo "POM détecté : ${env.POM_ABS}"
                 }
@@ -260,6 +258,7 @@ ZAPEOF
                     echo "=== BUILD & PACKAGE ==="
                     echo "[1/3] Compilation Maven..."
 
+                    test -n "${POM_ABS:-}"
                     test -f "$POM_ABS"
 
                     docker run --rm \
@@ -524,7 +523,7 @@ ZAPEOF
 
                         echo "=== ZAP BASELINE ==="
                         mkdir -p "$WORKSPACE/reports/zap"
-                        chmod 777 "$WORKSPACE/reports/zap" || true
+                        chmod 777 "$WORKSPACE/reports/zap"
 
                         docker run --rm \
                           --user root \
