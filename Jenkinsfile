@@ -999,6 +999,27 @@ ZAPEOF
             '''
 
             script {
+                env.SECURITY_BUILD_RESULT = currentBuild.currentResult ?: 'UNKNOWN'
+            }
+
+            sh '''
+                set +e
+                if [ -d "$PROJECT_DIR" ] && [ -f "$PROJECT_DIR/ci/security-dashboard/build_security_dashboard.py" ]; then
+                    docker run --rm \
+                      --volumes-from jenkins \
+                      -w "$PROJECT_DIR" \
+                      -e SECURITY_BUILD_RESULT="$SECURITY_BUILD_RESULT" \
+                      -e JOB_NAME="$JOB_NAME" \
+                      -e BUILD_NUMBER="$BUILD_NUMBER" \
+                      -e BUILD_URL="$BUILD_URL" \
+                      python:3.12-alpine \
+                      python ci/security-dashboard/build_security_dashboard.py
+                else
+                    echo "Security dashboard script absent - generation ignoree."
+                fi
+            '''
+
+            script {
                 if (fileExists('src/reports/trivy/trivy-report.json')) {
                     recordIssues(
                         enabledForFailure: true,
@@ -1027,6 +1048,21 @@ ZAPEOF
                     ])
                 } else {
                     echo 'ZAP HTML report absent - publication HTML ignoree.'
+                }
+            }
+
+            script {
+                if (fileExists('src/reports/security-dashboard/security-dashboard.html')) {
+                    publishHTML(target: [
+                        allowMissing         : true,
+                        alwaysLinkToLastBuild: true,
+                        keepAll              : true,
+                        reportDir            : 'src/reports',
+                        reportFiles          : 'security-dashboard/security-dashboard.html',
+                        reportName           : 'Security Dashboard'
+                    ])
+                } else {
+                    echo 'Security dashboard absent - publication HTML ignoree.'
                 }
             }
 
