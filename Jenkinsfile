@@ -26,6 +26,17 @@ pipeline {
 
     stages {
 
+        stage('Configure CSP for HTML Report') {
+            steps {
+                script {
+                    System.setProperty(
+                        "hudson.model.DirectoryBrowserSupport.CSP",
+                        "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; script-src 'self' 'unsafe-inline';"
+                    )
+                }
+            }
+        }
+        
         stage('Force Clean Workspace') {
             steps {
                 sh '''
