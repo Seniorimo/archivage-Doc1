@@ -82,6 +82,103 @@ package security
 
 default allow := false
 
+=======
+pipeline {
+    agent any
+
+    options {
+        skipDefaultCheckout(true)
+        timestamps()
+        timeout(time: 60, unit: 'MINUTES')
+        disableConcurrentBuilds()
+    }
+
+    environment {
+        APP_NAME        = 'archivage-Doc'
+        APP_CONTAINER   = 'app-archivage'
+        MYSQL_CONTAINER = 'mysql-archivage'
+        NETWORK_NAME    = 'archivage-net'
+        APP_PORT        = '8090'
+        PROJECT_DIR     = "${WORKSPACE}/src"
+        DOCKER_IMAGE    = "archivage-app:${env.BUILD_NUMBER}"
+        MAVEN_REPO      = '/var/jenkins_home/.m2/repository'
+        TRIVY_CACHE     = "${WORKSPACE}/src/.trivycache"
+        SONARQUBE_ENV   = 'sonar'
+        SONAR_DOCKER_URL = 'http://host.docker.internal:9000'
+        JENKINS_UID     = """${sh(returnStdout: true, script: 'id -u').trim()}"""
+        JENKINS_GID     = """${sh(returnStdout: true, script: 'id -g').trim()}"""
+    }
+
+    stages {
+
+        stage('Configure CSP for HTML Report') {
+            steps {
+                script {
+                    System.setProperty(
+                        "hudson.model.DirectoryBrowserSupport.CSP",
+                        "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; script-src 'self' 'unsafe-inline';"
+                    )
+                }
+            }
+        }
+        
+        stage('Force Clean Workspace') {
+            steps {
+                sh '''
+                    set -eux
+
+                    echo "=== FORCE CLEAN WORKSPACE ==="
+                    docker run --rm \
+                      -u 0:0 \
+                      -v "$WORKSPACE:/ws" \
+                      alpine:3.19 \
+                      sh -euxc "
+                        find /ws -mindepth 1 -maxdepth 1 -exec rm -rf {} + || true
+                        mkdir -p /ws/src
+                        chown -R ${JENKINS_UID}:${JENKINS_GID} /ws
+                        ls -la /ws
+                      "
+
+                    echo "Workspace nettoye de force avec succes."
+                '''
+            }
+        }
+
+        stage('Checkout') {
+            steps {
+                dir('src') {
+                    deleteDir()
+                    checkout scm
+                }
+            }
+        }
+
+        stage('Prepare Workspace') {
+            steps {
+                sh '''
+                    set -eu
+
+                    cd "$PROJECT_DIR"
+
+                    echo "=== PREPARE WORKSPACE ==="
+                    rm -rf reports .trivycache policy .jarpath
+                    mkdir -p \
+                      reports/gitleaks \
+                      reports/trivy \
+                      reports/sbom \
+                      reports/zap \
+                      reports/opa \
+                      reports/sonar \
+                      .trivycache \
+                      policy
+
+                    docker network inspect "$NETWORK_NAME" >/dev/null 2>&1 || docker network create "$NETWORK_NAME"
+
+                    cat > policy/security-gate.rego <<'REGO'
+package security
+
+default allow := false
+
 allow if {
     input.trivy.critical == 0
     count(input.gitleaks) == 0
