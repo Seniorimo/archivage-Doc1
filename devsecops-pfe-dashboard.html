@@ -1,0 +1,2629 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DevSecOps PFE - Archivage Doc</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <style>
+    :root {
+      --bg: #08111f;
+      --surface: #0d1829;
+      --surface-2: #121f33;
+      --surface-3: #17253b;
+      --text: #eef6ff;
+      --muted: #9fb0c8;
+      --line: rgba(160, 181, 210, .22);
+      --accent: #4dd4ff;
+      --accent-2: #78f2c2;
+      --danger: #ff657a;
+      --warning: #ffd166;
+      --secret: #d6a4ff;
+      --sast: #4dd4ff;
+      --dast: #ff8a65;
+      --sca: #78f2c2;
+      --sbom: #ffd166;
+      --gate: #ff657a;
+      --shadow: 0 24px 80px rgba(0, 0, 0, .34);
+      --radius: 8px;
+      color-scheme: dark;
+    }
+
+    body.light {
+      --bg: #f5f8fc;
+      --surface: #ffffff;
+      --surface-2: #eef4fb;
+      --surface-3: #e5edf7;
+      --text: #101828;
+      --muted: #58677c;
+      --line: rgba(42, 58, 83, .18);
+      --accent: #006ecf;
+      --accent-2: #087f5b;
+      --danger: #c9184a;
+      --warning: #a16207;
+      --shadow: 0 18px 55px rgba(16, 24, 40, .13);
+      color-scheme: light;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      font-family: Inter, system-ui, sans-serif;
+      background:
+        radial-gradient(circle at 12% 8%, rgba(77, 212, 255, .16), transparent 28rem),
+        radial-gradient(circle at 86% 20%, rgba(120, 242, 194, .12), transparent 30rem),
+        linear-gradient(180deg, var(--bg), var(--bg));
+      color: var(--text);
+      transition: background .35s ease, color .35s ease;
+    }
+
+    a { color: inherit; text-decoration: none; }
+    button { font: inherit; }
+
+    .shell { width: min(1180px, calc(100% - 32px)); margin: 0 auto; }
+
+    .nav {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      backdrop-filter: blur(18px);
+      background: color-mix(in srgb, var(--bg) 82%, transparent);
+      border-bottom: 1px solid var(--line);
+    }
+
+    .nav-inner {
+      min-height: 70px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 18px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-weight: 800;
+      letter-spacing: 0;
+    }
+
+    .brand-mark {
+      width: 38px;
+      height: 38px;
+      display: grid;
+      place-items: center;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 28%, transparent), color-mix(in srgb, var(--accent-2) 18%, transparent));
+      box-shadow: inset 0 0 20px rgba(255,255,255,.06);
+    }
+
+    .nav-links {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .nav-links a {
+      padding: 9px 10px;
+      border-radius: 7px;
+    }
+
+    .nav-links a:hover { background: var(--surface-2); color: var(--text); }
+
+    .theme-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 9px 12px;
+      color: var(--text);
+      background: var(--surface-2);
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      cursor: pointer;
+    }
+
+    .hero {
+      padding: 70px 0 44px;
+      display: grid;
+      grid-template-columns: minmax(0, 1.05fr) minmax(320px, .95fr);
+      gap: 32px;
+      align-items: center;
+    }
+
+    .kicker {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 11px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      color: var(--accent-2);
+      background: color-mix(in srgb, var(--surface) 72%, transparent);
+      font-weight: 700;
+      font-size: 13px;
+    }
+
+    h1 {
+      margin: 18px 0 16px;
+      font-size: clamp(38px, 6vw, 74px);
+      line-height: .96;
+      letter-spacing: 0;
+    }
+
+    .hero p {
+      color: var(--muted);
+      font-size: 18px;
+      line-height: 1.7;
+      max-width: 680px;
+    }
+
+    .hero-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-top: 28px;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      padding: 12px 16px;
+      border-radius: 7px;
+      border: 1px solid var(--line);
+      background: var(--surface-2);
+      color: var(--text);
+      font-weight: 700;
+    }
+
+    .btn.primary {
+      background: linear-gradient(135deg, var(--accent), var(--accent-2));
+      color: #03101f;
+      border: 0;
+    }
+
+    .ops-panel {
+      border: 1px solid var(--line);
+      background: linear-gradient(180deg, color-mix(in srgb, var(--surface) 92%, transparent), color-mix(in srgb, var(--surface-2) 96%, transparent));
+      box-shadow: var(--shadow);
+      border-radius: var(--radius);
+      overflow: hidden;
+    }
+
+    .panel-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--line);
+      background: color-mix(in srgb, var(--surface-3) 76%, transparent);
+    }
+
+    .traffic { display: flex; gap: 7px; }
+    .traffic span { width: 10px; height: 10px; border-radius: 50%; background: var(--danger); }
+    .traffic span:nth-child(2) { background: var(--warning); }
+    .traffic span:nth-child(3) { background: var(--accent-2); }
+    .mono { font-family: "JetBrains Mono", monospace; }
+
+    .terminal {
+      padding: 18px;
+      display: grid;
+      gap: 13px;
+      font-family: "JetBrains Mono", monospace;
+      font-size: 13px;
+    }
+
+    .log-line {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 11px 12px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: color-mix(in srgb, var(--surface-2) 75%, transparent);
+      animation: pulseLine 3.6s ease-in-out infinite;
+    }
+
+    .log-line:nth-child(2) { animation-delay: .5s; }
+    .log-line:nth-child(3) { animation-delay: 1s; }
+    .log-line:nth-child(4) { animation-delay: 1.5s; }
+
+    @keyframes pulseLine {
+      0%, 100% { border-color: var(--line); transform: translateY(0); }
+      50% { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); transform: translateY(-2px); }
+    }
+
+    .status-ok { color: var(--accent-2); }
+    .status-warn { color: var(--warning); }
+    .status-stop { color: var(--danger); }
+
+    section { padding: 52px 0; }
+    .section-head {
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: 20px;
+      margin-bottom: 24px;
+    }
+
+    .section-head h2 {
+      margin: 0;
+      font-size: clamp(28px, 4vw, 42px);
+      letter-spacing: 0;
+    }
+
+    .section-head p {
+      color: var(--muted);
+      line-height: 1.7;
+      max-width: 640px;
+      margin: 0;
+    }
+
+    .pipeline-wrap {
+      position: relative;
+      padding: 24px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: color-mix(in srgb, var(--surface) 84%, transparent);
+      overflow: hidden;
+    }
+
+    .pipeline {
+      display: grid;
+      grid-template-columns: repeat(7, minmax(120px, 1fr));
+      gap: 14px;
+      position: relative;
+    }
+
+    .stage {
+      position: relative;
+      min-height: 152px;
+      border: 1px solid var(--line);
+      background: var(--surface-2);
+      border-radius: var(--radius);
+      padding: 16px 14px;
+      cursor: pointer;
+      transition: transform .22s ease, border-color .22s ease, background .22s ease;
+    }
+
+    .stage:hover, .stage.active {
+      transform: translateY(-5px);
+      border-color: var(--accent);
+      background: color-mix(in srgb, var(--surface-2) 70%, var(--accent) 9%);
+    }
+
+    .stage:not(:last-child)::after {
+      content: "";
+      position: absolute;
+      width: 14px;
+      height: 2px;
+      top: 50%;
+      right: -15px;
+      background: linear-gradient(90deg, var(--accent), transparent);
+      animation: flow 1.4s linear infinite;
+    }
+
+    @keyframes flow {
+      from { opacity: .25; transform: scaleX(.3); transform-origin: left; }
+      to { opacity: 1; transform: scaleX(1); transform-origin: left; }
+    }
+
+    .stage-icon {
+      width: 38px;
+      height: 38px;
+      display: grid;
+      place-items: center;
+      border-radius: 8px;
+      background: color-mix(in srgb, var(--accent) 18%, transparent);
+      color: var(--accent);
+      margin-bottom: 14px;
+    }
+
+    .stage h3 { margin: 0 0 8px; font-size: 16px; }
+    .stage p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.5; }
+
+    .detail-panel {
+      margin-top: 18px;
+      display: grid;
+      grid-template-columns: .8fr 1.2fr;
+      gap: 18px;
+      align-items: stretch;
+    }
+
+    .detail-card, .tool-card, .concept-card {
+      border: 1px solid var(--line);
+      background: var(--surface);
+      border-radius: var(--radius);
+      padding: 20px;
+      box-shadow: 0 10px 35px rgba(0,0,0,.09);
+    }
+
+    .detail-card h3, .tool-card h3, .concept-card h3 { margin: 0 0 10px; }
+    .detail-card p, .tool-card p, .concept-card p { color: var(--muted); line-height: 1.65; }
+
+    .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+    .chip {
+      padding: 6px 9px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .tools-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 16px;
+    }
+
+    .tool-card {
+      cursor: pointer;
+      transition: transform .22s ease, border-color .22s ease;
+    }
+
+    .tool-card:hover, .tool-card.active {
+      transform: translateY(-4px);
+      border-color: var(--tool-color, var(--accent));
+    }
+
+    .tool-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+
+    .category {
+      padding: 5px 8px;
+      border-radius: 999px;
+      background: color-mix(in srgb, var(--tool-color, var(--accent)) 14%, transparent);
+      color: var(--tool-color, var(--accent));
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .tool-detail {
+      margin-top: 18px;
+      border-left: 4px solid var(--accent);
+      animation: slideIn .25s ease;
+    }
+
+    @keyframes slideIn {
+      from { opacity: 0; transform: translateY(8px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .facts {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 12px;
+      margin-top: 16px;
+    }
+
+    .fact {
+      padding: 14px;
+      border-radius: 7px;
+      background: var(--surface-2);
+      border: 1px solid var(--line);
+    }
+
+    .fact strong { display: block; margin-bottom: 5px; }
+    .fact span { color: var(--muted); font-size: 13px; line-height: 1.45; }
+
+    .timeline {
+      position: relative;
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 14px;
+      margin-top: 18px;
+    }
+
+    .timeline::before {
+      content: "";
+      position: absolute;
+      left: 6%;
+      right: 6%;
+      top: 32px;
+      height: 2px;
+      background: linear-gradient(90deg, var(--accent-2), var(--warning), var(--danger));
+      z-index: 0;
+    }
+
+    .time-step {
+      position: relative;
+      z-index: 1;
+      padding-top: 58px;
+    }
+
+    .dot {
+      position: absolute;
+      top: 20px;
+      left: 0;
+      width: 25px;
+      height: 25px;
+      display: grid;
+      place-items: center;
+      border-radius: 50%;
+      background: var(--surface);
+      border: 2px solid var(--accent);
+    }
+
+    .time-step h3 { margin: 0 0 8px; font-size: 16px; }
+    .time-step p { margin: 0; color: var(--muted); line-height: 1.55; font-size: 14px; }
+
+    .gate-layout {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+      align-items: stretch;
+    }
+
+    .learning-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 16px;
+    }
+
+    .explain-card {
+      border: 1px solid var(--line);
+      background: var(--surface);
+      border-radius: var(--radius);
+      padding: 20px;
+      box-shadow: 0 10px 35px rgba(0,0,0,.08);
+    }
+
+    .explain-card h3 {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin: 0 0 12px;
+      font-size: 18px;
+    }
+
+    .explain-card p,
+    .explain-card li {
+      color: var(--muted);
+      line-height: 1.65;
+    }
+
+    .explain-card ul {
+      margin: 12px 0 0;
+      padding-left: 18px;
+    }
+
+    .keyword-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 14px;
+    }
+
+    .keyword {
+      padding: 7px 9px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: var(--surface-2);
+      color: var(--text);
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .beginner-flow {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 12px;
+      margin-top: 16px;
+    }
+
+    .beginner-step {
+      padding: 15px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface-2);
+    }
+
+    .beginner-step strong {
+      display: block;
+      margin-bottom: 7px;
+      color: var(--accent);
+    }
+
+    .callout {
+      margin-top: 18px;
+      padding: 18px;
+      border-left: 4px solid var(--accent-2);
+      border-radius: 8px;
+      background: color-mix(in srgb, var(--accent-2) 10%, var(--surface));
+    }
+
+    .callout strong {
+      color: var(--accent-2);
+    }
+
+    .wide-card {
+      grid-column: 1 / -1;
+    }
+
+    .comparison {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 14px;
+      overflow: hidden;
+      border-radius: 8px;
+    }
+
+    .comparison th,
+    .comparison td {
+      padding: 13px 14px;
+      border: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    .comparison th {
+      background: var(--surface-3);
+      color: var(--text);
+    }
+
+    .comparison td {
+      color: var(--muted);
+      line-height: 1.55;
+    }
+
+    .glossary-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .glossary-item {
+      padding: 16px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface);
+    }
+
+    .glossary-item strong {
+      display: block;
+      margin-bottom: 6px;
+      color: var(--accent);
+    }
+
+    .glossary-item span {
+      color: var(--muted);
+      line-height: 1.55;
+    }
+
+    .lesson-path {
+      display: grid;
+      grid-template-columns: 280px 1fr;
+      gap: 18px;
+      align-items: start;
+    }
+
+    .lesson-index {
+      position: sticky;
+      top: 92px;
+      display: grid;
+      gap: 10px;
+    }
+
+    .lesson-index a {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface);
+      color: var(--muted);
+      font-weight: 700;
+    }
+
+    .lesson-index a:hover {
+      color: var(--text);
+      border-color: var(--accent);
+    }
+
+    .lesson-content {
+      display: grid;
+      gap: 16px;
+    }
+
+    .lesson-block {
+      border: 1px solid var(--line);
+      background: var(--surface);
+      border-radius: var(--radius);
+      padding: 22px;
+    }
+
+    .lesson-block h3 {
+      margin: 0 0 10px;
+      font-size: 22px;
+    }
+
+    .lesson-block p,
+    .lesson-block li {
+      color: var(--muted);
+      line-height: 1.75;
+    }
+
+    .remember {
+      margin-top: 14px;
+      padding: 15px;
+      border-radius: 8px;
+      border: 1px solid color-mix(in srgb, var(--accent-2) 45%, var(--line));
+      background: color-mix(in srgb, var(--accent-2) 9%, var(--surface));
+    }
+
+    .remember strong {
+      color: var(--accent-2);
+    }
+
+    .quiz-board {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+
+    .quiz-card {
+      border: 1px solid var(--line);
+      background: var(--surface);
+      border-radius: var(--radius);
+      padding: 18px;
+    }
+
+    .quiz-options {
+      display: grid;
+      gap: 8px;
+      margin-top: 14px;
+    }
+
+    .quiz-options button,
+    .match-row button {
+      border: 1px solid var(--line);
+      background: var(--surface-2);
+      color: var(--text);
+      border-radius: 7px;
+      padding: 10px 12px;
+      cursor: pointer;
+      text-align: left;
+      transition: border-color .2s ease, background .2s ease, transform .2s ease;
+    }
+
+    .quiz-options button:hover,
+    .match-row button:hover {
+      border-color: var(--accent);
+      transform: translateY(-1px);
+    }
+
+    .quiz-options button.correct {
+      border-color: var(--accent-2);
+      background: color-mix(in srgb, var(--accent-2) 14%, var(--surface-2));
+    }
+
+    .quiz-options button.wrong {
+      border-color: var(--danger);
+      background: color-mix(in srgb, var(--danger) 12%, var(--surface-2));
+    }
+
+    .feedback {
+      min-height: 28px;
+      margin-top: 12px;
+      color: var(--muted);
+      font-weight: 700;
+    }
+
+    .match-game {
+      display: grid;
+      gap: 10px;
+    }
+
+    .match-row {
+      display: grid;
+      grid-template-columns: 140px 1fr;
+      gap: 10px;
+      align-items: center;
+    }
+
+    .match-label {
+      font-weight: 800;
+      color: var(--accent);
+    }
+
+    .progress-strip {
+      display: grid;
+      grid-template-columns: repeat(6, 1fr);
+      gap: 8px;
+      margin-top: 14px;
+    }
+
+    .progress-pill {
+      height: 9px;
+      border-radius: 999px;
+      background: var(--surface-3);
+      border: 1px solid var(--line);
+    }
+
+    .progress-pill.active {
+      background: linear-gradient(90deg, var(--accent), var(--accent-2));
+    }
+
+    .concept-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+      margin-top: 18px;
+    }
+
+    .concept-card {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: linear-gradient(180deg, var(--surface), color-mix(in srgb, var(--surface-2) 82%, transparent));
+      padding: 18px;
+      display: grid;
+      gap: 10px;
+    }
+
+    .concept-card h3 {
+      margin: 0;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .concept-card p {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.65;
+    }
+
+    .concept-card .mini-label {
+      color: var(--accent-2);
+      font-weight: 800;
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: .04em;
+    }
+
+    .deep-course {
+      display: grid;
+      gap: 18px;
+    }
+
+    .deep-card {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background:
+        linear-gradient(135deg, color-mix(in srgb, var(--accent) 6%, transparent), transparent 42%),
+        var(--surface);
+      padding: 22px;
+    }
+
+    .deep-card h3 {
+      margin: 0 0 12px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 24px;
+    }
+
+    .deep-card p,
+    .deep-card li {
+      color: var(--muted);
+      line-height: 1.78;
+      font-size: 15.5px;
+    }
+
+    .deep-card ul {
+      margin: 10px 0 0;
+      padding-left: 22px;
+    }
+
+    .example-box,
+    .oral-line {
+      margin-top: 14px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 15px;
+      background: color-mix(in srgb, var(--surface-2) 82%, transparent);
+      color: var(--muted);
+      line-height: 1.7;
+    }
+
+    .example-box strong,
+    .oral-line strong {
+      color: var(--accent-2);
+    }
+
+    .comparison-table {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 10px;
+      margin-top: 14px;
+    }
+
+    .comparison-cell {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 14px;
+      background: var(--surface-2);
+    }
+
+    .comparison-cell strong {
+      display: block;
+      color: var(--accent);
+      margin-bottom: 8px;
+    }
+
+    .tool-explainer-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+      margin-top: 16px;
+    }
+
+    .tool-explainer {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: color-mix(in srgb, var(--surface-2) 86%, transparent);
+      padding: 16px;
+    }
+
+    .tool-explainer h4 {
+      margin: 0 0 10px;
+      color: var(--accent);
+      font-size: 18px;
+    }
+
+    .tool-explainer p {
+      margin: 8px 0;
+      line-height: 1.65;
+    }
+
+    .game-lab {
+      display: grid;
+      gap: 18px;
+    }
+
+    .game-card {
+      border: 1px solid var(--line);
+      background:
+        linear-gradient(135deg, color-mix(in srgb, var(--accent) 7%, transparent), transparent 34%),
+        var(--surface);
+      border-radius: var(--radius);
+      padding: 20px;
+      box-shadow: 0 18px 50px rgba(0, 0, 0, .12);
+    }
+
+    .game-card h3 {
+      margin: 0 0 8px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 22px;
+    }
+
+    .game-card p {
+      color: var(--muted);
+      line-height: 1.65;
+    }
+
+    .game-meta {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 10px;
+      margin: 12px 0 16px;
+    }
+
+    .score-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 7px 10px;
+      background: var(--surface-2);
+      color: var(--accent-2);
+      font-weight: 800;
+      font-size: 13px;
+    }
+
+    .game-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 14px;
+    }
+
+    .pipeline-builder,
+    .secure-grid,
+    .incident-grid {
+      display: grid;
+      gap: 10px;
+    }
+
+    .pipeline-step {
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      gap: 12px;
+      align-items: center;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface-2);
+      padding: 12px;
+      cursor: grab;
+      transition: transform .2s ease, border-color .2s ease, background .2s ease;
+    }
+
+    .pipeline-step.dragging {
+      opacity: .58;
+      transform: scale(.99);
+      border-color: var(--accent);
+    }
+
+    .pipeline-step strong {
+      display: block;
+      margin-bottom: 3px;
+    }
+
+    .pipeline-step span {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    .step-number {
+      width: 34px;
+      height: 34px;
+      display: grid;
+      place-items: center;
+      border-radius: 8px;
+      background: color-mix(in srgb, var(--accent) 18%, var(--surface-3));
+      color: var(--accent);
+      font-family: "JetBrains Mono", monospace;
+      font-weight: 800;
+    }
+
+    .step-controls {
+      display: flex;
+      gap: 6px;
+    }
+
+    .icon-btn {
+      width: 34px;
+      height: 34px;
+      display: grid;
+      place-items: center;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: var(--surface-3);
+      color: var(--text);
+      cursor: pointer;
+    }
+
+    .choice-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 8px;
+    }
+
+    .choice-chip,
+    .role-chip {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface-2);
+      color: var(--text);
+      padding: 10px 12px;
+      cursor: pointer;
+      transition: transform .2s ease, border-color .2s ease, background .2s ease;
+    }
+
+    .choice-chip:hover,
+    .role-chip:hover,
+    .icon-btn:hover {
+      transform: translateY(-1px);
+      border-color: var(--accent);
+    }
+
+    .choice-chip.correct,
+    .role-chip.correct,
+    .pipeline-step.correct {
+      border-color: var(--accent-2);
+      background: color-mix(in srgb, var(--accent-2) 14%, var(--surface-2));
+    }
+
+    .choice-chip.wrong,
+    .role-chip.wrong,
+    .pipeline-step.wrong {
+      border-color: var(--danger);
+      background: color-mix(in srgb, var(--danger) 12%, var(--surface-2));
+    }
+
+    .tool-match-grid {
+      display: grid;
+      gap: 12px;
+    }
+
+    .tool-match-row {
+      display: grid;
+      grid-template-columns: 170px 1fr;
+      gap: 12px;
+      align-items: start;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 12px;
+      background: color-mix(in srgb, var(--surface-2) 76%, transparent);
+    }
+
+    .tool-name {
+      font-weight: 900;
+      color: var(--accent);
+    }
+
+    .secure-card,
+    .incident-card {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface-2);
+      padding: 16px;
+    }
+
+    .secure-card h4,
+    .incident-card h4 {
+      margin: 0 0 8px;
+      font-size: 17px;
+    }
+
+    .memory-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+      gap: 12px;
+    }
+
+    .flash-card {
+      width: 100%;
+      min-height: 150px;
+      border: 0;
+      background: transparent;
+      padding: 0;
+      perspective: 900px;
+      cursor: pointer;
+    }
+
+    .flash-inner {
+      position: relative;
+      display: block;
+      width: 100%;
+      min-height: 150px;
+      transition: transform .5s ease;
+      transform-style: preserve-3d;
+    }
+
+    .flash-card.flipped .flash-inner {
+      transform: rotateY(180deg);
+    }
+
+    .flash-face {
+      position: absolute;
+      inset: 0;
+      display: grid;
+      align-content: center;
+      gap: 8px;
+      padding: 16px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface-2);
+      backface-visibility: hidden;
+      text-align: left;
+    }
+
+    .flash-face.back {
+      transform: rotateY(180deg);
+      background: color-mix(in srgb, var(--accent-2) 12%, var(--surface-2));
+    }
+
+    .flash-face strong {
+      color: var(--accent);
+      font-size: 18px;
+    }
+
+    .flash-face span {
+      color: var(--muted);
+      line-height: 1.55;
+    }
+
+    .policy-box {
+      font-family: "JetBrains Mono", monospace;
+      white-space: pre-wrap;
+      line-height: 1.7;
+      padding: 18px;
+      border-radius: var(--radius);
+      background: #050b14;
+      color: #d7e8ff;
+      border: 1px solid rgba(255,255,255,.1);
+      overflow-x: auto;
+    }
+
+    body.light .policy-box { background: #111827; }
+
+    .verdicts {
+      display: grid;
+      gap: 12px;
+    }
+
+    .verdict {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 16px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface);
+    }
+
+    .verdict.good i { color: var(--accent-2); }
+    .verdict.bad i { color: var(--danger); }
+
+    footer {
+      padding: 34px 0 46px;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      text-align: center;
+    }
+
+    .reveal {
+      opacity: 0;
+      transform: translateY(18px);
+      transition: opacity .6s ease, transform .6s ease;
+    }
+
+    .reveal.visible {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    @media (max-width: 980px) {
+      .hero, .detail-panel, .gate-layout { grid-template-columns: 1fr; }
+      .lesson-path, .quiz-board { grid-template-columns: 1fr; }
+      .concept-grid, .comparison-table, .tool-explainer-grid { grid-template-columns: 1fr; }
+      .lesson-index { position: static; }
+      .pipeline { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .stage::after { display: none; }
+      .tools-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .timeline { grid-template-columns: 1fr; }
+      .timeline::before { left: 12px; right: auto; top: 0; bottom: 0; width: 2px; height: auto; }
+      .time-step { padding-top: 0; padding-left: 46px; }
+      .dot { top: 0; left: 0; }
+      .facts { grid-template-columns: 1fr; }
+      .nav-links { display: none; }
+      .learning-grid, .beginner-flow, .glossary-grid { grid-template-columns: 1fr; }
+    }
+
+    @media (max-width: 620px) {
+      .shell { width: min(100% - 22px, 1180px); }
+      .hero { padding-top: 42px; }
+      .match-row, .tool-match-row, .pipeline-step { grid-template-columns: 1fr; }
+      .step-controls { justify-content: stretch; }
+      .step-controls .icon-btn { width: 100%; }
+      .pipeline, .tools-grid { grid-template-columns: 1fr; }
+      .section-head { align-items: start; flex-direction: column; }
+      .nav-inner { min-height: 64px; }
+      .brand span:last-child { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <nav class="nav">
+    <div class="shell nav-inner">
+      <a href="#top" class="brand" aria-label="Accueil">
+        <span class="brand-mark"><i data-lucide="shield-check"></i></span>
+        <span>Archivage Doc DevSecOps</span>
+      </a>
+      <div class="nav-links">
+        <a href="#debutant">Débutant</a>
+        <a href="#fondamentaux">Fondamentaux</a>
+        <a href="#cours-detaille">Cours</a>
+        <a href="#pipeline">Pipeline</a>
+        <a href="#tools">Outils</a>
+        <a href="#shift-left">Shift-left</a>
+        <a href="#opa">OPA</a>
+        <a href="#quiz">Mini-jeux</a>
+        <a href="#resume-final">Résumé</a>
+        <a href="#glossaire">Glossaire</a>
+      </div>
+      <button class="theme-toggle" id="themeToggle" type="button" aria-label="Changer le thème">
+        <i data-lucide="sun-moon"></i><span>Thème</span>
+      </button>
+    </div>
+  </nav>
+
+  <main id="top" class="shell">
+    <section class="hero">
+      <div class="reveal">
+        <span class="kicker"><i data-lucide="activity"></i> PFE DevSecOps sur Jenkins + Docker + WSL2</span>
+        <h1>Une chaîne CI/CD qui pense sécurité à chaque étape.</h1>
+        <p>
+          Ce tableau de bord explique le pipeline Jenkins du projet Spring Boot
+          <strong>archivage-doc</strong> : build, analyse de code, scan de secrets, détection de CVE,
+          SBOM, test dynamique avec ZAP, puis décision finale par OPA.
+          L’objectif est de comprendre simplement comment une chaîne DevSecOps transforme un code source
+          en application testée, contrôlée et accompagnée de preuves de sécurité.
+        </p>
+        <div class="hero-actions">
+          <a class="btn primary" href="#pipeline"><i data-lucide="git-branch"></i> Explorer le flux</a>
+          <a class="btn" href="#tools"><i data-lucide="scan-search"></i> Comprendre les outils</a>
+        </div>
+      </div>
+
+      <aside class="ops-panel reveal" aria-label="Console de sécurité">
+        <div class="panel-top">
+          <div class="traffic"><span></span><span></span><span></span></div>
+          <span class="mono">jenkins@docker-wsl2</span>
+        </div>
+        <div class="terminal">
+          <div class="log-line"><span>checkout/test-config-fix</span><strong class="status-ok">OK</strong></div>
+          <div class="log-line"><span>mvn clean package</span><strong class="status-ok">BUILD</strong></div>
+          <div class="log-line"><span>gitleaks + trivy + sonar</span><strong class="status-warn">FINDINGS</strong></div>
+          <div class="log-line"><span>opa eval data.security.allow</span><strong class="status-stop">GATE</strong></div>
+        </div>
+      </aside>
+    </section>
+
+    <section id="debutant" class="reveal">
+      <div class="section-head">
+        <h2>Comprendre le projet en mode débutant</h2>
+        <p>Avant de regarder les outils, il faut comprendre l’idée générale : Jenkins joue le rôle d’un chef d’orchestre qui lance automatiquement les étapes de construction, de test, de scan de sécurité et de décision.</p>
+      </div>
+      <div class="learning-grid">
+        <article class="explain-card">
+          <h3><i data-lucide="box"></i> C’est quoi le projet ?</h3>
+          <p>
+            <strong>archivage-doc</strong> est une application Spring Boot. Elle est construite avec Maven,
+            empaquetée dans une image Docker, puis lancée avec une base MySQL pour être testée comme une vraie application.
+          </p>
+          <div class="keyword-list">
+            <span class="keyword">Spring Boot</span>
+            <span class="keyword">Maven</span>
+            <span class="keyword">Docker</span>
+            <span class="keyword">MySQL</span>
+          </div>
+        </article>
+
+        <article class="explain-card">
+          <h3><i data-lucide="workflow"></i> C’est quoi Jenkins ?</h3>
+          <p>
+            Jenkins automatise le travail répétitif. Au lieu de lancer manuellement les commandes,
+            le pipeline exécute les étapes dans un ordre précis : récupérer le code, compiler,
+            scanner, déployer, tester, décider, publier les rapports.
+          </p>
+          <div class="keyword-list">
+            <span class="keyword">CI/CD</span>
+            <span class="keyword">Pipeline</span>
+            <span class="keyword">Stage</span>
+            <span class="keyword">Artifact</span>
+          </div>
+        </article>
+
+        <article class="explain-card">
+          <h3><i data-lucide="shield-alert"></i> Pourquoi DevSecOps ?</h3>
+          <p>
+            DevSecOps signifie que la sécurité n’est pas vérifiée seulement à la fin.
+            Elle est intégrée dans la chaîne de développement. Chaque changement de code peut déclencher
+            des contrôles automatiques et produire des preuves.
+          </p>
+          <div class="keyword-list">
+            <span class="keyword">Security by design</span>
+            <span class="keyword">Shift-left</span>
+            <span class="keyword">Policy gate</span>
+          </div>
+        </article>
+
+        <article class="explain-card wide-card">
+          <h3><i data-lucide="route"></i> Lecture simple du pipeline</h3>
+          <p>
+            Imagine une ligne de production. Le code entre à gauche, puis il passe par plusieurs contrôles.
+            Si une étape échoue ou si le gate final refuse le résultat, le pipeline s’arrête. Sinon, les rapports
+            sont publiés et archivés dans Jenkins.
+          </p>
+          <div class="beginner-flow">
+            <div class="beginner-step"><strong>1. Code</strong><span>Jenkins récupère la branche du projet.</span></div>
+            <div class="beginner-step"><strong>2. Build</strong><span>Maven compile et Docker prépare l’image.</span></div>
+            <div class="beginner-step"><strong>3. Scans</strong><span>Les outils cherchent secrets, CVE et failles.</span></div>
+            <div class="beginner-step"><strong>4. Décision</strong><span>OPA décide si le build peut passer.</span></div>
+          </div>
+          <div class="callout">
+            <strong>Idée clé :</strong> un pipeline DevSecOps ne remplace pas un expert sécurité.
+            Il donne rapidement des signaux, des preuves et un niveau de confiance mesurable.
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <section id="fondamentaux" class="reveal">
+      <div class="section-head">
+        <h2>Parcours d'apprentissage de A a Z</h2>
+        <p>Un module progressif pour comprendre les mots, les idees et la logique du projet avant de lire les resultats Jenkins.</p>
+      </div>
+
+      <div class="concept-grid">
+        <article class="concept-card">
+          <span class="mini-label">Définition simple</span>
+          <h3><i data-lucide="repeat-2"></i> DevOps</h3>
+          <p><strong>Rôle :</strong> rapprocher les développeurs et l'exploitation pour livrer plus vite.</p>
+          <p><strong>Exemple :</strong> Jenkins compile automatiquement au lieu de laisser chaque personne lancer les commandes à la main.</p>
+          <p><strong>Erreur fréquente :</strong> croire que DevOps est seulement un outil. C'est surtout une méthode de travail automatisée.</p>
+          <div class="keyword-list"><span class="keyword">automatisation</span><span class="keyword">collaboration</span></div>
+        </article>
+
+        <article class="concept-card">
+          <span class="mini-label">Définition simple</span>
+          <h3><i data-lucide="shield-check"></i> DevSecOps</h3>
+          <p><strong>Rôle :</strong> intégrer la sécurité dans le pipeline, pas uniquement à la fin du projet.</p>
+          <p><strong>Exemple :</strong> Gitleaks, Trivy, SonarQube et ZAP tournent automatiquement dans Jenkins.</p>
+          <p><strong>Erreur fréquente :</strong> penser que chaque détection doit bloquer. Une policy doit distinguer attendu et bloquant.</p>
+          <div class="keyword-list"><span class="keyword">shift-left</span><span class="keyword">security gate</span></div>
+        </article>
+
+        <article class="concept-card">
+          <span class="mini-label">Définition simple</span>
+          <h3><i data-lucide="git-merge"></i> CI/CD</h3>
+          <p><strong>Rôle :</strong> vérifier, construire et préparer l'application de façon répétable.</p>
+          <p><strong>Exemple :</strong> après un commit, Jenkins récupère le code, lance Maven, construit Docker et publie les rapports.</p>
+          <p><strong>Erreur fréquente :</strong> confondre CI et CD. La CI vérifie ; le CD prépare ou réalise la livraison.</p>
+          <div class="keyword-list"><span class="keyword">Continuous Integration</span><span class="keyword">Continuous Delivery</span></div>
+        </article>
+
+        <article class="concept-card">
+          <span class="mini-label">Définition simple</span>
+          <h3><i data-lucide="workflow"></i> Pipeline</h3>
+          <p><strong>Rôle :</strong> organiser le travail en étapes visibles : build, scans, déploiement, gate, rapports.</p>
+          <p><strong>Exemple :</strong> Checkout → Build → Security Scans → Deploy → DAST → OPA Gate → Reports.</p>
+          <p><strong>Erreur fréquente :</strong> ajouter trop d'étapes sans comprendre la preuve produite par chaque stage.</p>
+          <div class="keyword-list"><span class="keyword">stage</span><span class="keyword">Jenkinsfile</span></div>
+        </article>
+
+        <article class="concept-card">
+          <span class="mini-label">Définition simple</span>
+          <h3><i data-lucide="container"></i> Docker et conteneurs</h3>
+          <p><strong>Rôle :</strong> lancer l'application dans un environnement contrôlé et reproductible.</p>
+          <p><strong>Exemple :</strong> Spring Boot tourne dans un conteneur, MySQL dans un autre, puis ZAP teste l'URL exposée.</p>
+          <p><strong>Erreur fréquente :</strong> croire que localhost veut toujours dire la même chose entre Windows, Jenkins et Docker.</p>
+          <div class="keyword-list"><span class="keyword">image</span><span class="keyword">conteneur</span><span class="keyword">WSL2</span></div>
+        </article>
+
+        <article class="concept-card">
+          <span class="mini-label">Définition simple</span>
+          <h3><i data-lucide="scan-search"></i> Scans et rapports</h3>
+          <p><strong>Rôle :</strong> transformer un risque invisible en résultat lisible et archivable.</p>
+          <p><strong>Exemple :</strong> Trivy produit un JSON de CVE, ZAP produit un HTML, CycloneDX produit un SBOM.</p>
+          <p><strong>Erreur fréquente :</strong> considérer un rapport absent comme zéro finding. Un scan manquant n'est pas une preuve.</p>
+          <div class="keyword-list"><span class="keyword">finding</span><span class="keyword">artifact</span><span class="keyword">monitoring</span></div>
+        </article>
+      </div>
+
+      <div class="lesson-path">
+        <aside class="lesson-index" aria-label="Plan du cours">
+          <a href="#notion-devops"><i data-lucide="repeat-2"></i> DevOps</a>
+          <a href="#notion-devsecops"><i data-lucide="shield-check"></i> DevSecOps</a>
+          <a href="#notion-cicd"><i data-lucide="git-merge"></i> CI/CD</a>
+          <a href="#notion-pipeline"><i data-lucide="workflow"></i> Pipeline</a>
+          <a href="#notion-conteneurs"><i data-lucide="container"></i> Conteneurs</a>
+          <a href="#notion-scans"><i data-lucide="scan-search"></i> Scans</a>
+          <a href="#notion-monitoring"><i data-lucide="activity"></i> Monitoring</a>
+        </aside>
+
+        <div class="lesson-content">
+          <article id="notion-devops" class="lesson-block">
+            <h3><i data-lucide="repeat-2"></i> 1. DevOps : faire travailler developpement et operations ensemble</h3>
+            <p>
+              <strong>DevOps</strong> vient de <strong>Development</strong> et <strong>Operations</strong>.
+              Le developpement ecrit le code. Les operations preparent l'environnement ou l'application va tourner :
+              serveur, conteneur, reseau, base de donnees, surveillance et disponibilite.
+            </p>
+            <p>
+              Dans une organisation classique, ces deux mondes peuvent travailler separement. Le developpeur dit :
+              "sur ma machine ca marche". L'equipe operations repond : "en production ca ne marche pas".
+              DevOps reduit ce probleme en automatisant les etapes et en rendant l'environnement plus reproductible.
+            </p>
+            <div class="remember"><strong>A retenir :</strong> DevOps sert a livrer plus vite, plus regulierement et avec moins d'erreurs manuelles.</div>
+            <div class="keyword-list">
+              <span class="keyword">automatisation</span>
+              <span class="keyword">collaboration</span>
+              <span class="keyword">livraison continue</span>
+              <span class="keyword">environnement reproductible</span>
+            </div>
+          </article>
+
+          <article id="notion-devsecops" class="lesson-block">
+            <h3><i data-lucide="shield-check"></i> 2. DevSecOps : ajouter la securite dans la chaine</h3>
+            <p>
+              <strong>DevSecOps</strong> ajoute le mot <strong>Security</strong> au milieu de DevOps.
+              L'idee est simple : la securite ne doit pas arriver seulement a la fin du projet.
+              Elle doit accompagner le code des le debut, automatiquement, a chaque changement important.
+            </p>
+            <p>
+              Exemple concret : au lieu d'attendre la soutenance ou la mise en production pour chercher des failles,
+              Jenkins lance Gitleaks, Trivy, SonarQube, CycloneDX, ZAP et OPA pendant le pipeline.
+              Les problemes sont visibles plus tot, donc ils coutent moins cher a comprendre et a corriger.
+            </p>
+            <div class="remember"><strong>A retenir :</strong> DevSecOps ne veut pas dire "tout bloquer". Cela veut dire "rendre le risque visible, mesurable et decide par des regles claires".</div>
+            <div class="keyword-list">
+              <span class="keyword">security shift-left</span>
+              <span class="keyword">preuves de securite</span>
+              <span class="keyword">gate</span>
+              <span class="keyword">risque visible</span>
+            </div>
+          </article>
+
+          <article id="notion-cicd" class="lesson-block">
+            <h3><i data-lucide="git-merge"></i> 3. CI/CD : verifier et livrer automatiquement</h3>
+            <p>
+              <strong>CI</strong> signifie <strong>Continuous Integration</strong>, ou integration continue.
+              Cela veut dire que chaque changement de code est verifie automatiquement : compilation, tests,
+              analyse qualite, scans de securite.
+            </p>
+            <p>
+              <strong>CD</strong> signifie <strong>Continuous Delivery</strong> ou <strong>Continuous Deployment</strong>.
+              Dans ton PFE, Jenkins construit et deploie l'application dans Docker pour la tester.
+              Le principe est de rendre le passage du code vers un environnement executable plus fiable.
+            </p>
+            <div class="remember"><strong>Exemple simple :</strong> CI verifie que le colis est correct. CD prepare le colis pour l'envoyer ou le deployer.</div>
+            <div class="keyword-list">
+              <span class="keyword">build automatique</span>
+              <span class="keyword">tests</span>
+              <span class="keyword">delivery</span>
+              <span class="keyword">deployment</span>
+            </div>
+          </article>
+
+          <article id="notion-pipeline" class="lesson-block">
+            <h3><i data-lucide="workflow"></i> 4. Pipeline : une suite d'etapes ordonnees</h3>
+            <p>
+              Un <strong>pipeline</strong> est une recette automatisee. Chaque etape s'appelle un <strong>stage</strong>.
+              Dans ton projet, la recette ressemble a ceci : recuperer le code, compiler, scanner,
+              generer des rapports, deployer, tester dynamiquement, puis demander a OPA si le build peut passer.
+            </p>
+            <p>
+              Jenkins affiche chaque stage. C'est important pour comprendre rapidement ou un probleme apparait :
+              build Maven, Docker, Gitleaks, Trivy, ZAP, OPA ou publication des rapports.
+            </p>
+            <div class="remember"><strong>A retenir :</strong> un bon pipeline n'est pas seulement une liste de commandes. C'est une histoire lisible du controle qualite et securite.</div>
+            <div class="keyword-list">
+              <span class="keyword">stage</span>
+              <span class="keyword">Jenkinsfile</span>
+              <span class="keyword">rapport</span>
+              <span class="keyword">artifact</span>
+            </div>
+          </article>
+
+          <article id="notion-conteneurs" class="lesson-block">
+            <h3><i data-lucide="container"></i> 5. Conteneurs : lancer l'application dans une boite controlee</h3>
+            <p>
+              Un <strong>conteneur Docker</strong> est une boite logicielle qui contient ce qu'il faut pour lancer une application.
+              Dans ton contexte, Jenkins tourne dans Docker sur WSL2, construit une image de l'application Spring Boot,
+              demarre MySQL, puis lance l'application pour que ZAP puisse la tester.
+            </p>
+            <p>
+              <strong>WSL2</strong> signifie Windows Subsystem for Linux. C'est une couche Linux sur Windows.
+              Elle permet de travailler avec Docker et des outils Linux tout en etant sur une machine Windows.
+            </p>
+            <div class="remember"><strong>Image vs conteneur :</strong> l'image est le modele. Le conteneur est l'instance en cours d'execution.</div>
+            <div class="keyword-list">
+              <span class="keyword">Docker</span>
+              <span class="keyword">image</span>
+              <span class="keyword">conteneur</span>
+              <span class="keyword">WSL2</span>
+              <span class="keyword">MySQL</span>
+            </div>
+          </article>
+
+          <article id="notion-scans" class="lesson-block">
+            <h3><i data-lucide="scan-search"></i> 6. Scans de securite : plusieurs regards sur le meme projet</h3>
+            <p>
+              Un <strong>scan de securite</strong> est une analyse automatique qui cherche un type de risque.
+              Aucun outil ne voit tout. C'est pour cela que ton pipeline combine plusieurs familles :
+              <strong>SAST</strong> pour le code, <strong>DAST</strong> pour l'application en execution,
+              <strong>SCA</strong> pour les dependances, <strong>Secret Scanning</strong> pour les secrets,
+              <strong>SBOM</strong> pour l'inventaire et <strong>Policy Gate</strong> pour la decision.
+            </p>
+            <p>
+              Exemple : SonarQube peut voir une mauvaise pratique dans le code Java. Trivy peut voir une CVE dans une dependance.
+              Gitleaks peut voir un token dans Git. ZAP peut voir un header HTTP manquant quand l'application tourne.
+            </p>
+            <div class="remember"><strong>A retenir :</strong> les outils ne remplacent pas la comprehension humaine, mais ils donnent des preuves rapides et repetables.</div>
+            <div class="keyword-list">
+              <span class="keyword">SAST</span>
+              <span class="keyword">DAST</span>
+              <span class="keyword">SCA</span>
+              <span class="keyword">Secret Scanning</span>
+              <span class="keyword">SBOM</span>
+              <span class="keyword">Policy Gate</span>
+            </div>
+          </article>
+
+          <article id="notion-monitoring" class="lesson-block">
+            <h3><i data-lucide="activity"></i> 7. Reporting et monitoring : rendre les resultats lisibles</h3>
+            <p>
+              <strong>Reporting</strong> signifie presenter les resultats sous forme de rapports lisibles.
+              Dans Jenkins, les rapports HTML Publisher et les artifacts gardent les preuves du build :
+              rapports Gitleaks, Trivy, ZAP, SBOM CycloneDX, resultat OPA.
+            </p>
+            <p>
+              <strong>Monitoring</strong> signifie surveiller dans le temps. Dans un pipeline, on surveille surtout
+              si les builds passent, quels stages echouent souvent, si les scans produisent des alertes et si le gate OPA bloque.
+            </p>
+            <div class="remember"><strong>A retenir :</strong> un resultat non lisible est difficile a defendre. Un bon rapport explique ce qui a ete teste, ce qui a ete trouve et pourquoi la decision est prise.</div>
+            <div class="keyword-list">
+              <span class="keyword">HTML Publisher</span>
+              <span class="keyword">archiveArtifacts</span>
+              <span class="keyword">dashboard</span>
+              <span class="keyword">audit</span>
+            </div>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section id="cours-detaille" class="reveal">
+      <div class="section-head">
+        <h2>Cours détaillé : comprendre ton PFE sans prérequis</h2>
+        <p>Cette partie explique le projet comme si tu le découvrais pour la première fois, avec des exemples simples et des mots-clés utiles pour l'oral.</p>
+      </div>
+
+      <div class="deep-course">
+        <article class="deep-card">
+          <h3><i data-lucide="map"></i> 1. Pourquoi ce projet existe ?</h3>
+          <p>
+            Dans un vrai projet logiciel, écrire du code ne suffit pas. Il faut aussi vérifier que le code compile,
+            que l'application démarre, que les dépendances ne contiennent pas de vulnérabilités connues,
+            que des secrets ne sont pas envoyés dans Git, que l'application web ne répond pas de manière dangereuse,
+            et que les résultats sont conservés sous forme de rapports.
+          </p>
+          <p>
+            Ton projet <strong>archivage-doc</strong> montre cette logique avec une application Spring Boot.
+            Jenkins joue le rôle de chef d'orchestre. Il lance le build, les scans, le déploiement Docker,
+            le test dynamique avec ZAP, puis le gate OPA. Le but n'est pas seulement d'avoir un pipeline qui passe :
+            le but est de montrer une chaîne DevSecOps capable de produire des preuves.
+          </p>
+          <div class="example-box">
+            <strong>Exemple très simple :</strong> imagine une usine. Le code est la matière première.
+            Maven vérifie que la pièce peut être fabriquée, Docker l'emballe dans une boîte standard,
+            les scanners contrôlent les défauts, OPA décide si la pièce peut sortir, et Jenkins garde le dossier de contrôle.
+          </div>
+        </article>
+
+        <article class="deep-card">
+          <h3><i data-lucide="split"></i> 2. DevOps, DevSecOps et CI/CD : la différence en langage simple</h3>
+          <p>
+            <strong>DevOps</strong> signifie que les développeurs et les personnes qui exploitent l'application
+            travaillent avec une même chaîne automatisée. Avant DevOps, beaucoup d'actions étaient faites à la main :
+            compiler, copier des fichiers, lancer un serveur, vérifier rapidement si tout marche. Cela créait des erreurs.
+          </p>
+          <p>
+            <strong>DevSecOps</strong> ajoute la sécurité dans cette chaîne. Au lieu de dire "on fera la sécurité à la fin",
+            on vérifie tôt et souvent. C'est le principe <strong>shift-left</strong> : déplacer les contrôles vers le début
+            du cycle pour trouver les problèmes quand ils sont encore faciles à comprendre.
+          </p>
+          <div class="comparison-table">
+            <div class="comparison-cell">
+              <strong>DevOps</strong>
+              Automatiser build, test, déploiement et collaboration.
+            </div>
+            <div class="comparison-cell">
+              <strong>DevSecOps</strong>
+              Ajouter secrets, CVE, SAST, DAST, SBOM et policy gate dans la chaîne.
+            </div>
+            <div class="comparison-cell">
+              <strong>CI/CD</strong>
+              CI vérifie le code souvent. CD prépare ou réalise la livraison de façon fiable.
+            </div>
+          </div>
+          <div class="oral-line">
+            <strong>Phrase simple pour l'oral :</strong> "Mon pipeline ne se limite pas à compiler l'application.
+            Il automatise aussi des contrôles de sécurité et conserve des rapports pour justifier la décision finale."
+          </div>
+        </article>
+
+        <article class="deep-card">
+          <h3><i data-lucide="workflow"></i> 3. C'est quoi un pipeline Jenkins ?</h3>
+          <p>
+            Un <strong>pipeline</strong> est une suite d'étapes automatisées. Dans Jenkins, chaque étape s'appelle un
+            <strong>stage</strong>. Un stage doit répondre à une question simple. Par exemple :
+            "Est-ce que le code compile ?", "Est-ce que l'image Docker se construit ?",
+            "Est-ce que Trivy trouve une CVE critique ?", "Est-ce que OPA autorise le build ?".
+          </p>
+          <ul>
+            <li><strong>Checkout :</strong> Jenkins récupère le code depuis Git. Sans code, rien ne peut commencer.</li>
+            <li><strong>Build :</strong> Maven transforme le code Java en application exécutable.</li>
+            <li><strong>Docker :</strong> l'application est mise dans une image pour être lancée de façon reproductible.</li>
+            <li><strong>Scans :</strong> les outils cherchent des risques différents.</li>
+            <li><strong>Deploy :</strong> Jenkins démarre l'application et MySQL pour un test réaliste.</li>
+            <li><strong>DAST :</strong> ZAP teste l'application comme un utilisateur externe.</li>
+            <li><strong>OPA Gate :</strong> une règle décide si le pipeline passe ou bloque.</li>
+            <li><strong>Reports :</strong> les preuves sont publiées et archivées.</li>
+          </ul>
+          <div class="example-box">
+            <strong>Erreur fréquente :</strong> voir le pipeline comme une simple liste de commandes.
+            En réalité, chaque stage doit produire une preuve ou une décision compréhensible.
+          </div>
+        </article>
+
+        <article class="deep-card">
+          <h3><i data-lucide="container"></i> 4. Docker, conteneurs et WSL2 expliqués simplement</h3>
+          <p>
+            <strong>Docker</strong> sert à lancer une application dans un environnement plus contrôlé.
+            Une <strong>image Docker</strong> est comme une recette figée : elle contient ce qu'il faut pour démarrer.
+            Un <strong>conteneur</strong> est une image en train de tourner.
+          </p>
+          <p>
+            Dans ton contexte, Jenkins tourne dans Docker sur <strong>WSL2</strong>, c'est-à-dire une couche Linux sur Windows.
+            Cela permet d'utiliser des outils Linux, des conteneurs, Maven, Trivy, ZAP ou OPA dans une chaîne proche
+            d'un environnement professionnel.
+          </p>
+          <div class="example-box">
+            <strong>Exemple concret :</strong> Spring Boot a besoin d'une base MySQL.
+            Au lieu d'installer MySQL à la main sur Windows, Jenkins peut démarrer un conteneur MySQL,
+            puis lancer l'application dans un autre conteneur. C'est plus propre et plus facile à reproduire.
+          </div>
+          <div class="example-box">
+            <strong>Erreur fréquente :</strong> croire que <span class="mono">localhost</span> veut toujours dire la même machine.
+            Depuis Windows, Jenkins et un conteneur Docker, l'adresse réseau peut changer. C'est pour cela que les URLs
+            SonarQube ou ZAP doivent être accessibles depuis le bon endroit.
+          </div>
+        </article>
+
+        <article class="deep-card">
+          <h3><i data-lucide="shield"></i> 5. Les outils de ton projet expliqués comme à un débutant</h3>
+          <p>
+            Chaque outil a une mission précise. L'erreur classique est de penser qu'un outil de sécurité peut tout faire.
+            En réalité, la force du pipeline vient de la combinaison de plusieurs regards.
+          </p>
+          <div class="tool-explainer-grid">
+            <div class="tool-explainer">
+              <h4>Jenkins</h4>
+              <p><strong>Définition :</strong> serveur d'automatisation CI/CD.</p>
+              <p><strong>Rôle :</strong> lancer les stages dans l'ordre et afficher où ça passe ou échoue.</p>
+              <p><strong>Exemple :</strong> il lance Maven, Docker, Gitleaks, Trivy, ZAP et OPA sans intervention manuelle.</p>
+              <p><strong>Mot-clé :</strong> orchestration.</p>
+            </div>
+            <div class="tool-explainer">
+              <h4>Gitleaks</h4>
+              <p><strong>Définition :</strong> outil de recherche de secrets dans Git.</p>
+              <p><strong>Rôle :</strong> détecter tokens, mots de passe, clés API ou credentials exposés.</p>
+              <p><strong>Exemple :</strong> un token GitHub écrit dans un fichier est une fuite potentielle.</p>
+              <p><strong>Erreur fréquente :</strong> supprimer le faux secret de démonstration au lieu d'adapter le gate.</p>
+            </div>
+            <div class="tool-explainer">
+              <h4>SonarQube</h4>
+              <p><strong>Définition :</strong> outil SAST et qualité de code.</p>
+              <p><strong>Rôle :</strong> lire le code source sans lancer l'application.</p>
+              <p><strong>Exemple :</strong> il peut signaler un bug, une mauvaise pratique ou un code smell.</p>
+              <p><strong>Mot-clé :</strong> analyse statique.</p>
+            </div>
+            <div class="tool-explainer">
+              <h4>Trivy</h4>
+              <p><strong>Définition :</strong> scanner de vulnérabilités et dépendances.</p>
+              <p><strong>Rôle :</strong> détecter des CVE dans les composants utilisés par le projet.</p>
+              <p><strong>Exemple :</strong> une bibliothèque Maven ancienne peut contenir une faille critique.</p>
+              <p><strong>Mot-clé :</strong> SCA, supply chain.</p>
+            </div>
+            <div class="tool-explainer">
+              <h4>CycloneDX / SBOM</h4>
+              <p><strong>Définition :</strong> inventaire des composants logiciels.</p>
+              <p><strong>Rôle :</strong> savoir précisément quelles dépendances existent dans le projet.</p>
+              <p><strong>Exemple :</strong> si une nouvelle CVE sort demain, le SBOM aide à vérifier si tu es concerné.</p>
+              <p><strong>Mot-clé :</strong> Software Bill of Materials.</p>
+            </div>
+            <div class="tool-explainer">
+              <h4>OWASP ZAP</h4>
+              <p><strong>Définition :</strong> outil DAST pour tester une application web en fonctionnement.</p>
+              <p><strong>Rôle :</strong> envoyer des requêtes HTTP et observer les réponses.</p>
+              <p><strong>Exemple :</strong> il peut signaler des headers de sécurité manquants.</p>
+              <p><strong>Mot-clé :</strong> black-box testing.</p>
+            </div>
+            <div class="tool-explainer">
+              <h4>OPA</h4>
+              <p><strong>Définition :</strong> moteur de règles policy-as-code.</p>
+              <p><strong>Rôle :</strong> décider si le pipeline peut passer selon les résultats des scans.</p>
+              <p><strong>Exemple :</strong> bloquer une CVE critique inattendue, mais laisser visible une faille volontaire de démonstration.</p>
+              <p><strong>Mot-clé :</strong> gate.</p>
+            </div>
+            <div class="tool-explainer">
+              <h4>HTML Publisher / artifacts</h4>
+              <p><strong>Définition :</strong> mécanismes Jenkins pour publier et garder les rapports.</p>
+              <p><strong>Rôle :</strong> rendre les résultats lisibles et auditables.</p>
+              <p><strong>Exemple :</strong> le rapport ZAP HTML est consultable dans Jenkins, les JSON sont archivés.</p>
+              <p><strong>Mot-clé :</strong> preuve.</p>
+            </div>
+          </div>
+        </article>
+
+        <article class="deep-card">
+          <h3><i data-lucide="file-search"></i> 6. Comment lire les findings Jenkins de ton projet ?</h3>
+          <p>
+            Un <strong>finding</strong> est un résultat détecté par un outil. Il peut être grave, faible,
+            volontaire pour une démonstration, ou parfois lié à un problème technique de rapport.
+            Le bon réflexe n'est pas de tout supprimer. Le bon réflexe est de comprendre :
+            qui a détecté, dans quel fichier, avec quelle règle, et est-ce attendu ou non.
+          </p>
+          <ul>
+            <li><strong>Gitleaks trouve un secret :</strong> vérifier s'il s'agit d'un faux secret pédagogique ou d'un vrai secret accidentel.</li>
+            <li><strong>Trivy trouve une CVE :</strong> regarder la dépendance, la version installée, la version corrigée et le niveau de sévérité.</li>
+            <li><strong>ZAP trouve une alerte :</strong> regarder l'URL, le type d'alerte et si l'endpoint est volontairement vulnérable.</li>
+            <li><strong>OPA bloque :</strong> ouvrir <span class="mono">input.json</span> et comparer avec la règle Rego.</li>
+            <li><strong>Rapport manquant :</strong> ne pas conclure "zéro problème". Il faut vérifier si le scan a réellement tourné.</li>
+          </ul>
+          <div class="oral-line">
+            <strong>Phrase simple pour l'oral :</strong> "Dans mon projet, les outils détectent et restent visibles.
+            La décision de blocage est séparée dans OPA pour éviter de confondre une vulnérabilité volontaire de test
+            avec un vrai problème non prévu."
+          </div>
+        </article>
+
+        <article class="deep-card">
+          <h3><i data-lucide="graduation-cap"></i> 7. Ce qu'un débutant doit vraiment retenir</h3>
+          <p>
+            Le DevSecOps n'est pas une collection d'outils posés au hasard. C'est une logique :
+            automatiser, vérifier tôt, garder les preuves, puis décider avec une règle claire.
+            Ton pipeline montre cette logique avec un cas concret : une application Spring Boot,
+            des scans complémentaires, un déploiement Docker, un test DAST et un gate OPA.
+          </p>
+          <div class="comparison-table">
+            <div class="comparison-cell">
+              <strong>Question 1</strong>
+              Qu'est-ce qui a été testé ?
+            </div>
+            <div class="comparison-cell">
+              <strong>Question 2</strong>
+              Quel rapport le prouve ?
+            </div>
+            <div class="comparison-cell">
+              <strong>Question 3</strong>
+              Quelle règle décide si c'est bloquant ?
+            </div>
+          </div>
+          <div class="remember">
+            <strong>À retenir :</strong> un bon pipeline DevSecOps ne cache pas les problèmes.
+            Il les rend visibles, explique lesquels sont attendus, et bloque seulement ce qui dépasse la règle de sécurité définie.
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <section id="pipeline" class="reveal">
+      <div class="section-head">
+        <h2>Flux Jenkins de bout en bout</h2>
+        <p>Chaque carte représente un passage du pipeline. Clique sur une étape pour voir son rôle, ses entrées, ses sorties et sa valeur DevSecOps.</p>
+      </div>
+      <div class="pipeline-wrap">
+        <div class="pipeline" id="pipelineFlow"></div>
+        <div class="detail-panel">
+          <div class="detail-card" id="stageSummary"></div>
+          <div class="detail-card" id="stageDetails"></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="tools" class="reveal">
+      <div class="section-head">
+        <h2>Outils de sécurité intégrés</h2>
+        <p>La force du pipeline vient de la combinaison des contrôles : statique, dynamique, dépendances, secrets, inventaire logiciel et décision policy-as-code.</p>
+      </div>
+      <div class="tools-grid" id="toolsGrid"></div>
+      <div class="detail-card tool-detail" id="toolDetail"></div>
+
+      <div class="learning-grid" style="margin-top: 18px;">
+        <article class="explain-card wide-card">
+          <h3><i data-lucide="map"></i> Comment lire les familles d’outils ?</h3>
+          <p>
+            Chaque outil regarde le projet avec un angle différent. Un seul outil ne suffit pas,
+            car une faille peut se cacher dans le code, dans une dépendance, dans une configuration,
+            dans un secret oublié ou dans le comportement réel de l’application.
+          </p>
+          <table class="comparison">
+            <thead>
+              <tr>
+                <th>Famille</th>
+                <th>Question simple</th>
+                <th>Exemple dans ton pipeline</th>
+                <th>Rapport produit</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>Secret Scanning</strong></td>
+                <td>Est-ce qu’un mot de passe, token ou secret est dans Git ?</td>
+                <td>Gitleaks inspecte le dépôt et l’historique Git.</td>
+                <td><span class="mono">gitleaks-report.json</span></td>
+              </tr>
+              <tr>
+                <td><strong>SAST</strong></td>
+                <td>Est-ce que le code source contient des faiblesses ?</td>
+                <td>SonarQube analyse le Java Spring Boot sans exécuter l’application.</td>
+                <td>Analyse SonarQube dans l’interface Sonar.</td>
+              </tr>
+              <tr>
+                <td><strong>SCA</strong></td>
+                <td>Est-ce qu’une bibliothèque utilisée est vulnérable ?</td>
+                <td>Trivy FS scanne les dépendances et composants détectés.</td>
+                <td><span class="mono">trivy-report.json</span></td>
+              </tr>
+              <tr>
+                <td><strong>SBOM</strong></td>
+                <td>Quels composants exacts existent dans l’application ?</td>
+                <td>CycloneDX crée l’inventaire logiciel du projet.</td>
+                <td><span class="mono">bom.json</span> et <span class="mono">bom.xml</span></td>
+              </tr>
+              <tr>
+                <td><strong>DAST</strong></td>
+                <td>Que voit un attaquant quand l’application tourne ?</td>
+                <td>OWASP ZAP scanne l’application déployée dans Docker.</td>
+                <td><span class="mono">zap-report.json</span> et <span class="mono">zap-report.html</span></td>
+              </tr>
+              <tr>
+                <td><strong>Policy Gate</strong></td>
+                <td>Est-ce que le build doit passer ou être bloqué ?</td>
+                <td>OPA applique une règle Rego sur les rapports consolidés.</td>
+                <td><span class="mono">input.json</span> et <span class="mono">opa-result.txt</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </article>
+      </div>
+    </section>
+
+    <section id="shift-left" class="reveal">
+      <div class="section-head">
+        <h2>Le principe Shift-left</h2>
+        <p>Déplacer les contrôles de sécurité au plus tôt dans le cycle réduit le coût de correction et transforme la sécurité en feedback continu.</p>
+      </div>
+      <div class="concept-card">
+        <div class="timeline">
+          <div class="time-step"><span class="dot"></span><h3>Code</h3><p>Les secrets et patterns risqués sont détectés avant livraison.</p></div>
+          <div class="time-step"><span class="dot"></span><h3>Build</h3><p>Les dépendances vulnérables sont visibles avec Trivy et CycloneDX.</p></div>
+          <div class="time-step"><span class="dot"></span><h3>Analyse</h3><p>SonarQube inspecte le code source pour les faiblesses applicatives.</p></div>
+          <div class="time-step"><span class="dot"></span><h3>Runtime</h3><p>ZAP observe l’application déployée comme un attaquant externe.</p></div>
+          <div class="time-step"><span class="dot"></span><h3>Gate</h3><p>OPA décide si le build continue selon une policy claire et versionnée.</p></div>
+        </div>
+        <div class="callout">
+          <strong>Explication simple :</strong> sans shift-left, on découvre souvent les problèmes de sécurité très tard,
+          parfois après le déploiement. Avec le shift-left, Jenkins donne un feedback tôt : le développeur voit rapidement
+          qu’un secret, une CVE ou une faiblesse de code existe, puis il peut corriger avant que le risque ne parte plus loin.
+        </div>
+      </div>
+    </section>
+
+    <section id="opa" class="reveal">
+      <div class="section-head">
+        <h2>Pourquoi OPA comme gate ?</h2>
+        <p>OPA sépare la logique de décision du reste du pipeline. Jenkins collecte les preuves, OPA applique la règle.</p>
+      </div>
+      <div class="gate-layout">
+        <div class="policy-box">package security
+
+default allow := false
+
+allow if {
+  input.trivy.critical == 0
+  count(input.gitleaks) == 0
+  input.zap.high == 0
+}</div>
+        <div class="verdicts">
+          <div class="verdict good"><i data-lucide="check-circle-2"></i><div><strong>Décision explicable</strong><br><span>Le résultat dépend de preuves JSON produites par les scanners.</span></div></div>
+          <div class="verdict good"><i data-lucide="file-code-2"></i><div><strong>Policy-as-code</strong><br><span>La règle est versionnée, relue et testable comme du code.</span></div></div>
+          <div class="verdict bad"><i data-lucide="octagon-alert"></i><div><strong>Blocage contrôlé</strong><br><span>Le pipeline s’arrête si des findings critiques inattendus dépassent le seuil défini.</span></div></div>
+        </div>
+      </div>
+      <div class="learning-grid" style="margin-top: 18px;">
+        <article class="explain-card">
+          <h3><i data-lucide="file-json"></i> 1. Jenkins prépare les preuves</h3>
+          <p>
+            Les scanners produisent des fichiers JSON ou HTML. Par exemple Trivy produit une liste de CVE,
+            Gitleaks produit une liste de secrets détectés, ZAP produit des alertes web.
+          </p>
+        </article>
+        <article class="explain-card">
+          <h3><i data-lucide="braces"></i> 2. Le script crée input.json</h3>
+          <p>
+            Le fichier <span class="mono">input.json</span> résume les résultats importants :
+            nombre de secrets, nombre de CVE critiques, nombre d’alertes ZAP HIGH.
+          </p>
+        </article>
+        <article class="explain-card">
+          <h3><i data-lucide="gavel"></i> 3. OPA répond true ou false</h3>
+          <p>
+            Si la règle est respectée, OPA renvoie <span class="mono">true</span>.
+            Sinon, il renvoie <span class="mono">false</span> et Jenkins bloque le pipeline.
+          </p>
+        </article>
+      </div>
+    </section>
+
+    <section id="bonnes-pratiques" class="reveal">
+      <div class="section-head">
+        <h2>Erreurs frequentes et bonnes pratiques</h2>
+        <p>Les pieges classiques quand on decouvre DevOps, DevSecOps et Jenkins, avec la bonne facon de raisonner.</p>
+      </div>
+      <div class="learning-grid">
+        <article class="explain-card">
+          <h3><i data-lucide="alert-triangle"></i> Erreur 1 : croire qu'un scan suffit</h3>
+          <p>
+            Un debutant peut penser : "J'ai SonarQube, donc mon projet est securise".
+            En realite, chaque outil couvre une partie du risque. SonarQube lit le code,
+            Trivy lit les dependances, ZAP teste l'application lancee, Gitleaks cherche les secrets.
+          </p>
+          <div class="remember"><strong>Bonne pratique :</strong> combiner plusieurs outils et comprendre ce que chacun sait detecter.</div>
+        </article>
+
+        <article class="explain-card">
+          <h3><i data-lucide="alert-triangle"></i> Erreur 2 : confondre detection et blocage</h3>
+          <p>
+            Une detection est une information. Un blocage est une decision.
+            Dans un PFE, certaines vulnerabilites peuvent etre volontairement injectees pour prouver que les outils fonctionnent.
+            Le gate OPA doit donc distinguer les findings attendus des findings vraiment bloquants.
+          </p>
+          <div class="remember"><strong>Bonne pratique :</strong> garder les rapports complets, mais bloquer seulement ce qui viole la policy definie.</div>
+        </article>
+
+        <article class="explain-card">
+          <h3><i data-lucide="alert-triangle"></i> Erreur 3 : ignorer les rapports manquants</h3>
+          <p>
+            Si un outil echoue et ne genere pas son JSON, il ne faut pas interpreter cela comme "zero probleme".
+            Un rapport absent peut vouloir dire que le scan n'a pas vraiment tourne.
+          </p>
+          <div class="remember"><strong>Bonne pratique :</strong> verifier l'existence des rapports et garder une preuve claire de chaque scan.</div>
+        </article>
+
+        <article class="explain-card">
+          <h3><i data-lucide="check-circle-2"></i> Methode de lecture d'un build Jenkins</h3>
+          <p>
+            Lis toujours dans cet ordre : le stage qui echoue, la commande lancee, le fichier de rapport produit,
+            puis la regle de decision. Cela evite de corriger au hasard une dependance ou un secret qui existe
+            peut-etre volontairement pour la demonstration.
+          </p>
+          <div class="keyword-list">
+            <span class="keyword">stage</span>
+            <span class="keyword">logs</span>
+            <span class="keyword">rapport</span>
+            <span class="keyword">policy</span>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <section id="quiz" class="reveal">
+      <div class="section-head">
+        <h2>Mini-jeux interactifs DevSecOps</h2>
+        <p>Un vrai laboratoire pédagogique : reconstruire, associer, décider, résoudre un incident et mémoriser les mots-clés.</p>
+      </div>
+
+      <div class="progress-strip" id="learningProgress" aria-label="Progression pédagogique">
+        <span class="progress-pill active" title="Lire les notions"></span>
+        <span class="progress-pill" title="Construire le pipeline"></span>
+        <span class="progress-pill" title="Associer les outils"></span>
+        <span class="progress-pill" title="Décider sécurisé ou risqué"></span>
+        <span class="progress-pill" title="Résoudre un incident"></span>
+        <span class="progress-pill" title="Mémoriser"></span>
+      </div>
+
+      <div class="game-lab">
+        <article class="game-card">
+          <h3><i data-lucide="blocks"></i> Jeu 1 - Build the Pipeline</h3>
+          <p>
+            Remets les étapes dans le bon ordre. Tu peux glisser-déposer les cartes sur ordinateur,
+            ou utiliser les boutons haut/bas sur mobile.
+          </p>
+          <div class="game-meta">
+            <span class="score-badge" id="pipelineScore">Score : 0/7</span>
+            <span class="keyword">ordre attendu : du code vers les preuves</span>
+          </div>
+          <div class="pipeline-builder" id="pipelineBuilder" aria-label="Pipeline à reconstruire"></div>
+          <div class="game-actions">
+            <button class="btn primary" type="button" id="checkPipeline"><i data-lucide="check"></i> Valider l'ordre</button>
+            <button class="btn" type="button" id="shufflePipeline"><i data-lucide="shuffle"></i> Mélanger</button>
+          </div>
+          <div class="feedback" id="pipelineFeedback" aria-live="polite"></div>
+        </article>
+
+        <article class="game-card">
+          <h3><i data-lucide="puzzle"></i> Jeu 2 - Tool Match Challenge</h3>
+          <p>
+            Associe chaque outil à son rôle réel dans ton projet. La correction est immédiate,
+            car l'objectif est de mémoriser la fonction de chaque brique.
+          </p>
+          <div class="game-meta">
+            <span class="score-badge" id="toolMatchScore">Score : 0/7</span>
+            <span class="keyword">outil → rôle</span>
+          </div>
+          <div class="tool-match-grid" id="toolMatchGame"></div>
+          <div class="feedback" id="toolMatchFeedback" aria-live="polite"></div>
+        </article>
+
+        <article class="game-card">
+          <h3><i data-lucide="shield-question"></i> Jeu 3 - Secure or Not Secure</h3>
+          <p>
+            Décide si la situation est plutôt sécurisée ou risquée. Chaque réponse explique le raisonnement
+            avec des mots simples.
+          </p>
+          <div class="game-meta">
+            <span class="score-badge" id="secureScore">Score : 0/6</span>
+            <span class="keyword">réflexe sécurité</span>
+          </div>
+          <div class="secure-grid" id="secureGame"></div>
+          <div class="feedback" id="secureFeedback" aria-live="polite"></div>
+        </article>
+
+        <article class="game-card">
+          <h3><i data-lucide="siren"></i> Jeu 4 - Incident Challenge</h3>
+          <p>
+            Tu es responsable du pipeline. Un incident apparaît dans Jenkins.
+            Choisis l'action la plus professionnelle, puis lis l'explication.
+          </p>
+          <div class="game-meta">
+            <span class="score-badge" id="incidentScore">Score : 0/4</span>
+            <span class="keyword">diagnostic → action</span>
+          </div>
+          <div class="incident-grid" id="incidentGame"></div>
+          <div class="game-actions">
+            <button class="btn" type="button" id="nextIncident"><i data-lucide="arrow-right"></i> Incident suivant</button>
+          </div>
+          <div class="feedback" id="incidentFeedback" aria-live="polite"></div>
+        </article>
+
+        <article class="game-card">
+          <h3><i data-lucide="brain"></i> Jeu 5 - Beginner Memory / Flash Cards</h3>
+          <p>
+            Clique sur une carte pour la retourner. Ce jeu sert à mémoriser les mots techniques
+            avant d'expliquer ton PFE à l'oral.
+          </p>
+          <div class="game-meta">
+            <span class="score-badge" id="memoryScore">Cartes vues : 0/10</span>
+            <span class="keyword">mémorisation active</span>
+          </div>
+          <div class="memory-grid" id="memoryGame"></div>
+        </article>
+      </div>
+
+      <div class="callout" style="margin-top: 18px;">
+        <strong>Résumé final :</strong> Jenkins automatise, Docker isole, les scanners détectent,
+        les rapports prouvent, et OPA décide selon une policy. La valeur DevSecOps vient de l'ensemble :
+        visibilité, automatisation, traçabilité et décision contrôlée.
+      </div>
+    </section>
+
+    <section id="resume-final" class="reveal">
+      <div class="section-head">
+        <h2>Résumé final pour débutant</h2>
+        <p>La version courte à retenir pour présenter le projet clairement à l'oral.</p>
+      </div>
+      <div class="learning-grid">
+        <article class="explain-card">
+          <h3><i data-lucide="route"></i> 1. Le code entre dans Jenkins</h3>
+          <p>
+            Jenkins récupère le projet <strong>archivage-doc</strong>, lance Maven,
+            construit l'image Docker et prépare une application testable.
+          </p>
+        </article>
+        <article class="explain-card">
+          <h3><i data-lucide="scan-search"></i> 2. Les outils regardent chacun un risque</h3>
+          <p>
+            Gitleaks cherche les secrets, SonarQube lit le code, Trivy vérifie les CVE,
+            CycloneDX inventorie les composants, ZAP teste l'application lancée.
+          </p>
+        </article>
+        <article class="explain-card">
+          <h3><i data-lucide="gavel"></i> 3. OPA prend la décision finale</h3>
+          <p>
+            OPA applique une règle : les findings attendus peuvent rester visibles pour la démonstration,
+            mais les vrais risques non prévus doivent rester bloquants.
+          </p>
+        </article>
+        <article class="explain-card">
+          <h3><i data-lucide="file-check-2"></i> 4. Les rapports servent de preuves</h3>
+          <p>
+            Jenkins publie les rapports HTML et archive les JSON, XML et résultats.
+            Cela rend le pipeline explicable, auditable et démontrable devant un encadrant.
+          </p>
+        </article>
+      </div>
+    </section>
+
+    <section id="glossaire" class="reveal">
+      <div class="section-head">
+        <h2>Glossaire débutant</h2>
+        <p>Les mots les plus importants de ton PFE, expliqués avec des phrases simples.</p>
+      </div>
+      <div class="glossary-grid">
+        <div class="glossary-item"><strong>Pipeline</strong><span>Suite d’étapes automatisées dans Jenkins. Exemple : checkout, build, scan, deploy, gate.</span></div>
+        <div class="glossary-item"><strong>Stage</strong><span>Une étape nommée du pipeline. Chaque stage a un rôle précis et visible dans Jenkins.</span></div>
+        <div class="glossary-item"><strong>Artifact</strong><span>Fichier conservé par Jenkins après le build : rapport JSON, HTML, SBOM, résultat OPA.</span></div>
+        <div class="glossary-item"><strong>Finding</strong><span>Résultat détecté par un outil de sécurité : secret, CVE, bug, alerte web.</span></div>
+        <div class="glossary-item"><strong>CVE</strong><span>Identifiant public d’une vulnérabilité connue, par exemple dans une bibliothèque open source.</span></div>
+        <div class="glossary-item"><strong>SBOM</strong><span>Software Bill of Materials : inventaire des dépendances et composants logiciels du projet.</span></div>
+        <div class="glossary-item"><strong>Gate</strong><span>Point de décision. Si les règles ne sont pas respectées, le pipeline est bloqué.</span></div>
+        <div class="glossary-item"><strong>Policy-as-code</strong><span>Règles de sécurité écrites comme du code, versionnées et exécutées automatiquement.</span></div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="shell">Projet PFE DevSecOps - Jenkins, Docker, WSL2, Spring Boot et sécurité continue.</div>
+  </footer>
+
+  <script>
+    const stages = [
+      { icon: "download-cloud", title: "Checkout", short: "Récupération du code depuis la branche Jenkins.", inputs: "SCM, branche test/config-fix", outputs: "Workspace propre dans src/", value: "Garantit que tous les contrôles partent du même état source." },
+      { icon: "package-check", title: "Build", short: "Compilation Maven et création de l’image Docker.", inputs: "pom.xml, source Java", outputs: "JAR Spring Boot + image archivage-app", value: "Valide que l’application peut être construite avant tout scan avancé." },
+      { icon: "shield", title: "Security Scans", short: "Exécution parallèle de Gitleaks, Trivy, SonarQube et CycloneDX.", inputs: "Code, dépendances, filesystem", outputs: "JSON Gitleaks, JSON Trivy, analyse Sonar, SBOM", value: "Multiplie les angles de détection dès la CI." },
+      { icon: "database", title: "Deploy", short: "Démarrage MySQL puis application Spring Boot en réseau Docker.", inputs: "Image applicative, MySQL", outputs: "Application accessible sur le réseau Jenkins", value: "Prépare une cible réaliste pour les tests dynamiques." },
+      { icon: "radar", title: "DAST", short: "OWASP ZAP scanne l’application déployée.", inputs: "URL runtime de l’application", outputs: "zap-report.json et zap-report.html", value: "Détecte des faiblesses observables uniquement à l’exécution." },
+      { icon: "scale", title: "OPA Gate", short: "Évalue la policy finale à partir des rapports collectés.", inputs: "input.json consolidé", outputs: "opa-result.txt", value: "Transforme les findings en décision binaire : passer ou bloquer." },
+      { icon: "bar-chart-3", title: "Reports", short: "Publication Jenkins et archivage des preuves.", inputs: "Rapports JSON/HTML/SBOM", outputs: "HTML Publisher + artifacts", value: "Rend la chaîne auditable et démontrable devant un encadrant." }
+    ];
+
+    const tools = [
+      { name: "Gitleaks", cat: "Secret Scanning", color: "var(--secret)", icon: "key-round", detects: "Tokens GitHub, clés AWS, secrets codés en dur, credentials accidentellement versionnés.", report: "gitleaks-report.json", why: "Un secret dans Git peut donner un accès direct à un dépôt, un cloud ou une API. Le scan de secrets est un contrôle shift-left prioritaire." },
+      { name: "SonarQube", cat: "SAST", color: "var(--sast)", icon: "code-2", detects: "Vulnérabilités de code, bugs, code smells, mauvaises pratiques de sécurité.", report: "Analyse projet SonarQube", why: "Le SAST inspecte le code sans exécuter l’application. Il aide à corriger tôt les erreurs de validation, injection ou configuration." },
+      { name: "Trivy FS", cat: "SCA", color: "var(--sca)", icon: "bug", detects: "CVE dans dépendances Maven, bibliothèques et composants détectés dans le filesystem.", report: "trivy-report.json", why: "La majorité des applications modernes dépendent de composants tiers. Le SCA rend visible le risque de supply chain." },
+      { name: "CycloneDX", cat: "SBOM", color: "var(--sbom)", icon: "scroll-text", detects: "Inventaire structuré des composants logiciels et versions.", report: "bom.json + bom.xml", why: "Un SBOM permet d’auditer rapidement l’exposition d’un projet lorsqu’une nouvelle CVE publique apparaît." },
+      { name: "OWASP ZAP", cat: "DAST", color: "var(--dast)", icon: "radar", detects: "Headers manquants, comportements HTTP risqués, surfaces exposées à l’exécution.", report: "zap-report.json + zap-report.html", why: "Le DAST teste l’application déployée comme une boîte noire, complémentaire au SAST." },
+      { name: "OPA", cat: "Policy Gate", color: "var(--gate)", icon: "gavel", detects: "Non-conformité aux règles de passage définies en Rego.", report: "opa-result.txt + input.json", why: "OPA ne scanne pas : il décide. C’est le garde-fou final qui rend le pipeline gouvernable." }
+    ];
+
+    const stageTeaching = {
+      "Checkout": {
+        simple: "C’est le point de départ. Jenkins vide le workspace, crée le dossier src, puis récupère le code source depuis Git. Sans cette étape, le pipeline ne sait pas quel code compiler ni scanner.",
+        keywords: ["SCM", "branche", "workspace", "checkout scm", "source de vérité"],
+        beginner: "Pour un débutant : imagine que Jenkins télécharge le projet sur sa machine avant de travailler dessus."
+      },
+      "Build": {
+        simple: "Maven compile le projet Spring Boot et produit un fichier JAR. Ensuite Docker construit une image applicative. Si le build échoue, cela veut dire que l’application n’est pas prête à être testée.",
+        keywords: ["Maven", "JAR", "Docker image", "package", "compilation"],
+        beginner: "Pour un débutant : c’est comme transformer le code en programme exécutable."
+      },
+      "Security Scans": {
+        simple: "Cette étape lance plusieurs contrôles de sécurité en parallèle. Gitleaks cherche les secrets, Trivy cherche les CVE, SonarQube analyse le code, CycloneDX génère l’inventaire logiciel.",
+        keywords: ["Gitleaks", "Trivy", "SonarQube", "CycloneDX", "rapports JSON"],
+        beginner: "Pour un débutant : plusieurs inspecteurs regardent le même projet, chacun avec une spécialité."
+      },
+      "Deploy": {
+        simple: "Le pipeline lance MySQL, puis lance l’application Spring Boot dans Docker. Cette étape permet de tester l’application en conditions proches du réel.",
+        keywords: ["MySQL", "conteneur", "réseau Docker", "health check", "runtime"],
+        beginner: "Pour un débutant : Jenkins démarre l’application pour vérifier qu’elle répond vraiment."
+      },
+      "DAST": {
+        simple: "OWASP ZAP scanne l’application pendant qu’elle tourne. Il envoie des requêtes HTTP et observe les réponses pour trouver des problèmes visibles côté web.",
+        keywords: ["ZAP", "HTTP", "runtime", "black-box", "zap-report.html"],
+        beginner: "Pour un débutant : ZAP joue le rôle d’un visiteur externe qui teste le site."
+      },
+      "OPA Gate": {
+        simple: "OPA lit un fichier JSON préparé par Jenkins et applique une règle. Si la règle renvoie true, le pipeline passe. Si elle renvoie false, le pipeline est bloqué.",
+        keywords: ["OPA", "Rego", "policy-as-code", "input.json", "allow"],
+        beginner: "Pour un débutant : OPA est le juge final qui dit oui ou non."
+      },
+      "Reports": {
+        simple: "Jenkins publie les rapports HTML et archive les fichiers importants. Ces preuves servent à expliquer le résultat du pipeline et à montrer ce que chaque outil a détecté.",
+        keywords: ["HTML Publisher", "archiveArtifacts", "artefacts", "preuves", "traçabilité"],
+        beginner: "Pour un débutant : c’est le dossier final qui garde les résultats du contrôle."
+      }
+    };
+
+    const toolTeaching = {
+      "Gitleaks": {
+        easy: "Gitleaks vérifie si des secrets sont présents dans le code ou l’historique Git. Un secret peut être un token GitHub, une clé AWS, un mot de passe ou une clé API.",
+        danger: "Un secret exposé peut permettre à quelqu’un d’accéder à un service sans autorisation.",
+        output: "Le rapport JSON contient la règle déclenchée, le fichier, la ligne et parfois le commit.",
+        keywords: ["secret", "token", "clé API", "historique Git", "credential leak"]
+      },
+      "SonarQube": {
+        easy: "SonarQube lit le code source Java et cherche des problèmes de qualité et de sécurité sans lancer l’application.",
+        danger: "Il peut signaler des injections, du code fragile, des mauvaises pratiques ou des bugs qui deviennent dangereux en production.",
+        output: "Les résultats sont visibles dans l’interface SonarQube avec sévérité, règle, fichier et explication.",
+        keywords: ["SAST", "code smell", "bug", "vulnerability", "maintainability"]
+      },
+      "Trivy FS": {
+        easy: "Trivy scanne les fichiers du projet et les dépendances pour retrouver des bibliothèques connues comme vulnérables.",
+        danger: "Même si ton code est propre, une dépendance ancienne peut contenir une CVE critique.",
+        output: "Le JSON liste les CVE, les packages touchés, les versions installées et les versions corrigées.",
+        keywords: ["CVE", "SCA", "dependency", "fixed version", "supply chain"]
+      },
+      "CycloneDX": {
+        easy: "CycloneDX crée la liste complète des composants logiciels utilisés par l’application.",
+        danger: "Sans inventaire, il est difficile de savoir rapidement si une nouvelle CVE touche le projet.",
+        output: "Le SBOM est généré en JSON et XML pour être lisible par des outils d’audit.",
+        keywords: ["SBOM", "inventaire", "composants", "bom.json", "bom.xml"]
+      },
+      "OWASP ZAP": {
+        easy: "ZAP teste l’application comme un client web externe. Il regarde les réponses HTTP, les headers et certains comportements risqués.",
+        danger: "Certaines failles ne se voient qu’à l’exécution, après le démarrage de l’application.",
+        output: "Le pipeline génère un rapport JSON brut et un rapport HTML lisible dans Jenkins.",
+        keywords: ["DAST", "HTTP", "headers", "runtime", "black-box testing"]
+      },
+      "OPA": {
+        easy: "OPA applique une règle écrite en Rego. Il ne cherche pas les failles lui-même : il décide à partir des résultats des autres outils.",
+        danger: "Sans gate, les rapports existent mais le pipeline peut continuer malgré un risque important.",
+        output: "OPA produit un résultat true ou false dans opa-result.txt.",
+        keywords: ["policy gate", "Rego", "allow", "input.json", "governance"]
+      }
+    };
+
+    const pipelineFlow = document.getElementById("pipelineFlow");
+    const stageSummary = document.getElementById("stageSummary");
+    const stageDetails = document.getElementById("stageDetails");
+    const toolsGrid = document.getElementById("toolsGrid");
+    const toolDetail = document.getElementById("toolDetail");
+
+    function renderStage(index) {
+      document.querySelectorAll(".stage").forEach((node, i) => node.classList.toggle("active", i === index));
+      const item = stages[index];
+      const teach = stageTeaching[item.title];
+      const keywords = teach.keywords.map(word => `<span class="keyword">${word}</span>`).join("");
+      stageSummary.innerHTML = `<h3>${item.title}</h3><p>${item.short}</p><p>${teach.simple}</p><div class="chips"><span class="chip">${item.inputs}</span><span class="chip">${item.outputs}</span></div>`;
+      stageDetails.innerHTML = `<h3>Explication simple</h3><p>${teach.beginner}</p><h3>Valeur DevSecOps</h3><p>${item.value}</p><div class="keyword-list">${keywords}</div><div class="facts"><div class="fact"><strong>Entrées</strong><span>${item.inputs}</span></div><div class="fact"><strong>Sorties</strong><span>${item.outputs}</span></div><div class="fact"><strong>Contrôle</strong><span>Traçable dans Jenkins et archivé comme preuve.</span></div></div>`;
+    }
+
+    stages.forEach((item, index) => {
+      const node = document.createElement("button");
+      node.className = "stage";
+      node.type = "button";
+      node.innerHTML = `<span class="stage-icon"><i data-lucide="${item.icon}"></i></span><h3>${item.title}</h3><p>${item.short}</p>`;
+      node.addEventListener("click", () => renderStage(index));
+      pipelineFlow.appendChild(node);
+    });
+
+    function renderTool(index) {
+      document.querySelectorAll(".tool-card").forEach((node, i) => node.classList.toggle("active", i === index));
+      const item = tools[index];
+      const teach = toolTeaching[item.name];
+      const keywords = teach.keywords.map(word => `<span class="keyword">${word}</span>`).join("");
+      toolDetail.style.borderLeftColor = item.color;
+      toolDetail.innerHTML = `<h3>${item.name} - ${item.cat}</h3><p><strong>Explication débutant :</strong> ${teach.easy}</p><p><strong>Ce que l’outil détecte :</strong> ${item.detects}</p><p><strong>Pourquoi c’est dangereux :</strong> ${teach.danger}</p><p><strong>Rapport produit :</strong> <span class="mono">${item.report}</span>. ${teach.output}</p><p><strong>Pourquoi c’est important dans DevSecOps :</strong> ${item.why}</p><div class="keyword-list">${keywords}</div>`;
+    }
+
+    tools.forEach((item, index) => {
+      const node = document.createElement("button");
+      node.className = "tool-card";
+      node.type = "button";
+      node.style.setProperty("--tool-color", item.color);
+      node.innerHTML = `<div class="tool-head"><i data-lucide="${item.icon}"></i><span class="category">${item.cat}</span></div><h3>${item.name}</h3><p>${item.detects}</p>`;
+      node.addEventListener("click", () => renderTool(index));
+      toolsGrid.appendChild(node);
+    });
+
+    const progressPills = Array.from(document.querySelectorAll(".progress-pill"));
+
+    function updateLearningProgress(step) {
+      progressPills.forEach((pill, index) => {
+        pill.classList.toggle("active", index <= step);
+      });
+    }
+
+    function shuffled(items) {
+      return [...items].sort(() => Math.random() - 0.5);
+    }
+
+    const pipelineSteps = [
+      { id: "checkout", title: "Checkout", detail: "Jenkins récupère le code source depuis Git." },
+      { id: "build", title: "Build Maven + Docker", detail: "Le projet compile et l'image applicative est construite." },
+      { id: "security", title: "Security Scans", detail: "Gitleaks, Trivy, SonarQube et CycloneDX produisent des preuves." },
+      { id: "deploy", title: "Deploy", detail: "MySQL et Spring Boot démarrent dans Docker." },
+      { id: "dast", title: "DAST avec ZAP", detail: "ZAP teste l'application en cours d'exécution." },
+      { id: "opa", title: "OPA Gate", detail: "OPA applique la policy et décide si le build passe." },
+      { id: "reports", title: "Reports", detail: "Jenkins publie et archive les rapports." }
+    ];
+    let pipelineState = shuffled(pipelineSteps);
+    let draggedStepId = null;
+
+    function renderPipelineBuilder() {
+      const container = document.getElementById("pipelineBuilder");
+      container.innerHTML = "";
+      pipelineState.forEach((step, index) => {
+        const node = document.createElement("div");
+        node.className = "pipeline-step";
+        node.draggable = true;
+        node.dataset.id = step.id;
+        node.innerHTML = `
+          <span class="step-number">${index + 1}</span>
+          <div><strong>${step.title}</strong><span>${step.detail}</span></div>
+          <div class="step-controls">
+            <button class="icon-btn" type="button" aria-label="Monter ${step.title}"><i data-lucide="arrow-up"></i></button>
+            <button class="icon-btn" type="button" aria-label="Descendre ${step.title}"><i data-lucide="arrow-down"></i></button>
+          </div>`;
+        const [upButton, downButton] = node.querySelectorAll("button");
+        upButton.addEventListener("click", () => movePipelineStep(index, -1));
+        downButton.addEventListener("click", () => movePipelineStep(index, 1));
+        node.addEventListener("dragstart", () => {
+          draggedStepId = step.id;
+          node.classList.add("dragging");
+        });
+        node.addEventListener("dragend", () => node.classList.remove("dragging"));
+        node.addEventListener("dragover", event => event.preventDefault());
+        node.addEventListener("drop", event => {
+          event.preventDefault();
+          const from = pipelineState.findIndex(item => item.id === draggedStepId);
+          const to = pipelineState.findIndex(item => item.id === step.id);
+          if (from >= 0 && to >= 0 && from !== to) {
+            const [moved] = pipelineState.splice(from, 1);
+            pipelineState.splice(to, 0, moved);
+            renderPipelineBuilder();
+          }
+        });
+        container.appendChild(node);
+      });
+      lucide.createIcons();
+    }
+
+    function movePipelineStep(index, direction) {
+      const target = index + direction;
+      if (target < 0 || target >= pipelineState.length) return;
+      [pipelineState[index], pipelineState[target]] = [pipelineState[target], pipelineState[index]];
+      renderPipelineBuilder();
+    }
+
+    function checkPipelineOrder() {
+      let score = 0;
+      document.querySelectorAll(".pipeline-step").forEach((node, index) => {
+        const good = node.dataset.id === pipelineSteps[index].id;
+        node.classList.toggle("correct", good);
+        node.classList.toggle("wrong", !good);
+        if (good) score += 1;
+      });
+      document.getElementById("pipelineScore").textContent = `Score : ${score}/${pipelineSteps.length}`;
+      document.getElementById("pipelineFeedback").textContent = score === pipelineSteps.length
+        ? "Parfait. Tu as reconstruit le chemin complet : code, build, scans, déploiement, DAST, gate, rapports."
+        : "Pas encore. Indice : ZAP a besoin que l'application soit déjà déployée, et OPA décide après avoir reçu les rapports.";
+      updateLearningProgress(score === pipelineSteps.length ? 2 : 1);
+    }
+
+    document.getElementById("checkPipeline").addEventListener("click", checkPipelineOrder);
+    document.getElementById("shufflePipeline").addEventListener("click", () => {
+      pipelineState = shuffled(pipelineSteps);
+      document.getElementById("pipelineFeedback").textContent = "Pipeline mélangé. Reconstruis l'ordre logique.";
+      renderPipelineBuilder();
+    });
+
+    const toolMatchItems = [
+      { tool: "Jenkins", expected: "Orchestration CI/CD", explain: "Jenkins lance les stages et coordonne le pipeline." },
+      { tool: "Trivy", expected: "Scan vulnérabilités", explain: "Trivy détecte les CVE dans les dépendances et le filesystem." },
+      { tool: "Gitleaks", expected: "Recherche de secrets", explain: "Gitleaks repère tokens, clés API et secrets exposés." },
+      { tool: "SonarQube", expected: "Qualité et SAST", explain: "SonarQube analyse le code, les bugs, code smells et vulnérabilités." },
+      { tool: "OWASP ZAP", expected: "Scan web DAST", explain: "ZAP teste l'application en fonctionnement via HTTP." },
+      { tool: "OPA", expected: "Policy as code", explain: "OPA décide si le pipeline passe selon une règle Rego." },
+      { tool: "SBOM", expected: "Inventaire composants", explain: "Le SBOM liste les dépendances et composants logiciels." }
+    ];
+    const toolRoles = toolMatchItems.map(item => item.expected);
+    const toolAnswered = new Set();
+
+    function renderToolMatchGame() {
+      const container = document.getElementById("toolMatchGame");
+      container.innerHTML = "";
+      toolMatchItems.forEach(item => {
+        const row = document.createElement("div");
+        row.className = "tool-match-row";
+        row.innerHTML = `<div class="tool-name">${item.tool}</div>`;
+        const choices = document.createElement("div");
+        choices.className = "choice-grid";
+        shuffled(toolRoles).forEach(role => {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.className = "role-chip";
+          button.textContent = role;
+          button.addEventListener("click", () => {
+            const good = role === item.expected;
+            button.classList.add(good ? "correct" : "wrong");
+            if (good) {
+              toolAnswered.add(item.tool);
+              choices.querySelectorAll("button").forEach(node => node.disabled = true);
+              document.getElementById("toolMatchFeedback").textContent = `Correct : ${item.explain}`;
+              document.getElementById("toolMatchScore").textContent = `Score : ${toolAnswered.size}/${toolMatchItems.length}`;
+              updateLearningProgress(toolAnswered.size >= toolMatchItems.length ? 3 : 2);
+            } else {
+              document.getElementById("toolMatchFeedback").textContent = `Pas ce rôle. Relis la carte ${item.tool} : chaque outil a une mission précise.`;
+            }
+          });
+          choices.appendChild(button);
+        });
+        row.appendChild(choices);
+        container.appendChild(row);
+      });
+    }
+
+    const secureSituations = [
+      { text: "Un développeur pousse un token GitHub en dur dans un fichier de configuration.", secure: false, why: "Risque : un token dans Git peut être copié et utilisé par une personne non autorisée." },
+      { text: "Le pipeline génère un SBOM CycloneDX après le build Maven.", secure: true, why: "Bon réflexe : l'inventaire aide à savoir quelles dépendances sont présentes." },
+      { text: "Trivy détecte une CVE critique, mais aucun rapport n'est archivé.", secure: false, why: "Risque : sans rapport, tu perds la preuve et tu ne peux pas expliquer le résultat." },
+      { text: "ZAP teste l'application après le démarrage du conteneur Spring Boot.", secure: true, why: "Correct : le DAST a besoin d'une application en cours d'exécution." },
+      { text: "OPA bloque uniquement les findings inattendus selon une policy explicite.", secure: true, why: "Correct : une policy claire sépare les tests volontaires des vrais risques bloquants." },
+      { text: "Un rapport JSON manquant est interprété automatiquement comme zéro problème.", secure: false, why: "Risque : un outil qui n'a pas tourné ne prouve pas qu'il n'y a aucun problème." }
+    ];
+    const secureAnswered = new Set();
+
+    function renderSecureGame() {
+      const container = document.getElementById("secureGame");
+      container.innerHTML = "";
+      secureSituations.forEach((item, index) => {
+        const card = document.createElement("div");
+        card.className = "secure-card";
+        card.innerHTML = `<h4>Situation ${index + 1}</h4><p>${item.text}</p>`;
+        const choices = document.createElement("div");
+        choices.className = "choice-grid";
+        ["Sécurisé", "Risqué"].forEach(label => {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.className = "choice-chip";
+          button.textContent = label;
+          button.addEventListener("click", () => {
+            const answerSecure = label === "Sécurisé";
+            const good = answerSecure === item.secure;
+            button.classList.add(good ? "correct" : "wrong");
+            if (good) secureAnswered.add(index);
+            choices.querySelectorAll("button").forEach(node => node.disabled = true);
+            document.getElementById("secureScore").textContent = `Score : ${secureAnswered.size}/${secureSituations.length}`;
+            document.getElementById("secureFeedback").textContent = `${good ? "Bonne décision." : "Décision à revoir."} ${item.why}`;
+            updateLearningProgress(secureAnswered.size >= secureSituations.length ? 4 : 3);
+          });
+          choices.appendChild(button);
+        });
+        card.appendChild(choices);
+        container.appendChild(card);
+      });
+    }
+
+    const incidents = [
+      {
+        title: "Trivy détecte une vulnérabilité critique",
+        context: "Le rapport Trivy contient une CVE CRITICAL dans une dépendance.",
+        options: [
+          "Ignorer le rapport car le build Maven a réussi.",
+          "Lire le rapport, identifier package/version/fixed version, puis décider selon la policy.",
+          "Supprimer Trivy du pipeline."
+        ],
+        answer: 1,
+        explain: "Bonne action : un build qui compile peut quand même contenir une dépendance vulnérable."
+      },
+      {
+        title: "Gitleaks trouve un secret",
+        context: "Un token apparaît dans le rapport Gitleaks.",
+        options: [
+          "Vérifier si c'est un secret de démonstration explicitement attendu ou un vrai secret non prévu.",
+          "Effacer le rapport pour faire passer Jenkins.",
+          "Dire que Gitleaks est trop strict et le désactiver."
+        ],
+        answer: 0,
+        explain: "Bonne action : le pipeline doit conserver la détection, mais le gate doit distinguer attendu et bloquant."
+      },
+      {
+        title: "ZAP remonte une alerte web",
+        context: "Le rapport ZAP HTML contient une alerte HIGH après le déploiement Docker.",
+        options: [
+          "Lire l'URL, la règle ZAP et vérifier si l'endpoint est volontairement vulnérable pour test.",
+          "Corriger au hasard le Dockerfile.",
+          "Relancer Maven uniquement."
+        ],
+        answer: 0,
+        explain: "Bonne action : ZAP teste le runtime. Il faut comprendre l'endpoint et la nature de l'alerte."
+      },
+      {
+        title: "OPA bloque le pipeline",
+        context: "Tous les rapports existent, mais opa-result.txt indique false.",
+        options: [
+          "Modifier la policy sans lire input.json.",
+          "Comparer input.json avec les règles Rego pour comprendre quel seuil ou finding bloque.",
+          "Supprimer le stage OPA."
+        ],
+        answer: 1,
+        explain: "Bonne action : OPA applique une policy. Le diagnostic part de input.json et de la règle Rego."
+      }
+    ];
+    let incidentIndex = 0;
+    let incidentScore = 0;
+    const incidentSolved = new Set();
+
+    function renderIncident() {
+      const incident = incidents[incidentIndex];
+      const container = document.getElementById("incidentGame");
+      container.innerHTML = "";
+      const card = document.createElement("div");
+      card.className = "incident-card";
+      card.innerHTML = `<h4>${incident.title}</h4><p>${incident.context}</p>`;
+      const choices = document.createElement("div");
+      choices.className = "choice-grid";
+      incident.options.forEach((option, optionIndex) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "choice-chip";
+        button.textContent = option;
+        button.addEventListener("click", () => {
+          const good = optionIndex === incident.answer;
+          button.classList.add(good ? "correct" : "wrong");
+          if (good && !incidentSolved.has(incidentIndex)) {
+            incidentSolved.add(incidentIndex);
+            incidentScore += 1;
+          }
+          choices.querySelectorAll("button").forEach(node => node.disabled = true);
+          document.getElementById("incidentScore").textContent = `Score : ${incidentScore}/${incidents.length}`;
+          document.getElementById("incidentFeedback").textContent = `${good ? "Bonne action." : "Action risquée."} ${incident.explain}`;
+          updateLearningProgress(incidentScore >= incidents.length ? 5 : 4);
+        });
+        choices.appendChild(button);
+      });
+      card.appendChild(choices);
+      container.appendChild(card);
+    }
+
+    document.getElementById("nextIncident").addEventListener("click", () => {
+      incidentIndex = (incidentIndex + 1) % incidents.length;
+      document.getElementById("incidentFeedback").textContent = "";
+      renderIncident();
+    });
+
+    const memoryCards = [
+      { term: "Pipeline", definition: "Suite d'étapes Jenkins qui transforme le code en résultat vérifié." },
+      { term: "Stage", definition: "Une étape nommée du pipeline, par exemple Build ou OPA Gate." },
+      { term: "SAST", definition: "Analyse du code sans lancer l'application. Exemple : SonarQube." },
+      { term: "DAST", definition: "Test de l'application en fonctionnement. Exemple : OWASP ZAP." },
+      { term: "SCA", definition: "Analyse des dépendances et CVE. Exemple : Trivy." },
+      { term: "Secret", definition: "Information sensible comme token, mot de passe ou clé API." },
+      { term: "SBOM", definition: "Inventaire des composants logiciels et dépendances du projet." },
+      { term: "OPA", definition: "Moteur de policy as code qui décide si le pipeline passe." },
+      { term: "Artifact", definition: "Fichier conservé par Jenkins après le build : rapport, SBOM, résultat." },
+      { term: "Shift-left", definition: "Déplacer les contrôles qualité et sécurité le plus tôt possible." }
+    ];
+    const memorySeen = new Set();
+
+    function renderMemoryGame() {
+      const container = document.getElementById("memoryGame");
+      container.innerHTML = "";
+      memoryCards.forEach((card, index) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "flash-card";
+        button.innerHTML = `
+          <span class="flash-inner">
+            <span class="flash-face"><strong>${card.term}</strong><span>Clique pour voir la définition.</span></span>
+            <span class="flash-face back"><strong>${card.term}</strong><span>${card.definition}</span></span>
+          </span>`;
+        button.addEventListener("click", () => {
+          button.classList.toggle("flipped");
+          memorySeen.add(index);
+          document.getElementById("memoryScore").textContent = `Cartes vues : ${memorySeen.size}/${memoryCards.length}`;
+          updateLearningProgress(memorySeen.size >= memoryCards.length ? 5 : 4);
+        });
+        container.appendChild(button);
+      });
+    }
+
+    document.getElementById("themeToggle").addEventListener("click", () => {
+      document.body.classList.toggle("light");
+      lucide.createIcons();
+    });
+
+    const observer = new IntersectionObserver(entries => {
+      entries.forEach(entry => {
+        if (entry.isIntersecting) entry.target.classList.add("visible");
+      });
+    }, { threshold: 0.12 });
+
+    document.querySelectorAll(".reveal").forEach(node => observer.observe(node));
+    renderStage(0);
+    renderTool(0);
+    renderPipelineBuilder();
+    renderToolMatchGame();
+    renderSecureGame();
+    renderIncident();
+    renderMemoryGame();
+    lucide.createIcons();
+  </script>
+</body>
+</html>
