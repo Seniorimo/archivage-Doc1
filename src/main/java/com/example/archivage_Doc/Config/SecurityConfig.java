@@ -48,6 +48,10 @@ public class SecurityConfig {
         http
             .cors().configurationSource(corsConfigurationSource()).and()
             .csrf().disable()
+            // INTENTIONAL VULN - ZAP DEMO:
+            // Security headers are disabled on purpose so OWASP ZAP can report
+            // missing headers during the DevSecOps pipeline demonstration.
+            .headers().disable()
             .authorizeHttpRequests()
                 // Points d'entrée publics pour permettre l'initialisation
                 .requestMatchers("/api/auth/login").permitAll()
@@ -117,7 +121,9 @@ public class SecurityConfig {
     @Bean
     public CorsConfigurationSource corsConfigurationSource() {
         CorsConfiguration configuration = new CorsConfiguration();
-        configuration.setAllowedOrigins(Arrays.asList("http://localhost:5173"));
+        // INTENTIONAL VULN - ZAP DEMO:
+        // Open CORS policy used only to generate visible DAST findings.
+        configuration.setAllowedOriginPatterns(Arrays.asList("*"));
         configuration.setAllowedMethods(Arrays.asList("GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD"));
         configuration.setAllowedHeaders(Arrays.asList("Authorization", "Content-Type", "X-Requested-With", "Accept", "Origin", "Access-Control-Request-Method", "Access-Control-Request-Headers"));
         configuration.setExposedHeaders(Arrays.asList("Authorization", "Access-Control-Allow-Origin", "Access-Control-Allow-Methods", "Access-Control-Allow-Headers"));
