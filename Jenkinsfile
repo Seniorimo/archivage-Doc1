@@ -82,7 +82,6 @@ package security
 
 default allow := false
 
-=======
 pipeline {
     agent any
 
