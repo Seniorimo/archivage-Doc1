@@ -10,117 +10,29 @@ pipeline {
     }
 
     environment {
-        APP_NAME        = 'archivage-Doc'
-        APP_CONTAINER   = 'app-archivage'
-        MYSQL_CONTAINER = 'mysql-archivage'
-        NETWORK_NAME    = 'archivage-net'
-        APP_PORT        = '8090'
-        PROJECT_DIR     = "${WORKSPACE}/src"
-        DOCKER_IMAGE    = "archivage-app:${env.BUILD_NUMBER}"
-        MAVEN_REPO      = '/var/jenkins_home/.m2/repository'
-        TRIVY_CACHE     = "${WORKSPACE}/src/.trivycache"
-        SONARQUBE_ENV   = 'sonar'
-        JENKINS_UID     = """${sh(returnStdout: true, script: 'id -u').trim()}"""
-        JENKINS_GID     = """${sh(returnStdout: true, script: 'id -g').trim()}"""
+        APP_NAME         = 'archivage-Doc'
+        APP_CONTAINER    = 'app-archivage'
+        MYSQL_CONTAINER  = 'mysql-archivage'
+        NETWORK_NAME     = 'archivage-net'
+        APP_PORT         = '8090'
+        MAVEN_REPO       = '/var/jenkins_home/.m2/repository'
+        SONARQUBE_ENV    = 'sonar'
     }
 
     stages {
 
-        stage('Force Clean Workspace') {
-            steps {
-                sh '''
-                    set -eux
-
-                    echo "=== FORCE CLEAN WORKSPACE ==="
-                    docker run --rm \
-                      -u 0:0 \
-                      -v "$WORKSPACE:/ws" \
-                      alpine:3.19 \
-                      sh -euxc "
-                        find /ws -mindepth 1 -maxdepth 1 -exec rm -rf {} + || true
-                        mkdir -p /ws/src
-                        chown -R ${JENKINS_UID}:${JENKINS_GID} /ws
-                        ls -la /ws
-                      "
-
-                    echo "Workspace nettoye de force avec succes."
-                '''
-            }
-        }
-
-        stage('Checkout') {
-            steps {
-                dir('src') {
-                    deleteDir()
-                    checkout scm
-                }
-            }
-        }
-
-        stage('Prepare Workspace') {
-            steps {
-                sh '''
-                    set -eu
-
-                    cd "$PROJECT_DIR"
-
-                    echo "=== PREPARE WORKSPACE ==="
-                    rm -rf reports .trivycache policy .jarpath
-                    mkdir -p \
-                      reports/gitleaks \
-                      reports/trivy \
-                      reports/sbom \
-                      reports/zap \
-                      reports/opa \
-                      .trivycache \
-                      policy
-
-                    docker network inspect "$NETWORK_NAME" >/dev/null 2>&1 || docker network create "$NETWORK_NAME"
-
-                    cat > policy/security-gate.rego <<'REGO'
-package security
-
-default allow := false
-
-pipeline {
-    agent any
-
-    options {
-        skipDefaultCheckout(true)
-        timestamps()
-        timeout(time: 60, unit: 'MINUTES')
-        disableConcurrentBuilds()
-    }
-
-    environment {
-        APP_NAME        = 'archivage-Doc'
-        APP_CONTAINER   = 'app-archivage'
-        MYSQL_CONTAINER = 'mysql-archivage'
-        NETWORK_NAME    = 'archivage-net'
-        APP_PORT        = '8090'
-        PROJECT_DIR     = "${WORKSPACE}/src"
-        DOCKER_IMAGE    = "archivage-app:${env.BUILD_NUMBER}"
-        MAVEN_REPO      = '/var/jenkins_home/.m2/repository'
-        TRIVY_CACHE     = "${WORKSPACE}/src/.trivycache"
-        SONARQUBE_ENV   = 'sonar'
-        SONAR_DOCKER_URL = 'http://host.docker.internal:9000'
-        JENKINS_UID     = """${sh(returnStdout: true, script: 'id -u').trim()}"""
-        JENKINS_GID     = """${sh(returnStdout: true, script: 'id -g').trim()}"""
-    }
-
-    stages {
-
-        stage('Configure CSP for HTML Report') {
+        stage('Init') {
             steps {
                 script {
-                    System.setProperty(
-                        "hudson.model.DirectoryBrowserSupport.CSP",
-                        "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; script-src 'self' 'unsafe-inline';"
-                    )
+                    env.PROJECT_DIR = "${env.WORKSPACE}/src"
+                    env.DOCKER_IMAGE = "archivage-app:${env.BUILD_NUMBER}"
+                    env.TRIVY_CACHE  = "${env.WORKSPACE}/src/.trivycache"
+                    env.JENKINS_UID  = sh(returnStdout: true, script: 'id -u').trim()
+                    env.JENKINS_GID  = sh(returnStdout: true, script: 'id -g').trim()
                 }
             }
         }
-        
+
         stage('Force Clean Workspace') {
             steps {
                 sh '''
@@ -167,7 +79,6 @@ pipeline {
                       reports/sbom \
                       reports/zap \
                       reports/opa \
-                      reports/sonar \
                       .trivycache \
                       policy
 
@@ -215,7 +126,6 @@ for site in zap.get("site", []) or []:
     for alert in site.get("alerts", []) or []:
         if str(alert.get("riskcode", "")).strip() == "3":
             zap_high += 1
-
 
 payload = {
     "gitleaks": gitleaks if isinstance(gitleaks, list) else [],
@@ -285,11 +195,11 @@ all_alerts.sort(key=lambda a: -int(str(a.get("riskcode", "0"))))
 
 rows = ""
 for a in all_alerts:
-    rc   = str(a.get("riskcode", "0"))
+    rc = str(a.get("riskcode", "0"))
     name = a.get("alert", a.get("name", "?"))
     desc = a.get("desc", "")[:300].replace("<", "&lt;").replace(">", "&gt;")
-    sol  = a.get("solution", "")[:300].replace("<", "&lt;").replace(">", "&gt;")
-    url  = ""
+    sol = a.get("solution", "")[:300].replace("<", "&lt;").replace(">", "&gt;")
+    url = ""
     for inst in a.get("instances", [])[:1]:
         url = inst.get("uri", "")
     color = RISK_COLOR.get(rc, "#999")
@@ -718,16 +628,9 @@ ZAPEOF
 
             script {
                 if (fileExists('src/reports')) {
-                    archiveArtifacts artifacts: '''
-src/reports/gitleaks/gitleaks-report.json,
-src/reports/trivy/trivy-report.json,
-src/reports/zap/zap-report.html,
-src/reports/zap/zap-report.json,
-src/reports/opa/opa-result.txt,
-src/reports/opa/input.json,
-src/reports/sbom/bom.json,
-src/reports/sbom/bom.xml
-'''.trim(), allowEmptyArchive: true, fingerprint: true
+                    archiveArtifacts artifacts: 'src/reports/gitleaks/gitleaks-report.json,src/reports/trivy/trivy-report.json,src/reports/zap/zap-report.html,src/reports/zap/zap-report.json,src/reports/opa/opa-result.txt,src/reports/opa/input.json,src/reports/sbom/bom.json,src/reports/sbom/bom.xml',
+                                     allowEmptyArchive: true,
+                                     fingerprint: true
                 } else {
                     echo 'Dossier reports absent - archivage ignore.'
                 }
