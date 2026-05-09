@@ -2,10 +2,8 @@ pipeline {
 
     agent any
 
-    // ── NOUVEAU : Paramètres pour recevoir l'image depuis GitHub ─────────
     parameters {
-        string(name: 'IMAGE_TAG', defaultValue: 'latest', description: 'Le github.sha envoyé par GitHub Actions')
-        string(name: 'DOCKER_REGISTRY', defaultValue: 'votre_user', description: 'Votre nom d\'utilisateur DockerHub')
+        string(name: 'IMAGE_TAG', defaultValue: 'latest', description: 'Le github.sha envoye par GitHub Actions')
     }
 
     options {
@@ -28,31 +26,14 @@ pipeline {
 
     stages {
 
-     // ── 1. INIT & PULL ───────────────────────────────────────────────────
-        stage('Init & Pull Image') {
+        // ── 1. INIT ──────────────────────────────────────────────────────────
+        stage('Init') {
             steps {
                 script {
-                    env.PROJECT_DIR  = "${env.WORKSPACE}/src"
-                    env.TRIVY_CACHE  = "${env.WORKSPACE}/src/.trivycache"
-                    env.JENKINS_UID  = sh(returnStdout: true, script: 'id -u').trim()
-                    env.JENKINS_GID  = sh(returnStdout: true, script: 'id -g').trim()
-                }
-
-                // Utilisation EXCLUSIVE du coffre-fort Jenkins pour récupérer le Username
-                withCredentials([usernamePassword(credentialsId: 'docker-hub-creds', 
-                                 passwordVariable: 'DOCKER_HUB_PASSWORD', 
-                                 usernameVariable: 'DOCKER_HUB_USERNAME')]) {
-                    script {
-                        // On construit dynamiquement le nom de l'image avec le VRAI username du coffre-fort
-                        env.DOCKER_IMAGE = "${DOCKER_HUB_USERNAME}/archivage-app:${params.IMAGE_TAG}"
-                    }
-                    
-                    // Connexion et téléchargement
-                    echo "🔐 Connexion à Docker Hub..."
-                    sh "echo \$DOCKER_HUB_PASSWORD | docker login -u \$DOCKER_HUB_USERNAME --password-stdin"
-                    
-                    echo "📥 Récupération de l'image : ${env.DOCKER_IMAGE}"
-                    sh "docker pull ${env.DOCKER_IMAGE}"
+                    env.PROJECT_DIR = "${env.WORKSPACE}/src"
+                    env.TRIVY_CACHE = "${env.WORKSPACE}/src/.trivycache"
+                    env.JENKINS_UID = sh(returnStdout: true, script: 'id -u').trim()
+                    env.JENKINS_GID = sh(returnStdout: true, script: 'id -g').trim()
                 }
             }
         }
@@ -88,7 +69,30 @@ pipeline {
             }
         }
 
-        // ── 4. PREPARE WORKSPACE ─────────────────────────────────────────────
+        // ── 4. LOGIN & PULL IMAGE ────────────────────────────────────────────
+        stage('Login & Pull Image') {
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: 'docker-hub-creds',
+                    usernameVariable: 'DOCKER_HUB_USERNAME',
+                    passwordVariable: 'DOCKER_HUB_PASSWORD'
+                )]) {
+                    script {
+                        env.DOCKER_IMAGE = "${DOCKER_HUB_USERNAME}/archivage-app:${params.IMAGE_TAG}"
+                    }
+
+                    sh '''
+                        set -eu
+                        echo "=== LOGIN & PULL IMAGE ==="
+                        echo "$DOCKER_HUB_PASSWORD" | docker login -u "$DOCKER_HUB_USERNAME" --password-stdin
+                        docker pull "$DOCKER_IMAGE"
+                        echo "Image recuperee : $DOCKER_IMAGE"
+                    '''
+                }
+            }
+        }
+
+        // ── 5. PREPARE WORKSPACE ─────────────────────────────────────────────
         stage('Prepare Workspace') {
             steps {
                 sh '''
@@ -110,7 +114,6 @@ pipeline {
                     docker network inspect "$NETWORK_NAME" >/dev/null 2>&1 \
                         || docker network create "$NETWORK_NAME"
 
-                    # Vérifie la présence du script dashboard versionné dans le repo
                     if [ -f generate_dashboard.py ]; then
                         chmod +x generate_dashboard.py || true
                         echo "Dashboard script detecte : generate_dashboard.py"
@@ -118,7 +121,6 @@ pipeline {
                         echo "[WARN] Script dashboard absent : generate_dashboard.py"
                     fi
 
-                    # ── OPA policy ──────────────────────────────────────────
                     cat > policy/security-gate.rego <<'REGO'
 package security
 
@@ -131,7 +133,6 @@ allow if {
 }
 REGO
 
-                    # ── OPA input builder ───────────────────────────────────
                     cat > reports/opa/build_input.py <<'PYEOF'
 import json
 import sys
@@ -185,28 +186,9 @@ print("  Trivy CRITICAL   : " + str(sev["CRITICAL"]))
 print("  Trivy HIGH       : " + str(sev["HIGH"]))
 print("  ZAP HIGH         : " + str(zap_high))
 print("=========================")
-
-if sev["CRITICAL"] > 0:
-    print("[DETAIL] CVE CRITICAL detectees :")
-    for result in trivy.get("Results", []) or []:
-        for v in result.get("Vulnerabilities", []) or []:
-            if (v.get("Severity") or "").upper() == "CRITICAL":
-                print("  " + v.get("VulnerabilityID", "?")
-                      + "  " + v.get("PkgName", "?")
-                      + "  " + v.get("InstalledVersion", "?")
-                      + "  -> fix: " + v.get("FixedVersion", "N/A"))
-
-if len(payload["gitleaks"]) > 0:
-    print("[DETAIL] Secrets Gitleaks :")
-    for leak in payload["gitleaks"][:10]:
-        print("  Rule: " + str(leak.get("RuleID", "?"))
-              + "  File: " + str(leak.get("File", "?"))
-              + "  Commit: " + str(leak.get("Commit", "?"))[:8])
-
 sys.exit(0)
 PYEOF
 
-                    # ── ZAP JSON → HTML converter ───────────────────────────
                     cat > reports/zap/zap_to_html.py <<'ZAPEOF'
 import json
 from pathlib import Path
@@ -305,20 +287,14 @@ ZAPEOF
             }
         }
 
-        // ── 5. PULL IMAGE & COMPILE LIGHT ────────────────────────────────────
-        // Nouveau : On télécharge l'image construite par GitHub et on compile juste
-        // pour générer les fichiers .class requis par SonarQube et CycloneDX.
-        stage('Pull Image & Compile Light') {
+        // ── 6. COMPILE LIGHT ────────────────────────────────────────────────
+        stage('Compile Light') {
             steps {
                 sh '''
                     set -eu
                     cd "$PROJECT_DIR"
-                    echo "=== PULL IMAGE & COMPILE LIGHT ==="
+                    echo "=== COMPILE LIGHT ==="
 
-                    echo "[1/2] Téléchargement de l'image depuis Docker Hub..."
-                    docker pull "$DOCKER_IMAGE"
-
-                    echo "[2/2] Compilation Maven (génération des .class)..."
                     docker run --rm \
                         --user "${JENKINS_UID}:${JENKINS_GID}" \
                         --volumes-from jenkins \
@@ -331,7 +307,7 @@ ZAPEOF
             }
         }
 
-        // ── 6. SECURITY SCANS (parallel) ─────────────────────────────────────
+        // ── 7. SECURITY SCANS (parallel) ─────────────────────────────────────
         stage('Security Scans') {
             parallel {
 
@@ -341,7 +317,6 @@ ZAPEOF
                             sh '''
                                 set -eu
                                 cd "$PROJECT_DIR"
-                                echo "=== GITLEAKS ==="
                                 docker run --rm \
                                     --volumes-from jenkins \
                                     -w "$PROJECT_DIR" \
@@ -359,17 +334,15 @@ ZAPEOF
                     }
                 }
 
-                // CHANGEMENT : Trivy scanne l'image téléchargée
                 stage('SCA - Trivy Image') {
                     steps {
                         catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
                             sh '''
                                 set -eu
                                 cd "$PROJECT_DIR"
-                                echo "=== TRIVY IMAGE SCAN ==="
                                 docker run --rm \
                                     -v /var/run/docker.sock:/var/run/docker.sock \
-                                    -v "$WORKSPACE/src/reports/trivy:/reports" \
+                                    -v "$PROJECT_DIR/reports/trivy:/reports" \
                                     -v "$TRIVY_CACHE:/root/.cache/trivy" \
                                     ghcr.io/aquasecurity/trivy:latest image \
                                         --no-progress \
@@ -395,10 +368,8 @@ ZAPEOF
                                     sh '''
                                         set -eu
                                         cd "$PROJECT_DIR"
-
                                         test -d "$PROJECT_DIR/target/classes"
 
-                                        echo "=== SONARQUBE ANALYSIS ==="
                                         docker run --rm \
                                             --user "${JENKINS_UID}:${JENKINS_GID}" \
                                             --network "$NETWORK_NAME" \
@@ -432,7 +403,6 @@ ZAPEOF
                             sh '''
                                 set -eu
                                 cd "$PROJECT_DIR"
-                                echo "=== CYCLONEDX SBOM ==="
                                 docker run --rm \
                                     --user "${JENKINS_UID}:${JENKINS_GID}" \
                                     --volumes-from jenkins \
@@ -455,13 +425,11 @@ ZAPEOF
             }
         }
 
-        // ── 7. DEPLOY MYSQL ──────────────────────────────────────────────────
+        // ── 8. DEPLOY MYSQL ──────────────────────────────────────────────────
         stage('Deploy MySQL') {
             steps {
                 sh '''
                     set -eu
-                    echo "=== DEPLOY MYSQL ==="
-
                     docker rm -f "$MYSQL_CONTAINER" >/dev/null 2>&1 || true
                     docker run -d \
                         --name "$MYSQL_CONTAINER" \
@@ -479,24 +447,20 @@ ZAPEOF
                             READY=1
                             break
                         fi
-                        echo "Waiting for MySQL ($i/30)..."
                         sleep 5
                     done
 
                     test "$READY" -eq 1 || { echo "MySQL ne repond pas apres 30 tentatives."; exit 1; }
-                    echo "MySQL pret. Pause 10s..."
                     sleep 10
                 '''
             }
         }
 
-        // ── 8. DEPLOY APP ────────────────────────────────────────────────────
+        // ── 9. DEPLOY APP ────────────────────────────────────────────────────
         stage('Deploy App') {
             steps {
                 sh '''
                     set -eu
-                    echo "=== DEPLOY APP ==="
-
                     docker rm -f "$APP_CONTAINER" >/dev/null 2>&1 || true
                     mkdir -p "$PROJECT_DIR/uploads"
 
@@ -520,15 +484,12 @@ ZAPEOF
                                "http://$APP_CONTAINER:$APP_PORT/actuator/health" || true)
                         if echo "$CODE" | grep -qE "200|301|302|401|403|404"; then
                             READY=1
-                            echo "Application repond avec HTTP $CODE"
                             break
                         fi
-                        echo "Waiting for app health ($i/30)..."
                         sleep 5
                     done
 
                     if [ "$READY" -ne 1 ]; then
-                        echo " CRASH APPLICATIF DETECTE"
                         docker logs "$APP_CONTAINER" --tail 200 || true
                         exit 1
                     fi
@@ -536,14 +497,13 @@ ZAPEOF
             }
         }
 
-        // ── 9. DAST - OWASP ZAP ──────────────────────────────────────────────
+        // ── 10. DAST - OWASP ZAP ─────────────────────────────────────────────
         stage('DAST - OWASP ZAP') {
             steps {
                 catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
                     sh '''
                         set -eu
                         cd "$PROJECT_DIR"
-                        echo "=== ZAP BASELINE ==="
 
                         mkdir -p "$PROJECT_DIR/reports/zap"
                         chmod 777 "$PROJECT_DIR/reports/zap"
@@ -565,8 +525,7 @@ ZAPEOF
                             sh -c "chown -R ${JENKINS_UID}:${JENKINS_GID} /zap/wrk || true"
 
                         test -s "$PROJECT_DIR/reports/zap/zap-report.json" \
-                            || echo '{"site":[{"alerts":[]}]}' \
-                               > "$PROJECT_DIR/reports/zap/zap-report.json"
+                            || echo '{"site":[{"alerts":[]}]}' > "$PROJECT_DIR/reports/zap/zap-report.json"
 
                         docker run --rm \
                             --volumes-from jenkins \
@@ -578,12 +537,11 @@ ZAPEOF
             }
         }
 
-        // ── 10. POLICY - OPA SECURITY GATE ───────────────────────────────────
+        // ── 11. POLICY - OPA SECURITY GATE ──────────────────────────────────
         stage('Policy - OPA Gate') {
             steps {
                 sh '''
                     set -eu
-                    echo "=== OPA SECURITY GATE ==="
 
                     docker run --rm \
                         --volumes-from jenkins \
@@ -605,20 +563,14 @@ ZAPEOF
                     cat "$PROJECT_DIR/reports/opa/opa-result.txt"
 
                     if ! grep -qx "true" "$PROJECT_DIR/reports/opa/opa-result.txt"; then
-                        echo "============================================================"
-                        echo " OPA SECURITY GATE : ECHEC"
-                        echo " Le pipeline est bloque. Consultez le resume ci-dessus."
-                        echo "============================================================"
                         exit 1
                     fi
-                    echo "OPA Security Gate : PASS"
                 '''
             }
         }
 
     }
 
-    // ── POST ACTIONS ─────────────────────────────────────────────────────────
     post {
 
         always {
@@ -720,14 +672,23 @@ ZAPEOF
 
             sh '''
                 set +e
+                docker logout >/dev/null 2>&1 || true
                 docker rm -f "$APP_CONTAINER"   >/dev/null 2>&1 || true
                 docker rm -f "$MYSQL_CONTAINER" >/dev/null 2>&1 || true
                 docker network rm "$NETWORK_NAME" >/dev/null 2>&1 || true
             '''
         }
 
-        failure { echo 'Pipeline FAILED — consulter les logs de scan et les rapports archives.' }
-        unstable { echo 'Pipeline UNSTABLE — des problemes de securite ont ete detectes.' }
-        success { echo 'Pipeline SUCCESS — tous les security gates sont passes.' }
+        failure {
+            echo 'Pipeline FAILED — consulter les logs de scan et les rapports archives.'
+        }
+
+        unstable {
+            echo 'Pipeline UNSTABLE — des problemes de securite ont ete detectes.'
+        }
+
+        success {
+            echo 'Pipeline SUCCESS — tous les security gates sont passes.'
+        }
     }
 }
