@@ -129,7 +129,7 @@ for result in trivy.get("Results", []) or []:
 zap_high = 0
 for site in zap.get("site", []) or []:
     for alert in site.get("alerts", []) or []:
-        if str(alert.get("riskcode", "")).strip() == "3":
+        if str(alert.get("riskcode", 0)) == "3":
             zap_high += 1
 
 payload = {
@@ -199,7 +199,7 @@ for site in data.get("site", []) or []:
     for alert in site.get("alerts", []) or []:
         all_alerts.append(alert)
 
-all_alerts.sort(key=lambda a: -int(str(a.get("riskcode", "0"))))
+all_alerts.sort(key=lambda a: -int(a.get("riskcode", 0)))
 
 rows = ""
 for a in all_alerts:
@@ -365,8 +365,6 @@ ZAPEOF
                     }
                 }
 
-                // FIX: SonarQube Quality Gate is now enforced via waitForQualityGate()
-                // after analysis. Previously qualitygate.wait=false silently ignored gate.
                 stage('SAST - SonarQube') {
                     steps {
                         catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
@@ -398,11 +396,10 @@ ZAPEOF
                                                         -Dsonar.projectKey='$APP_NAME' \
                                                         -Dsonar.host.url='$SONAR_HOST_URL' \
                                                         -Dsonar.login='$SONAR_AUTH_TOKEN' \
-                                                        -Dsonar.java.binaries='target/classes' \
-                                                        -Dsonar.qualitygate.wait=true"
+                                                        -Dsonar.java.binaries='target/classes'"
                                     '''
                                 }
-                                // FIX: actually wait for and enforce the Quality Gate result
+                                // Quality Gate enforced via Jenkins plugin (unique mecanisme)
                                 timeout(time: 5, unit: 'MINUTES') {
                                     waitForQualityGate abortPipeline: false
                                 }
