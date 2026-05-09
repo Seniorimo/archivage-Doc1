@@ -17,6 +17,7 @@ pipeline {
         APP_PORT         = '8090'
         MAVEN_REPO       = '/var/jenkins_home/.m2/repository'
         SONARQUBE_ENV    = 'sonar'
+        SONARQUBE_HOST   = 'http://sonarqube:9000'
     }
 
     stages {
@@ -82,7 +83,9 @@ pipeline {
                       .trivycache \
                       policy
 
+                    # Create network and connect SonarQube if needed
                     docker network inspect "$NETWORK_NAME" >/dev/null 2>&1 || docker network create "$NETWORK_NAME"
+                    docker network connect "$NETWORK_NAME" sonarqube 2>/dev/null || true
 
                     cat > policy/security-gate.rego <<'REGO'
 package security
@@ -363,13 +366,17 @@ ZAPEOF
                                         test -f "$JARPATH"
                                         test -d "$PROJECT_DIR/target/classes"
 
+                                        # Ensure SonarQube is reachable on the pipeline network
+                                        docker network connect "$NETWORK_NAME" sonarqube 2>/dev/null || true
+                                        sleep 2
+
                                         echo "=== SONARQUBE ANALYSIS ==="
                                         docker run --rm \
                                           --user "${JENKINS_UID}:${JENKINS_GID}" \
                                           --network "$NETWORK_NAME" \
                                           --volumes-from jenkins \
                                           --add-host=host.docker.internal:host-gateway \
-                                          -e SONAR_HOST_URL="$SONAR_HOST_URL" \
+                                          -e SONAR_HOST_URL="$SONARQUBE_HOST" \
                                           -e SONAR_AUTH_TOKEN="$SONAR_AUTH_TOKEN" \
                                           -w "$PROJECT_DIR" \
                                           maven:3.9.9-eclipse-temurin-17 \
@@ -378,7 +385,7 @@ ZAPEOF
                                             org.sonarsource.scanner.maven:sonar-maven-plugin:4.0.0.4121:sonar \
                                             -DskipTests \
                                             -Dsonar.projectKey='$APP_NAME' \
-                                            -Dsonar.host.url='$SONAR_HOST_URL' \
+                                            -Dsonar.host.url='$SONARQUBE_HOST' \
                                             -Dsonar.login='$SONAR_AUTH_TOKEN' \
                                             -Dsonar.java.binaries='target/classes' \
                                             -Dsonar.qualitygate.wait=false"
