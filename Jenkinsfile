@@ -3,7 +3,7 @@ pipeline {
     agent any
 
     parameters {
-        string(name: 'IMAGE_TAG', defaultValue: 'latest', description: 'Le github.sha envoye par GitHub Actions')
+        string(name: 'IMAGE_TAG', defaultValue: '', description: 'Tag Docker a deployer (ex: github.sha). Obligatoire.')
     }
 
     options {
@@ -72,18 +72,26 @@ pipeline {
         // ── 4. LOGIN & PULL IMAGE ────────────────────────────────────────────
         stage('Login & Pull Image') {
             steps {
+                script {
+                    if (!params.IMAGE_TAG?.trim()) {
+                        error("IMAGE_TAG est obligatoire. Fournissez le github.sha existant sur Docker Hub.")
+                    }
+                }
+
                 withCredentials([usernamePassword(
                     credentialsId: 'docker-hub-creds',
                     usernameVariable: 'DOCKER_HUB_USERNAME',
                     passwordVariable: 'DOCKER_HUB_PASSWORD'
                 )]) {
                     script {
-                        env.DOCKER_IMAGE = "${DOCKER_HUB_USERNAME}/archivage-app:${params.IMAGE_TAG}"
+                        env.DOCKER_IMAGE = "${DOCKER_HUB_USERNAME}/archivage-app:${params.IMAGE_TAG.trim()}"
                     }
 
                     sh '''
                         set -eu
                         echo "=== LOGIN & PULL IMAGE ==="
+                        echo "Tag demande : $IMAGE_TAG"
+                        echo "Image cible : $DOCKER_IMAGE"
                         echo "$DOCKER_HUB_PASSWORD" | docker login -u "$DOCKER_HUB_USERNAME" --password-stdin
                         docker pull "$DOCKER_IMAGE"
                         echo "Image recuperee : $DOCKER_IMAGE"
@@ -604,6 +612,8 @@ ZAPEOF
                         sh '''
                             set +e
                             cd "$PROJECT_DIR"
+                            mkdir -p reports/dashboard
+                            docker network inspect "$NETWORK_NAME" >/dev/null 2>&1 || docker network create "$NETWORK_NAME" >/dev/null 2>&1 || true
                             docker run --rm \
                                 --network "$NETWORK_NAME" \
                                 --volumes-from jenkins \
@@ -618,7 +628,7 @@ ZAPEOF
                                     --project "$APP_NAME" \
                                     --sonar-url "$SONAR_HOST_URL" \
                                     --sonar-token "$SONAR_AUTH_TOKEN" \
-                                    --sonar-project "$APP_NAME"
+                                    --sonar-project "$APP_NAME" || true
                         '''
                     }
                 }
