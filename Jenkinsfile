@@ -368,7 +368,7 @@ ZAPEOF
                     }
                 }
 
-                stage('SAST - SonarQube') {
+                stage('SAST - SonarQube Analysis') {
                     steps {
                         catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
                             script {
@@ -392,13 +392,9 @@ ZAPEOF
                                                         org.sonarsource.scanner.maven:sonar-maven-plugin:4.0.0.4121:sonar \
                                                         -Dsonar.projectKey='$APP_NAME' \
                                                         -Dsonar.host.url='$SONAR_HOST_URL' \
-                                                        -Dsonar.login='$SONAR_AUTH_TOKEN' \
+                                                        -Dsonar.token='$SONAR_AUTH_TOKEN' \
                                                         -Dsonar.java.binaries='target/classes'"
                                     '''
-                                }
-
-                                timeout(time: 5, unit: 'MINUTES') {
-                                    waitForQualityGate abortPipeline: false
                                 }
                             }
                         }
@@ -433,7 +429,23 @@ ZAPEOF
             }
         }
 
-        // ── 8. DEPLOY MYSQL ──────────────────────────────────────────────────
+        // ── 8. SONAR QUALITY GATE ────────────────────────────────────────────
+        stage('SAST - SonarQube Quality Gate') {
+            steps {
+                timeout(time: 10, unit: 'MINUTES') {
+                    script {
+                        def qg = waitForQualityGate abortPipeline: false
+                        echo "SonarQube Quality Gate status: ${qg.status}"
+
+                        if (qg.status != 'OK') {
+                            unstable("SonarQube Quality Gate non valide: ${qg.status}")
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── 9. DEPLOY MYSQL ──────────────────────────────────────────────────
         stage('Deploy MySQL') {
             steps {
                 sh '''
@@ -464,7 +476,7 @@ ZAPEOF
             }
         }
 
-        // ── 9. DEPLOY APP ────────────────────────────────────────────────────
+        // ── 10. DEPLOY APP ───────────────────────────────────────────────────
         stage('Deploy App') {
             steps {
                 sh '''
@@ -505,7 +517,7 @@ ZAPEOF
             }
         }
 
-        // ── 10. DAST - OWASP ZAP ─────────────────────────────────────────────
+        // ── 11. DAST - OWASP ZAP ─────────────────────────────────────────────
         stage('DAST - OWASP ZAP') {
             steps {
                 catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
@@ -545,7 +557,7 @@ ZAPEOF
             }
         }
 
-        // ── 11. POLICY - OPA SECURITY GATE ──────────────────────────────────
+        // ── 12. POLICY - OPA SECURITY GATE ──────────────────────────────────
         stage('Policy - OPA Gate') {
             steps {
                 sh '''
