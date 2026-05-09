@@ -33,17 +33,24 @@ pipeline {
             steps {
                 script {
                     env.PROJECT_DIR  = "${env.WORKSPACE}/src"
-                    // Remplacez 'Seniorimo' par votre vrai pseudo si ce n'est pas celui-là
-                    env.DOCKER_IMAGE = "${params.DOCKER_USER}/archivage-app:${params.IMAGE_TAG}"
+                    env.TRIVY_CACHE  = "${env.WORKSPACE}/src/.trivycache"
                     env.JENKINS_UID  = sh(returnStdout: true, script: 'id -u').trim()
                     env.JENKINS_GID  = sh(returnStdout: true, script: 'id -g').trim()
                 }
-                
-                // Connexion sécurisée à Docker Hub
+
+                // Utilisation EXCLUSIVE du coffre-fort Jenkins pour récupérer le Username
                 withCredentials([usernamePassword(credentialsId: 'docker-hub-creds', 
                                  passwordVariable: 'DOCKER_HUB_PASSWORD', 
                                  usernameVariable: 'DOCKER_HUB_USERNAME')]) {
+                    script {
+                        // On construit dynamiquement le nom de l'image avec le VRAI username du coffre-fort
+                        env.DOCKER_IMAGE = "${DOCKER_HUB_USERNAME}/archivage-app:${params.IMAGE_TAG}"
+                    }
+                    
+                    // Connexion et téléchargement
+                    echo "🔐 Connexion à Docker Hub..."
                     sh "echo \$DOCKER_HUB_PASSWORD | docker login -u \$DOCKER_HUB_USERNAME --password-stdin"
+                    
                     echo "📥 Récupération de l'image : ${env.DOCKER_IMAGE}"
                     sh "docker pull ${env.DOCKER_IMAGE}"
                 }
