@@ -1,6 +1,6 @@
 # ===========================================================================
 # GITHUB ACTIONS — Java Application CI (VERSION FINALE)
-# Rôle : UNIQUEMENT CI — Build, Tests, Sanity Check Docker
+# Rôle : UNIQUEMENT CI — Build, Tests, Sanity Check Docker, Push to Registry
 #
 # ⚠️  TOUTES les briques sécurité restent sur JENKINS.
 #
@@ -10,10 +10,13 @@
 #   ✅ Health check sur port 8090 (aligné avec application-docker.properties)
 #   ✅ Volume /tmp/archivage-uploads monté → fix AccessDeniedException uploads
 #   ✅ Secrets GitHub utilisés uniquement là où ils sont supportés
+#   ✅ Push de l'image sur Docker Hub pour récupération par Jenkins
 #
 # SECRETS GITHUB À CONFIGURER (Settings > Secrets > Actions) :
 #   GITHUB_OAUTH_SECRET  → client-secret GitHub OAuth
 #   JWT_SECRET           → secret JWT de l'application
+#   DOCKER_USERNAME      → Nom d'utilisateur Docker Hub
+#   DOCKER_PASSWORD      → Jeton d'accès personnel (PAT) Docker Hub
 # ===========================================================================
 
 name: Java Application CI
@@ -140,9 +143,25 @@ jobs:
             exit 1
           fi
 
+      # ── Login & Push vers Docker Hub ──────────────────────────────────
+      - name: 🔐 Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: 📤 Push Image Docker
+        run: |
+          # 1. On renomme l'image avec votre nom d'utilisateur Docker Hub
+          docker tag archivage-app:${{ github.sha }} ${{ secrets.DOCKER_USERNAME }}/archivage-app:${{ github.sha }}
+          
+          # 2. On l'envoie sur le registre
+          docker push ${{ secrets.DOCKER_USERNAME }}/archivage-app:${{ github.sha }}
+
       # ── Nettoyage ─────────────────────────────────────────────────────
       - name: 🧹 Nettoyage
         if: always()
         run: |
           docker rm -f archivage-app 2>/dev/null || true
           docker rmi archivage-app:${{ github.sha }} 2>/dev/null || true
+          docker rmi ${{ secrets.DOCKER_USERNAME }}/archivage-app:${{ github.sha }} 2>/dev/null || true
