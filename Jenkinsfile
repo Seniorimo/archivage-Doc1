@@ -28,16 +28,24 @@ pipeline {
 
     stages {
 
-        // ── 1. INIT ──────────────────────────────────────────────────────────
-        stage('Init') {
+     // ── 1. INIT & PULL ───────────────────────────────────────────────────
+        stage('Init & Pull Image') {
             steps {
                 script {
                     env.PROJECT_DIR  = "${env.WORKSPACE}/src"
-                    // On reconstruit le nom de l'image distante avec les paramètres
-                    env.DOCKER_IMAGE = "${params.DOCKER_REGISTRY}/archivage-app:${params.IMAGE_TAG}"
-                    env.TRIVY_CACHE  = "${env.WORKSPACE}/src/.trivycache"
+                    // Remplacez 'Seniorimo' par votre vrai pseudo si ce n'est pas celui-là
+                    env.DOCKER_IMAGE = "${params.DOCKER_USER}/archivage-app:${params.IMAGE_TAG}"
                     env.JENKINS_UID  = sh(returnStdout: true, script: 'id -u').trim()
                     env.JENKINS_GID  = sh(returnStdout: true, script: 'id -g').trim()
+                }
+                
+                // Connexion sécurisée à Docker Hub
+                withCredentials([usernamePassword(credentialsId: 'docker-hub-creds', 
+                                 passwordVariable: 'DOCKER_HUB_PASSWORD', 
+                                 usernameVariable: 'DOCKER_HUB_USERNAME')]) {
+                    sh "echo \$DOCKER_HUB_PASSWORD | docker login -u \$DOCKER_HUB_USERNAME --password-stdin"
+                    echo "📥 Récupération de l'image : ${env.DOCKER_IMAGE}"
+                    sh "docker pull ${env.DOCKER_IMAGE}"
                 }
             }
         }
