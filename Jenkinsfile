@@ -81,11 +81,21 @@ pipeline {
                         reports/sbom \
                         reports/zap \
                         reports/opa \
+                        reports/dashboard \
                         .trivycache \
                         policy
 
                     docker network inspect "$NETWORK_NAME" >/dev/null 2>&1 \
                         || docker network create "$NETWORK_NAME"
+
+                    # Vérifie la présence du script dashboard versionné dans le repo
+                    if [ -f generate_dashboard.py ]; then
+                        chmod +x generate_dashboard.py || true
+                        echo "Dashboard script detecte : generate_dashboard.py"
+                    else
+                        echo "[WARN] Script dashboard absent : generate_dashboard.py"
+                        echo "[WARN] Le pipeline continuera, mais le dashboard consolide ne sera pas genere."
+                    fi
 
                     # ── OPA policy ──────────────────────────────────────────
                     cat > policy/security-gate.rego <<'REGO'
@@ -399,7 +409,7 @@ ZAPEOF
                                                         -Dsonar.java.binaries='target/classes'"
                                     '''
                                 }
-                                // Quality Gate enforced via Jenkins plugin (unique mecanisme)
+
                                 timeout(time: 5, unit: 'MINUTES') {
                                     waitForQualityGate abortPipeline: false
                                 }
@@ -437,7 +447,7 @@ ZAPEOF
                     }
                 }
 
-            } // end parallel
+            }
         }
 
         // ── 7. DEPLOY MYSQL ──────────────────────────────────────────────────
@@ -510,7 +520,7 @@ ZAPEOF
                         fi
                         echo "Waiting for app health ($i/30)..."
                         docker ps -a --filter "name=$APP_CONTAINER" \
-                            --format 'table {{.Names}}\t{{.Status}}' || true
+                            --format 'table {{.Names}}\\t{{.Status}}' || true
                         sleep 5
                     done
 
@@ -547,7 +557,6 @@ ZAPEOF
                                 -J "zap-report.json" \
                                 -a -j -I || true
 
-                        # Fix ownership after ZAP runs as root
                         docker run --rm \
                             -u 0:0 \
                             -v "$PROJECT_DIR/reports/zap:/zap/wrk" \
@@ -558,7 +567,6 @@ ZAPEOF
                             || echo '{"site":[{"alerts":[]}]}' \
                                > "$PROJECT_DIR/reports/zap/zap-report.json"
 
-                        # Generate HTML report from JSON
                         docker run --rm \
                             --volumes-from jenkins \
                             -w "$PROJECT_DIR/reports/zap" \
@@ -573,8 +581,6 @@ ZAPEOF
         }
 
         // ── 10. POLICY - OPA SECURITY GATE ───────────────────────────────────
-        //  FIX: OPA result written to a dedicated file before grep to avoid
-        //  tee buffering artefacts. Pipeline fails here if gate is not passed.
         stage('Policy - OPA Gate') {
             steps {
                 sh '''
@@ -618,7 +624,7 @@ ZAPEOF
             }
         }
 
-    } // end stages
+    }
 
     // ── POST ACTIONS ─────────────────────────────────────────────────────────
     post {
@@ -652,7 +658,66 @@ ZAPEOF
                 }
             }
 
-            // ZAP: publish HTML report
+            // Dashboard HTML consolide (script versionne dans le repo)
+            script {
+                if (fileExists('src/generate_dashboard.py')) {
+                    withSonarQubeEnv("${SONARQUBE_ENV}") {
+                        sh '''
+                            set +e
+                            cd "$PROJECT_DIR"
+                            echo "=== GENERATE SECURITY DASHBOARD ==="
+
+                            docker run --rm \
+                                --network "$NETWORK_NAME" \
+                                --volumes-from jenkins \
+                                --add-host=host.docker.internal:host-gateway \
+                                -e SONAR_HOST_URL="$SONAR_HOST_URL" \
+                                -e SONAR_AUTH_TOKEN="$SONAR_AUTH_TOKEN" \
+                                -w "$PROJECT_DIR" \
+                                python:3.12-alpine \
+                                python generate_dashboard.py \
+                                    --reports reports \
+                                    --output reports/dashboard/security-dashboard.html \
+                                    --project "$APP_NAME" \
+                                    --sonar-url "$SONAR_HOST_URL" \
+                                    --sonar-token "$SONAR_AUTH_TOKEN" \
+                                    --sonar-project "$APP_NAME"
+
+                            RC=$?
+                            echo "Dashboard generator exit code: $RC"
+
+                            if [ -f reports/dashboard/security-dashboard.html ]; then
+                                echo "Dashboard genere : reports/dashboard/security-dashboard.html"
+                                ls -lah reports/dashboard/
+                            else
+                                echo "[WARN] Dashboard HTML non genere."
+                            fi
+
+                            exit 0
+                        '''
+                    }
+                } else {
+                    echo 'Script dashboard absent — generation du dashboard ignoree.'
+                }
+            }
+
+            // Publish consolidated dashboard
+            script {
+                if (fileExists('src/reports/dashboard/security-dashboard.html')) {
+                    publishHTML(target: [
+                        allowMissing         : true,
+                        alwaysLinkToLastBuild: true,
+                        keepAll              : true,
+                        reportDir            : 'src/reports/dashboard',
+                        reportFiles          : 'security-dashboard.html',
+                        reportName           : 'Security Dashboard'
+                    ])
+                } else {
+                    echo 'Security Dashboard absent — publication HTML ignoree.'
+                }
+            }
+
+            // ZAP: publish HTML report separately
             script {
                 if (fileExists('src/reports/zap/zap-report.html')) {
                     publishHTML(target: [
@@ -680,7 +745,8 @@ ZAPEOF
                             'src/reports/opa/opa-result.txt',
                             'src/reports/opa/input.json',
                             'src/reports/sbom/bom.json',
-                            'src/reports/sbom/bom.xml'
+                            'src/reports/sbom/bom.xml',
+                            'src/reports/dashboard/security-dashboard.html'
                         ].join(','),
                         allowEmptyArchive: true,
                         fingerprint      : true
@@ -704,7 +770,7 @@ ZAPEOF
         }
 
         unstable {
-            echo 'Pipeline UNSTABLE — des problemes de securite ont ete detectes ; voir les resumes Gitleaks, Trivy, SonarQube et ZAP.'
+            echo 'Pipeline UNSTABLE — des problemes de securite ont ete detectes ; voir les resumes Gitleaks, Trivy, SonarQube, ZAP et le dashboard consolide.'
         }
 
         success {
