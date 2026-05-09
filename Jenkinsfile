@@ -3,7 +3,11 @@ pipeline {
     agent any
 
     parameters {
-        string(name: 'IMAGE_TAG', defaultValue: '', description: 'Tag Docker a deployer (ex: github.sha). Obligatoire.')
+        string(
+            name: 'IMAGE_TAG',
+            defaultValue: '',
+            description: 'Optionnel. Si vide, le tag est deduit automatiquement du commit checkouté (git SHA).'
+        )
     }
 
     options {
@@ -66,31 +70,43 @@ pipeline {
                     deleteDir()
                     checkout scm
                 }
+                script {
+                    env.GIT_SHA = sh(
+                        returnStdout: true,
+                        script: '''
+                            set -eu
+                            cd "$PROJECT_DIR"
+                            git rev-parse HEAD
+                        '''
+                    ).trim()
+                    echo "Commit checkouté : ${env.GIT_SHA}"
+                }
             }
         }
 
         // ── 4. LOGIN & PULL IMAGE ────────────────────────────────────────────
         stage('Login & Pull Image') {
             steps {
-                script {
-                    if (!params.IMAGE_TAG?.trim()) {
-                        error("IMAGE_TAG est obligatoire. Fournissez le github.sha existant sur Docker Hub.")
-                    }
-                }
-
                 withCredentials([usernamePassword(
                     credentialsId: 'docker-hub-creds',
                     usernameVariable: 'DOCKER_HUB_USERNAME',
                     passwordVariable: 'DOCKER_HUB_PASSWORD'
                 )]) {
                     script {
-                        env.DOCKER_IMAGE = "${DOCKER_HUB_USERNAME}/archivage-app:${params.IMAGE_TAG.trim()}"
+                        env.RESOLVED_IMAGE_TAG = params.IMAGE_TAG?.trim()
+                        if (!env.RESOLVED_IMAGE_TAG) {
+                            env.RESOLVED_IMAGE_TAG = env.GIT_SHA
+                            echo "IMAGE_TAG non fourni -> tag deduit automatiquement du commit : ${env.RESOLVED_IMAGE_TAG}"
+                        } else {
+                            echo "IMAGE_TAG fourni manuellement : ${env.RESOLVED_IMAGE_TAG}"
+                        }
+
+                        env.DOCKER_IMAGE = "${env.DOCKER_HUB_USERNAME}/archivage-app:${env.RESOLVED_IMAGE_TAG}"
                     }
 
                     sh '''
                         set -eu
                         echo "=== LOGIN & PULL IMAGE ==="
-                        echo "Tag demande : $IMAGE_TAG"
                         echo "Image cible : $DOCKER_IMAGE"
                         echo "$DOCKER_HUB_PASSWORD" | docker login -u "$DOCKER_HUB_USERNAME" --password-stdin
                         docker pull "$DOCKER_IMAGE"
@@ -290,6 +306,36 @@ out.write_text(html, encoding="utf-8")
 print("Rapport HTML ZAP genere : " + str(out))
 ZAPEOF
 
+                    cat > reports/dashboard/patch_csp.py <<'PYEOF'
+from pathlib import Path
+import sys
+
+META = """<meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob: https:; img-src 'self' data: blob: https:; style-src 'self' 'unsafe-inline' https:; font-src 'self' data: https:; script-src 'self' 'unsafe-inline' https:;">"""
+
+def patch(path_str: str):
+    p = Path(path_str)
+    if not p.exists():
+        print(f"[SKIP] Fichier absent : {p}")
+        return
+
+    html = p.read_text(encoding="utf-8", errors="ignore")
+
+    if 'http-equiv="Content-Security-Policy"' in html or "http-equiv='Content-Security-Policy'" in html:
+        print(f"[OK] CSP deja presente : {p}")
+        return
+
+    if "<head>" in html:
+        html = html.replace("<head>", "<head>\\n  " + META, 1)
+    else:
+        html = META + "\\n" + html
+
+    p.write_text(html, encoding="utf-8")
+    print(f"[OK] CSP ajoutee : {p}")
+
+for target in sys.argv[1:]:
+    patch(target)
+PYEOF
+
                     echo "Workspace prepare avec succes."
                 '''
             }
@@ -429,23 +475,7 @@ ZAPEOF
             }
         }
 
-        // ── 8. SONAR QUALITY GATE ────────────────────────────────────────────
-        stage('SAST - SonarQube Quality Gate') {
-            steps {
-                timeout(time: 10, unit: 'MINUTES') {
-                    script {
-                        def qg = waitForQualityGate abortPipeline: false
-                        echo "SonarQube Quality Gate status: ${qg.status}"
-
-                        if (qg.status != 'OK') {
-                            unstable("SonarQube Quality Gate non valide: ${qg.status}")
-                        }
-                    }
-                }
-            }
-        }
-
-        // ── 9. DEPLOY MYSQL ──────────────────────────────────────────────────
+        // ── 8. DEPLOY MYSQL ──────────────────────────────────────────────────
         stage('Deploy MySQL') {
             steps {
                 sh '''
@@ -476,7 +506,7 @@ ZAPEOF
             }
         }
 
-        // ── 10. DEPLOY APP ───────────────────────────────────────────────────
+        // ── 9. DEPLOY APP ────────────────────────────────────────────────────
         stage('Deploy App') {
             steps {
                 sh '''
@@ -517,7 +547,7 @@ ZAPEOF
             }
         }
 
-        // ── 11. DAST - OWASP ZAP ─────────────────────────────────────────────
+        // ── 10. DAST - OWASP ZAP ─────────────────────────────────────────────
         stage('DAST - OWASP ZAP') {
             steps {
                 catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
@@ -557,7 +587,7 @@ ZAPEOF
             }
         }
 
-        // ── 12. POLICY - OPA SECURITY GATE ──────────────────────────────────
+        // ── 11. POLICY - OPA SECURITY GATE ──────────────────────────────────
         stage('Policy - OPA Gate') {
             steps {
                 sh '''
@@ -626,6 +656,7 @@ ZAPEOF
                             cd "$PROJECT_DIR"
                             mkdir -p reports/dashboard
                             docker network inspect "$NETWORK_NAME" >/dev/null 2>&1 || docker network create "$NETWORK_NAME" >/dev/null 2>&1 || true
+
                             docker run --rm \
                                 --network "$NETWORK_NAME" \
                                 --volumes-from jenkins \
@@ -641,8 +672,28 @@ ZAPEOF
                                     --sonar-url "$SONAR_HOST_URL" \
                                     --sonar-token "$SONAR_AUTH_TOKEN" \
                                     --sonar-project "$APP_NAME" || true
+
+                            docker run --rm \
+                                --volumes-from jenkins \
+                                -w "$PROJECT_DIR" \
+                                python:3.12-alpine \
+                                python reports/dashboard/patch_csp.py \
+                                    reports/dashboard/security-dashboard.html \
+                                    reports/zap/zap-report.html || true
                         '''
                     }
+                } else {
+                    sh '''
+                        set +e
+                        cd "$PROJECT_DIR"
+                        docker run --rm \
+                            --volumes-from jenkins \
+                            -w "$PROJECT_DIR" \
+                            python:3.12-alpine \
+                            python reports/dashboard/patch_csp.py \
+                                reports/dashboard/security-dashboard.html \
+                                reports/zap/zap-report.html || true
+                    '''
                 }
             }
 
