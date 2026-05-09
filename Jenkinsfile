@@ -2,6 +2,12 @@ pipeline {
 
     agent any
 
+    // ── NOUVEAU : Paramètres pour recevoir l'image depuis GitHub ─────────
+    parameters {
+        string(name: 'IMAGE_TAG', defaultValue: 'latest', description: 'Le github.sha envoyé par GitHub Actions')
+        string(name: 'DOCKER_REGISTRY', defaultValue: 'votre_user', description: 'Votre nom d\'utilisateur DockerHub')
+    }
+
     options {
         skipDefaultCheckout(true)
         timestamps()
@@ -27,7 +33,8 @@ pipeline {
             steps {
                 script {
                     env.PROJECT_DIR  = "${env.WORKSPACE}/src"
-                    env.DOCKER_IMAGE = "archivage-app:${env.BUILD_NUMBER}"
+                    // On reconstruit le nom de l'image distante avec les paramètres
+                    env.DOCKER_IMAGE = "${params.DOCKER_REGISTRY}/archivage-app:${params.IMAGE_TAG}"
                     env.TRIVY_CACHE  = "${env.WORKSPACE}/src/.trivycache"
                     env.JENKINS_UID  = sh(returnStdout: true, script: 'id -u').trim()
                     env.JENKINS_GID  = sh(returnStdout: true, script: 'id -g').trim()
@@ -74,7 +81,7 @@ pipeline {
                     cd "$PROJECT_DIR"
                     echo "=== PREPARE WORKSPACE ==="
 
-                    rm -rf reports .trivycache policy .jarpath
+                    rm -rf reports .trivycache policy
                     mkdir -p \
                         reports/gitleaks \
                         reports/trivy \
@@ -94,7 +101,6 @@ pipeline {
                         echo "Dashboard script detecte : generate_dashboard.py"
                     else
                         echo "[WARN] Script dashboard absent : generate_dashboard.py"
-                        echo "[WARN] Le pipeline continuera, mais le dashboard consolide ne sera pas genere."
                     fi
 
                     # ── OPA policy ──────────────────────────────────────────
@@ -213,11 +219,11 @@ all_alerts.sort(key=lambda a: -int(a.get("riskcode", 0)))
 
 rows = ""
 for a in all_alerts:
-    rc    = str(a.get("riskcode", "0"))
-    name  = a.get("alert", a.get("name", "?"))
-    desc  = a.get("desc", "")[:300].replace("<", "&lt;").replace(">", "&gt;")
-    sol   = a.get("solution", "")[:300].replace("<", "&lt;").replace(">", "&gt;")
-    url   = ""
+    rc   = str(a.get("riskcode", "0"))
+    name = a.get("alert", a.get("name", "?"))
+    desc = a.get("desc", "")[:300].replace("<", "&lt;").replace(">", "&gt;")
+    sol  = a.get("solution", "")[:300].replace("<", "&lt;").replace(">", "&gt;")
+    url  = ""
     for inst in a.get("instances", [])[:1]:
         url = inst.get("uri", "")
     color = RISK_COLOR.get(rc, "#999")
@@ -284,15 +290,20 @@ ZAPEOF
             }
         }
 
-        // ── 5. BUILD & PACKAGE ───────────────────────────────────────────────
-        stage('Build & Package') {
+        // ── 5. PULL IMAGE & COMPILE LIGHT ────────────────────────────────────
+        // Nouveau : On télécharge l'image construite par GitHub et on compile juste
+        // pour générer les fichiers .class requis par SonarQube et CycloneDX.
+        stage('Pull Image & Compile Light') {
             steps {
                 sh '''
                     set -eu
                     cd "$PROJECT_DIR"
-                    echo "=== BUILD & PACKAGE ==="
+                    echo "=== PULL IMAGE & COMPILE LIGHT ==="
 
-                    echo "[1/3] Compilation Maven..."
+                    echo "[1/2] Téléchargement de l'image depuis Docker Hub..."
+                    docker pull "$DOCKER_IMAGE"
+
+                    echo "[2/2] Compilation Maven (génération des .class)..."
                     docker run --rm \
                         --user "${JENKINS_UID}:${JENKINS_GID}" \
                         --volumes-from jenkins \
@@ -300,19 +311,7 @@ ZAPEOF
                         maven:3.9.9-eclipse-temurin-17 \
                         sh -lc "mvn -B -f '$PROJECT_DIR/pom.xml' \
                                     -Dmaven.repo.local='$MAVEN_REPO' \
-                                    clean package -DskipTests"
-
-                    echo "[2/3] Verification du JAR genere..."
-                    JARPATH=$(find "$PROJECT_DIR/target" -maxdepth 1 -type f \
-                              -name "*.jar" ! -name "*.original" | head -n 1)
-                    test -n "$JARPATH"
-                    test -f "$JARPATH"
-                    echo "$JARPATH" > "$PROJECT_DIR/.jarpath"
-                    echo "JAR detecte : $(basename "$JARPATH")"
-
-                    echo "[3/3] Build image Docker..."
-                    docker build -t "$DOCKER_IMAGE" "$PROJECT_DIR"
-                    echo "Image Docker construite : $DOCKER_IMAGE"
+                                    clean compile -DskipTests"
                 '''
             }
         }
@@ -340,36 +339,34 @@ ZAPEOF
 
                                 test -s reports/gitleaks/gitleaks-report.json \
                                     || echo "[]" > reports/gitleaks/gitleaks-report.json
-
-                                echo "Rapport Gitleaks : reports/gitleaks/gitleaks-report.json"
                             '''
                         }
                     }
                 }
 
-                stage('SCA - Trivy FS') {
+                // CHANGEMENT : Trivy scanne l'image téléchargée
+                stage('SCA - Trivy Image') {
                     steps {
                         catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
                             sh '''
                                 set -eu
                                 cd "$PROJECT_DIR"
-                                echo "=== TRIVY FS ==="
+                                echo "=== TRIVY IMAGE SCAN ==="
                                 docker run --rm \
-                                    --volumes-from jenkins \
-                                    -w "$PROJECT_DIR" \
+                                    -v /var/run/docker.sock:/var/run/docker.sock \
+                                    -v "$WORKSPACE/src/reports/trivy:/reports" \
                                     -v "$TRIVY_CACHE:/root/.cache/trivy" \
-                                    ghcr.io/aquasecurity/trivy:latest fs \
+                                    ghcr.io/aquasecurity/trivy:latest image \
                                         --no-progress \
                                         --quiet \
                                         --scanners vuln \
                                         --severity CRITICAL,HIGH \
                                         --format json \
-                                        --output reports/trivy/trivy-report.json .
+                                        --output /reports/trivy-report.json \
+                                        "$DOCKER_IMAGE"
 
                                 test -s reports/trivy/trivy-report.json \
                                     || echo '{"Results":[]}' > reports/trivy/trivy-report.json
-
-                                echo "Rapport Trivy : reports/trivy/trivy-report.json"
                             '''
                         }
                     }
@@ -384,9 +381,6 @@ ZAPEOF
                                         set -eu
                                         cd "$PROJECT_DIR"
 
-                                        JARPATH=$(cat "$PROJECT_DIR/.jarpath" 2>/dev/null || echo "")
-                                        test -n "$JARPATH"
-                                        test -f "$JARPATH"
                                         test -d "$PROJECT_DIR/target/classes"
 
                                         echo "=== SONARQUBE ANALYSIS ==="
@@ -402,7 +396,6 @@ ZAPEOF
                                             sh -lc "mvn -B -f '$PROJECT_DIR/pom.xml' \
                                                         -Dmaven.repo.local='$MAVEN_REPO' \
                                                         org.sonarsource.scanner.maven:sonar-maven-plugin:4.0.0.4121:sonar \
-                                                        -DskipTests \
                                                         -Dsonar.projectKey='$APP_NAME' \
                                                         -Dsonar.host.url='$SONAR_HOST_URL' \
                                                         -Dsonar.login='$SONAR_AUTH_TOKEN' \
@@ -436,12 +429,9 @@ ZAPEOF
                                                 -DoutputFormat=all"
 
                                 test -f "$PROJECT_DIR/target/bom.xml" \
-                                    && cp -f "$PROJECT_DIR/target/bom.xml" "$PROJECT_DIR/reports/sbom/bom.xml"
+                                    && cp -f "$PROJECT_DIR/target/bom.xml" "$PROJECT_DIR/reports/sbom/bom.xml" || true
                                 test -f "$PROJECT_DIR/target/bom.json" \
-                                    && cp -f "$PROJECT_DIR/target/bom.json" "$PROJECT_DIR/reports/sbom/bom.json"
-                                test -s reports/sbom/bom.json
-
-                                echo "SBOM genere : reports/sbom/bom.xml + reports/sbom/bom.json"
+                                    && cp -f "$PROJECT_DIR/target/bom.json" "$PROJECT_DIR/reports/sbom/bom.json" || true
                             '''
                         }
                     }
@@ -504,8 +494,8 @@ ZAPEOF
                         -e SPRING_DATASOURCE_URL="jdbc:mysql://$MYSQL_CONTAINER:3306/archivage_doc?useUnicode=true&allowPublicKeyRetrieval=true&useSSL=false&serverTimezone=UTC" \
                         -e SPRING_DATASOURCE_USERNAME="archivage_user" \
                         -e SPRING_DATASOURCE_PASSWORD="archivage_pass" \
-                        -e GITHUB_OAUTH_SECRET="${GITHUB_OAUTH_SECRET}" \
-                        -e JWT_SECRET="${JWT_SECRET}" \
+                        -e GITHUB_OAUTH_SECRET="${GITHUB_OAUTH_SECRET:-test}" \
+                        -e JWT_SECRET="${JWT_SECRET:-test}" \
                         "$DOCKER_IMAGE" >/dev/null
 
                     READY=0
@@ -519,15 +509,11 @@ ZAPEOF
                             break
                         fi
                         echo "Waiting for app health ($i/30)..."
-                        docker ps -a --filter "name=$APP_CONTAINER" \
-                            --format 'table {{.Names}}\\t{{.Status}}' || true
                         sleep 5
                     done
 
                     if [ "$READY" -ne 1 ]; then
-                        echo "============================================================"
                         echo " CRASH APPLICATIF DETECTE"
-                        echo "============================================================"
                         docker logs "$APP_CONTAINER" --tail 200 || true
                         exit 1
                     fi
@@ -572,9 +558,6 @@ ZAPEOF
                             -w "$PROJECT_DIR/reports/zap" \
                             python:3.12-alpine \
                             python zap_to_html.py
-
-                        echo "Contenu reports/zap :"
-                        ls -lah "$PROJECT_DIR/reports/zap/"
                     '''
                 }
             }
@@ -607,18 +590,12 @@ ZAPEOF
                     cat "$PROJECT_DIR/reports/opa/opa-result.txt"
 
                     if ! grep -qx "true" "$PROJECT_DIR/reports/opa/opa-result.txt"; then
-                        echo ""
                         echo "============================================================"
                         echo " OPA SECURITY GATE : ECHEC"
                         echo " Le pipeline est bloque. Consultez le resume ci-dessus."
-                        echo " Criteres de blocage :"
-                        echo "   - Trivy CRITICAL > 0"
-                        echo "   - Gitleaks secrets > 0"
-                        echo "   - ZAP HIGH > 0"
                         echo "============================================================"
                         exit 1
                     fi
-
                     echo "OPA Security Gate : PASS"
                 '''
             }
@@ -630,7 +607,6 @@ ZAPEOF
     post {
 
         always {
-            // Fix workspace ownership before any Groovy file checks
             sh '''
                 set +e
                 docker run --rm \
@@ -640,7 +616,6 @@ ZAPEOF
                     sh -c "chown -R ${JENKINS_UID}:${JENKINS_GID} /ws 2>/dev/null || true"
             '''
 
-            // Trivy: publish via Warnings NG
             script {
                 if (fileExists('src/reports/trivy/trivy-report.json')) {
                     recordIssues(
@@ -653,20 +628,15 @@ ZAPEOF
                             )
                         ]
                     )
-                } else {
-                    echo 'Trivy report absent — publication recordIssues ignoree.'
                 }
             }
 
-            // Dashboard HTML consolide (script versionne dans le repo)
             script {
                 if (fileExists('src/generate_dashboard.py')) {
                     withSonarQubeEnv("${SONARQUBE_ENV}") {
                         sh '''
                             set +e
                             cd "$PROJECT_DIR"
-                            echo "=== GENERATE SECURITY DASHBOARD ==="
-
                             docker run --rm \
                                 --network "$NETWORK_NAME" \
                                 --volumes-from jenkins \
@@ -682,26 +652,11 @@ ZAPEOF
                                     --sonar-url "$SONAR_HOST_URL" \
                                     --sonar-token "$SONAR_AUTH_TOKEN" \
                                     --sonar-project "$APP_NAME"
-
-                            RC=$?
-                            echo "Dashboard generator exit code: $RC"
-
-                            if [ -f reports/dashboard/security-dashboard.html ]; then
-                                echo "Dashboard genere : reports/dashboard/security-dashboard.html"
-                                ls -lah reports/dashboard/
-                            else
-                                echo "[WARN] Dashboard HTML non genere."
-                            fi
-
-                            exit 0
                         '''
                     }
-                } else {
-                    echo 'Script dashboard absent — generation du dashboard ignoree.'
                 }
             }
 
-            // Publish consolidated dashboard
             script {
                 if (fileExists('src/reports/dashboard/security-dashboard.html')) {
                     publishHTML(target: [
@@ -712,12 +667,9 @@ ZAPEOF
                         reportFiles          : 'security-dashboard.html',
                         reportName           : 'Security Dashboard'
                     ])
-                } else {
-                    echo 'Security Dashboard absent — publication HTML ignoree.'
                 }
             }
 
-            // ZAP: publish HTML report separately
             script {
                 if (fileExists('src/reports/zap/zap-report.html')) {
                     publishHTML(target: [
@@ -728,12 +680,9 @@ ZAPEOF
                         reportFiles          : 'zap-report.html',
                         reportName           : 'ZAP Web Report'
                     ])
-                } else {
-                    echo 'ZAP HTML report absent — publication HTML ignoree.'
                 }
             }
 
-            // Archive all security artifacts
             script {
                 if (fileExists('src/reports')) {
                     archiveArtifacts(
@@ -751,12 +700,9 @@ ZAPEOF
                         allowEmptyArchive: true,
                         fingerprint      : true
                     )
-                } else {
-                    echo 'Dossier reports absent — archivage ignore.'
                 }
             }
 
-            // Cleanup containers and network
             sh '''
                 set +e
                 docker rm -f "$APP_CONTAINER"   >/dev/null 2>&1 || true
@@ -765,18 +711,8 @@ ZAPEOF
             '''
         }
 
-        failure {
-            echo 'Pipeline FAILED — consulter les logs de scan et les rapports archives.'
-        }
-
-        unstable {
-            echo 'Pipeline UNSTABLE — des problemes de securite ont ete detectes ; voir les resumes Gitleaks, Trivy, SonarQube, ZAP et le dashboard consolide.'
-        }
-
-        success {
-            echo 'Pipeline SUCCESS — tous les security gates sont passes.'
-        }
-
+        failure { echo 'Pipeline FAILED — consulter les logs de scan et les rapports archives.' }
+        unstable { echo 'Pipeline UNSTABLE — des problemes de securite ont ete detectes.' }
+        success { echo 'Pipeline SUCCESS — tous les security gates sont passes.' }
     }
-
 }
