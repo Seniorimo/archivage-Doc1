@@ -804,17 +804,17 @@ PYEOF
                 rm -f reports/zap/zap-report.json reports/zap/zap-report.html
 
                 docker run --rm \
-                    --user root \
-                    --network "$NETWORK_NAME" \
-                    -v "$PROJECT_DIR/reports/zap:/zap/wrk:rw" \
-                    ghcr.io/zaproxy/zaproxy:stable \
-                    sh -lc '
-                        status=0
-                        cd /zap || exit 1
-                        ./zap-baseline.py -t "http://'"$APP_CONTAINER"':'"$APP_PORT"'/" -a -j -I 2>&1 | tee /zap/wrk/zap-baseline.log || status=$?
-                        echo "$status" > /zap/wrk/zap-exit-code.txt
-                        exit 0
-                    '
+            --user root \
+    --network "$NETWORK_NAME" \
+    -v "$PROJECT_DIR/reports/zap:/zap/wrk:rw" \
+    ghcr.io/zaproxy/zaproxy:stable \
+    sh -lc '
+        status=0
+        cd /zap || exit 1
+        ./zap-baseline.py -t "http://'"$APP_CONTAINER"':'"$APP_PORT"'/" -a -j -I > /zap/wrk/zap-baseline.log 2>&1 || status=$?
+        echo "$status" > /zap/wrk/zap-exit-code.txt
+        exit 0
+    '
 
                 test -s reports/zap/zap-baseline.log \
                     || { echo "[ERREUR] zap-baseline.log absent ou vide"; exit 1; }
