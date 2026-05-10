@@ -646,15 +646,16 @@ PYEOF
 
                         TARGET_URL="http://$APP_CONTAINER:$APP_PORT/"
 
-                        # ZAP a besoin d'un environnement propre.
-                        # --volumes-from jenkins pollue /root et /home du container ZAP
-                        # et provoque un crash immediat avec exit code 3.
-                        # On monte UNIQUEMENT le dossier reports/zap via bind mount direct.
-                        # ZAP ecrit ses fichiers dans /zap/wrk mappe sur reports/zap.
+                        # Créer un volume Docker nommé et y copier rien (juste init)
+                        # Puis lancer ZAP qui écrit dans ce volume
+                        # Enfin copier les résultats depuis le volume vers reports/zap
+                        ZAP_VOL="zap-reports-$$"
+                        docker volume create "$ZAP_VOL" >/dev/null
+
                         docker run --rm \
                             --user root \
                             --network "$NETWORK_NAME" \
-                            -v "$PROJECT_DIR/reports/zap:/zap/wrk:rw" \
+                            -v "${ZAP_VOL}:/zap/wrk:rw" \
                             -e HOME=/zap \
                             ghcr.io/zaproxy/zaproxy:stable \
                             bash -c '
@@ -664,24 +665,29 @@ PYEOF
                                     -a -I \
                                     -J /zap/wrk/zap-report.json \
                                     -r /zap/wrk/zap-report.html \
-                                    > /zap/wrk/zap-baseline.log 2>&1 || status=$?
-                                echo "$status" > /zap/wrk/zap-exit-code.txt
+                                    2>&1 | tee /zap/wrk/zap-baseline.log
+                                echo "$?" > /zap/wrk/zap-exit-code.txt
                                 exit 0
-                            '
+                            ' || true
 
-                        # Vérification du log
+                        # Copier les fichiers du volume vers le workspace Jenkins
+                        docker run --rm \
+                            --volumes-from "$JENKINS_CONTAINER" \
+                            -v "${ZAP_VOL}:/zap/wrk:ro" \
+                            alpine:3.19 \
+                            sh -c "cp -f /zap/wrk/* $PROJECT_DIR/reports/zap/ 2>/dev/null || true"
+
+                        docker volume rm "$ZAP_VOL" >/dev/null 2>&1 || true
+
                         test -s reports/zap/zap-baseline.log \
                             || { echo "[ERREUR] zap-baseline.log absent ou vide"; exit 1; }
 
-                        # Affichage du code de sortie ZAP pour diagnostic
                         echo "ZAP exit code : $(cat reports/zap/zap-exit-code.txt)"
 
-                        # Fallback JSON si ZAP n'en a pas produit (scan vide)
                         test -s reports/zap/zap-report.json \
                             || echo '{"site":[{"@name":"baseline-scan","alerts":[]}]}' \
                                > reports/zap/zap-report.json
 
-                        # Fallback HTML minimaliste si ZAP n'en a pas produit
                         if [ ! -s reports/zap/zap-report.html ]; then
                             echo "<html><body><p>Aucune alerte ZAP détectée.</p></body></html>" \
                                 > reports/zap/zap-report.html
