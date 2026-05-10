@@ -149,7 +149,7 @@ REGO
         }
 
         // ── 5. COMPILE LIGHT ────────────────────────────────────────────────
-        // ⚠️  FIXED: Removed --volumes-from (assumes Jenkins in container)
+        // ⚠️  FIXED: Point to backend/pom.xml (Spring Boot app is in backend/ subdirectory)
         stage('Compile Light') {
             steps {
                 sh '''
@@ -158,13 +158,14 @@ REGO
                     echo "=== COMPILE LIGHT ==="
                     
                     # Using direct volume mount instead of --volumes-from
+                    # ⚠️  IMPORTANT: pom.xml is in backend/ subdirectory
                     docker run --rm \
                         --user "${JENKINS_UID}:${JENKINS_GID}" \
                         -v "$MAVEN_REPO:$MAVEN_REPO:rw" \
                         -v "$PROJECT_DIR:$PROJECT_DIR:rw" \
-                        -w "$PROJECT_DIR" \
+                        -w "$PROJECT_DIR/backend" \
                         maven:3.9.9-eclipse-temurin-17 \
-                        sh -lc "mvn -B -f '$PROJECT_DIR/pom.xml' \
+                        sh -lc "mvn -B -f '$PROJECT_DIR/backend/pom.xml' \
                                     -Dmaven.repo.local='$MAVEN_REPO' \
                                     clean compile -DskipTests"
                     
@@ -254,7 +255,8 @@ REGO
                                         cd "$PROJECT_DIR"
                                         echo "=== SONARQUBE SAST ANALYSIS ==="
                                         
-                                        test -d "$PROJECT_DIR/target/classes" || {
+                                        # ⚠️  FIXED: Point to backend/target/classes
+                                        test -d "$PROJECT_DIR/backend/target/classes" || {
                                             echo "⚠️  No compiled classes found, skipping SonarQube"
                                             exit 0
                                         }
@@ -265,17 +267,17 @@ REGO
                                             --network "$NETWORK_NAME" \
                                             -v "$MAVEN_REPO:$MAVEN_REPO:rw" \
                                             -v "$PROJECT_DIR:$PROJECT_DIR:rw" \
-                                            -w "$PROJECT_DIR" \
+                                            -w "$PROJECT_DIR/backend" \
                                             -e SONAR_HOST_URL="$SONAR_HOST_URL" \
                                             -e SONAR_AUTH_TOKEN="$SONAR_AUTH_TOKEN" \
                                             maven:3.9.9-eclipse-temurin-17 \
-                                            sh -lc "mvn -B -f '$PROJECT_DIR/pom.xml' \
+                                            sh -lc "mvn -B -f '$PROJECT_DIR/backend/pom.xml' \
                                                         -Dmaven.repo.local='$MAVEN_REPO' \
                                                         org.sonarsource.scanner.maven:sonar-maven-plugin:4.0.0.4121:sonar \
                                                         -Dsonar.projectKey='$APP_NAME' \
                                                         -Dsonar.host.url='$SONAR_HOST_URL' \
                                                         -Dsonar.token='$SONAR_AUTH_TOKEN' \
-                                                        -Dsonar.java.binaries='target/classes'"
+                                                        -Dsonar.java.binaries='backend/target/classes'"
                                         
                                         echo "✅ SonarQube analysis completed"
                                     '''
@@ -296,21 +298,23 @@ REGO
                                 cd "$PROJECT_DIR"
                                 echo "=== CYCLONEDX SBOM GENERATION ==="
                                 
+                                # ⚠️  FIXED: Point to backend/pom.xml
                                 docker run --rm \
                                     --user "${JENKINS_UID}:${JENKINS_GID}" \
                                     -v "$MAVEN_REPO:$MAVEN_REPO:rw" \
                                     -v "$PROJECT_DIR:$PROJECT_DIR:rw" \
-                                    -w "$PROJECT_DIR" \
+                                    -w "$PROJECT_DIR/backend" \
                                     maven:3.9.9-eclipse-temurin-17 \
-                                    sh -lc "mvn -B -f '$PROJECT_DIR/pom.xml' \
+                                    sh -lc "mvn -B -f '$PROJECT_DIR/backend/pom.xml' \
                                                 -Dmaven.repo.local='$MAVEN_REPO' \
                                                 org.cyclonedx:cyclonedx-maven-plugin:2.7.11:makeAggregateBom \
                                                 -DoutputFormat=all"
 
-                                test -f "$PROJECT_DIR/target/bom.xml" \
-                                    && cp -f "$PROJECT_DIR/target/bom.xml" "$PROJECT_DIR/reports/sbom/bom.xml" || true
-                                test -f "$PROJECT_DIR/target/bom.json" \
-                                    && cp -f "$PROJECT_DIR/target/bom.json" "$PROJECT_DIR/reports/sbom/bom.json" || true
+                                # ⚠️  FIXED: Copy from backend/target/
+                                test -f "$PROJECT_DIR/backend/target/bom.xml" \
+                                    && cp -f "$PROJECT_DIR/backend/target/bom.xml" "$PROJECT_DIR/reports/sbom/bom.xml" || true
+                                test -f "$PROJECT_DIR/backend/target/bom.json" \
+                                    && cp -f "$PROJECT_DIR/backend/target/bom.json" "$PROJECT_DIR/reports/sbom/bom.json" || true
                                 
                                 echo "✅ CycloneDX SBOM completed"
                             '''
