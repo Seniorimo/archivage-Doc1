@@ -18,7 +18,7 @@ pipeline {
         APP_PORT          = '8090'
         MAVEN_REPO        = '/var/jenkins_home/.m2/repository'
         SONARQUBE_ENV     = 'sonar'
-        JENKINS_CONTAINER = 'jenkins'   // si ton conteneur Jenkins a un autre nom, change ici
+        JENKINS_CONTAINER = 'jenkins'
     }
 
     stages {
@@ -232,6 +232,61 @@ html = f"""<!DOCTYPE html>
 out.write_text(html, encoding="utf-8")
 print("Rapport HTML ZAP généré : " + str(out))
 ZAPEOF
+
+                    cat > reports/opa/build_opa_input.py <<'PYEOF'
+import json
+import sys
+from pathlib import Path
+
+def load_json(path, default):
+    p = Path(path)
+    if not p.exists() or p.stat().st_size == 0:
+        return default
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception as e:
+        print(f"[WARN] {path}: {e}", file=sys.stderr)
+        return default
+
+gitleaks = load_json("reports/gitleaks/gitleaks-report.json", [])
+trivy    = load_json("reports/trivy/trivy-report.json", {"Results": []})
+zap      = load_json("reports/zap/zap-report.json", {"site": [{"alerts": []}]})
+
+sev = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
+for result in trivy.get("Results", []) or []:
+    for v in result.get("Vulnerabilities", []) or []:
+        s = (v.get("Severity") or "").upper()
+        if s in sev:
+            sev[s] += 1
+
+zap_high = 0
+for site in zap.get("site", []) or []:
+    for alert in site.get("alerts", []) or []:
+        if str(alert.get("riskcode", 0)) == "3":
+            zap_high += 1
+
+payload = {
+    "gitleaks": gitleaks if isinstance(gitleaks, list) else [],
+    "trivy": {
+        "critical": sev["CRITICAL"],
+        "high": sev["HIGH"],
+        "medium": sev["MEDIUM"],
+        "low": sev["LOW"]
+    },
+    "zap": {"high": zap_high}
+}
+
+Path("reports/opa").mkdir(parents=True, exist_ok=True)
+Path("reports/opa/input.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+print("=== OPA INPUT SUMMARY ===")
+print(f"  Gitleaks secrets : {len(payload['gitleaks'])}")
+print(f"  Trivy CRITICAL   : {sev['CRITICAL']}")
+print(f"  Trivy HIGH       : {sev['HIGH']}")
+print(f"  ZAP HIGH         : {zap_high}")
+print("=========================")
+print("OPA input generated")
+PYEOF
 
                     cat > reports/dashboard/patch_csp.py <<'PYEOF'
 from pathlib import Path
@@ -819,9 +874,8 @@ PYDASH
                         chmod 777 "$PROJECT_DIR/reports/zap"
 
                         docker run --rm \
-                            --volumes-from "$JENKINS_CONTAINER" \
                             --network "$NETWORK_NAME" \
-                            -w "$PROJECT_DIR/reports/zap" \
+                            -v "$PROJECT_DIR/reports/zap:/zap/wrk:rw" \
                             ghcr.io/zaproxy/zaproxy:stable \
                             zap-baseline.py \
                                 -t "http://$APP_CONTAINER:$APP_PORT/" \
@@ -855,59 +909,9 @@ PYDASH
                         --volumes-from "$JENKINS_CONTAINER" \
                         -w "$PROJECT_DIR" \
                         python:3.12-alpine \
-                        python - <<'PYEOF'
-import json
-import sys
-from pathlib import Path
+                        python reports/opa/build_opa_input.py
 
-def load_json(path, default):
-    p = Path(path)
-    if not p.exists() or p.stat().st_size == 0:
-        return default
-    try:
-        return json.loads(p.read_text(encoding="utf-8"))
-    except Exception as e:
-        print(f"[WARN] {path}: {e}", file=sys.stderr)
-        return default
-
-gitleaks = load_json("reports/gitleaks/gitleaks-report.json", [])
-trivy    = load_json("reports/trivy/trivy-report.json", {"Results": []})
-zap      = load_json("reports/zap/zap-report.json", {"site": [{"alerts": []}]})
-
-sev = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
-for result in trivy.get("Results", []) or []:
-    for v in result.get("Vulnerabilities", []) or []:
-        s = (v.get("Severity") or "").upper()
-        if s in sev:
-            sev[s] += 1
-
-zap_high = 0
-for site in zap.get("site", []) or []:
-    for alert in site.get("alerts", []) or []:
-        if str(alert.get("riskcode", 0)) == "3":
-            zap_high += 1
-
-payload = {
-    "gitleaks": gitleaks if isinstance(gitleaks, list) else [],
-    "trivy": {
-        "critical": sev["CRITICAL"],
-        "high": sev["HIGH"],
-        "medium": sev["MEDIUM"],
-        "low": sev["LOW"]
-    },
-    "zap": {"high": zap_high}
-}
-
-Path("reports/opa").mkdir(parents=True, exist_ok=True)
-Path("reports/opa/input.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
-
-print("=== OPA INPUT SUMMARY ===")
-print(f"  Gitleaks secrets : {len(payload['gitleaks'])}")
-print(f"  Trivy CRITICAL   : {sev['CRITICAL']}")
-print(f"  Trivy HIGH       : {sev['HIGH']}")
-print(f"  ZAP HIGH         : {zap_high}")
-print("=========================")
-PYEOF
+                    test -f "$PROJECT_DIR/reports/opa/input.json"
 
                     docker run --rm \
                         --volumes-from "$JENKINS_CONTAINER" \
@@ -952,7 +956,7 @@ PYEOF
             // ── Dashboard consolidé ──────────────────────────────────────
             script {
                 if (fileExists('src/reports/dashboard/generate_dashboard.py')) {
-                    withSonarQubeEnv("${SONARQUBE_ENV}", envOnly: true) {
+                    withSonarQubeEnv("${SONARQUBE_ENV}") {
                         sh '''
                             set +e
                             cd "$PROJECT_DIR"
@@ -964,16 +968,16 @@ PYEOF
                                 --volumes-from "$JENKINS_CONTAINER" \
                                 --network "$NETWORK_NAME" \
                                 --add-host=host.docker.internal:host-gateway \
-                                -e SONAR_HOST_URL="${SONAR_HOST_URL:-}" \
-                                -e SONAR_AUTH_TOKEN="${SONAR_AUTH_TOKEN:-}" \
+                                -e SONAR_HOST_URL="$SONAR_HOST_URL" \
+                                -e SONAR_AUTH_TOKEN="$SONAR_AUTH_TOKEN" \
                                 -w "$PROJECT_DIR" \
                                 python:3.12-alpine \
                                 python reports/dashboard/generate_dashboard.py \
                                     --reports reports \
                                     --output reports/dashboard/security-dashboard.html \
                                     --project "$APP_NAME" \
-                                    --sonar-url "${SONAR_HOST_URL:-}" \
-                                    --sonar-token "${SONAR_AUTH_TOKEN:-}" \
+                                    --sonar-url "$SONAR_HOST_URL" \
+                                    --sonar-token "$SONAR_AUTH_TOKEN" \
                                     --sonar-project "$APP_NAME" || true
                         '''
                     }
