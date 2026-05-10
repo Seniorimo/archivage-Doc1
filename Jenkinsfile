@@ -6,7 +6,7 @@ pipeline {
         string(
             name: 'IMAGE_TAG',
             defaultValue: '',
-            description: 'Optionnel. Si vide, le tag est deduit automatiquement du commit checkouté (git SHA).'
+            description: 'Optionnel. Si vide, le tag est déduit automatiquement du commit checkouté (git SHA).'
         )
     }
 
@@ -58,7 +58,7 @@ pipeline {
                             chown -R ${JENKINS_UID}:${JENKINS_GID} /ws
                             ls -la /ws
                         "
-                    echo "Workspace nettoye de force avec succes."
+                    echo "Workspace nettoyé de force avec succès."
                 '''
             }
         }
@@ -93,24 +93,25 @@ pipeline {
                     passwordVariable: 'DOCKER_HUB_PASSWORD'
                 )]) {
                     script {
-                        env.RESOLVED_IMAGE_TAG = params.IMAGE_TAG?.trim()
-                        if (!env.RESOLVED_IMAGE_TAG) {
-                            env.RESOLVED_IMAGE_TAG = env.GIT_SHA
-                            echo "IMAGE_TAG non fourni -> tag deduit automatiquement du commit : ${env.RESOLVED_IMAGE_TAG}"
-                        } else {
+                        // Priorité : paramètre manuel → SHA du commit
+                        env.RESOLVED_IMAGE_TAG = params.IMAGE_TAG?.trim() ?: env.GIT_SHA
+
+                        if (params.IMAGE_TAG?.trim()) {
                             echo "IMAGE_TAG fourni manuellement : ${env.RESOLVED_IMAGE_TAG}"
+                        } else {
+                            echo "IMAGE_TAG non fourni → tag déduit du commit : ${env.RESOLVED_IMAGE_TAG}"
                         }
 
                         env.DOCKER_IMAGE = "${env.DOCKER_HUB_USERNAME}/archivage-app:${env.RESOLVED_IMAGE_TAG}"
+                        echo "Image cible : ${env.DOCKER_IMAGE}"
                     }
 
                     sh '''
                         set -eu
                         echo "=== LOGIN & PULL IMAGE ==="
-                        echo "Image cible : $DOCKER_IMAGE"
                         echo "$DOCKER_HUB_PASSWORD" | docker login -u "$DOCKER_HUB_USERNAME" --password-stdin
                         docker pull "$DOCKER_IMAGE"
-                        echo "Image recuperee : $DOCKER_IMAGE"
+                        echo "Image récupérée : $DOCKER_IMAGE"
                     '''
                 }
             }
@@ -140,7 +141,7 @@ pipeline {
 
                     if [ -f generate_dashboard.py ]; then
                         chmod +x generate_dashboard.py || true
-                        echo "Dashboard script detecte : generate_dashboard.py"
+                        echo "Dashboard script détecté : generate_dashboard.py"
                     else
                         echo "[WARN] Script dashboard absent : generate_dashboard.py"
                     fi
@@ -296,14 +297,14 @@ html = f"""<!DOCTYPE html>
   <table>
     <thead><tr><th>Risque</th><th>Alerte</th><th>Description</th><th>Solution</th></tr></thead>
     <tbody>
-      {rows if rows else '<tr><td colspan="4" style="text-align:center;padding:30px;color:#27ae60"><strong>Aucune alerte detectee</strong></td></tr>'}
+      {rows if rows else '<tr><td colspan="4" style="text-align:center;padding:30px;color:#27ae60"><strong>Aucune alerte détectée</strong></td></tr>'}
     </tbody>
   </table>
 </body>
 </html>"""
 
 out.write_text(html, encoding="utf-8")
-print("Rapport HTML ZAP genere : " + str(out))
+print("Rapport HTML ZAP généré : " + str(out))
 ZAPEOF
 
                     cat > reports/dashboard/patch_csp.py <<'PYEOF'
@@ -317,26 +318,22 @@ def patch(path_str: str):
     if not p.exists():
         print(f"[SKIP] Fichier absent : {p}")
         return
-
     html = p.read_text(encoding="utf-8", errors="ignore")
-
     if 'http-equiv="Content-Security-Policy"' in html or "http-equiv='Content-Security-Policy'" in html:
-        print(f"[OK] CSP deja presente : {p}")
+        print(f"[OK] CSP déjà présente : {p}")
         return
-
     if "<head>" in html:
-        html = html.replace("<head>", "<head>\\n  " + META, 1)
+        html = html.replace("<head>", "<head>\n  " + META, 1)
     else:
-        html = META + "\\n" + html
-
+        html = META + "\n" + html
     p.write_text(html, encoding="utf-8")
-    print(f"[OK] CSP ajoutee : {p}")
+    print(f"[OK] CSP ajoutée : {p}")
 
 for target in sys.argv[1:]:
     patch(target)
 PYEOF
 
-                    echo "Workspace prepare avec succes."
+                    echo "Workspace préparé avec succès."
                 '''
             }
         }
@@ -348,7 +345,6 @@ PYEOF
                     set -eu
                     cd "$PROJECT_DIR"
                     echo "=== COMPILE LIGHT ==="
-
                     docker run --rm \
                         --user "${JENKINS_UID}:${JENKINS_GID}" \
                         --volumes-from jenkins \
@@ -500,7 +496,7 @@ PYEOF
                         sleep 5
                     done
 
-                    test "$READY" -eq 1 || { echo "MySQL ne repond pas apres 30 tentatives."; exit 1; }
+                    test "$READY" -eq 1 || { echo "MySQL ne répond pas après 30 tentatives."; exit 1; }
                     sleep 10
                 '''
             }
@@ -655,7 +651,8 @@ PYEOF
                             set +e
                             cd "$PROJECT_DIR"
                             mkdir -p reports/dashboard
-                            docker network inspect "$NETWORK_NAME" >/dev/null 2>&1 || docker network create "$NETWORK_NAME" >/dev/null 2>&1 || true
+                            docker network inspect "$NETWORK_NAME" >/dev/null 2>&1 \
+                                || docker network create "$NETWORK_NAME" >/dev/null 2>&1 || true
 
                             docker run --rm \
                                 --network "$NETWORK_NAME" \
@@ -753,15 +750,15 @@ PYEOF
         }
 
         failure {
-            echo 'Pipeline FAILED — consulter les logs de scan et les rapports archives.'
+            echo 'Pipeline FAILED — consulter les logs de scan et les rapports archivés.'
         }
 
         unstable {
-            echo 'Pipeline UNSTABLE — des problemes de securite ont ete detectes.'
+            echo 'Pipeline UNSTABLE — des problèmes de sécurité ont été détectés.'
         }
 
         success {
-            echo 'Pipeline SUCCESS — tous les security gates sont passes.'
+            echo 'Pipeline SUCCESS — tous les security gates sont passés.'
         }
     }
 }
