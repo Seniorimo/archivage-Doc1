@@ -11,13 +11,14 @@ pipeline {
     }
 
     environment {
-        APP_NAME        = 'archivage-Doc'
-        APP_CONTAINER   = 'app-archivage'
-        MYSQL_CONTAINER = 'mysql-archivage'
-        NETWORK_NAME    = 'archivage-net'
-        APP_PORT        = '8090'
-        MAVEN_REPO      = '/var/jenkins_home/.m2/repository'
-        SONARQUBE_ENV   = 'sonar'
+        APP_NAME           = 'archivage-Doc'
+        APP_CONTAINER      = 'app-archivage'
+        MYSQL_CONTAINER    = 'mysql-archivage'
+        NETWORK_NAME       = 'archivage-net'
+        APP_PORT           = '8090'
+        MAVEN_REPO         = '/var/jenkins_home/.m2/repository'
+        SONARQUBE_ENV      = 'sonar'
+        JENKINS_CONTAINER  = 'jenkins'   // ← adapter si votre conteneur a un autre nom
     }
 
     stages {
@@ -190,6 +191,7 @@ PY
                     sh '''
                         set -eu
                         echo "=== LOGIN & PULL IMAGE ==="
+                        trap 'docker logout >/dev/null 2>&1 || true' EXIT
                         echo "$DOCKER_HUB_PASSWORD" | docker login -u "$DOCKER_HUB_USERNAME" --password-stdin
                         docker pull "$DOCKER_IMAGE"
                         echo "Image récupérée : $DOCKER_IMAGE"
@@ -428,7 +430,7 @@ PYEOF
                     echo "=== COMPILE LIGHT ==="
                     docker run --rm \
                         --user "${JENKINS_UID}:${JENKINS_GID}" \
-                        --volumes-from jenkins \
+                        --volumes-from $JENKINS_CONTAINER \
                         -w "$PROJECT_DIR" \
                         maven:3.9.9-eclipse-temurin-17 \
                         sh -lc "mvn -B -f '$PROJECT_DIR/pom.xml' \
@@ -449,7 +451,7 @@ PYEOF
                                 set -eu
                                 cd "$PROJECT_DIR"
                                 docker run --rm \
-                                    --volumes-from jenkins \
+                                    --volumes-from $JENKINS_CONTAINER \
                                     -w "$PROJECT_DIR" \
                                     zricethezav/gitleaks:latest detect \
                                         --source . \
@@ -504,7 +506,7 @@ PYEOF
                                         docker run --rm \
                                             --user "${JENKINS_UID}:${JENKINS_GID}" \
                                             --network "$NETWORK_NAME" \
-                                            --volumes-from jenkins \
+                                            --volumes-from $JENKINS_CONTAINER \
                                             --add-host=host.docker.internal:host-gateway \
                                             -e SONAR_HOST_URL="$SONAR_HOST_URL" \
                                             -e SONAR_AUTH_TOKEN="$SONAR_AUTH_TOKEN" \
@@ -532,7 +534,7 @@ PYEOF
                                 cd "$PROJECT_DIR"
                                 docker run --rm \
                                     --user "${JENKINS_UID}:${JENKINS_GID}" \
-                                    --volumes-from jenkins \
+                                    --volumes-from $JENKINS_CONTAINER \
                                     -w "$PROJECT_DIR" \
                                     maven:3.9.9-eclipse-temurin-17 \
                                     sh -lc "mvn -B -f '$PROJECT_DIR/pom.xml' \
@@ -586,41 +588,46 @@ PYEOF
         // ── 9. DEPLOY APP ────────────────────────────────────────────────────
         stage('Deploy App') {
             steps {
-                sh '''
-                    set -eu
-                    docker rm -f "$APP_CONTAINER" >/dev/null 2>&1 || true
-                    mkdir -p "$PROJECT_DIR/uploads"
+                withCredentials([
+                    string(credentialsId: 'github-oauth-secret', variable: 'GITHUB_OAUTH_SECRET'),
+                    string(credentialsId: 'jwt-secret',          variable: 'JWT_SECRET')
+                ]) {
+                    sh '''
+                        set -eu
+                        docker rm -f "$APP_CONTAINER" >/dev/null 2>&1 || true
+                        mkdir -p "$PROJECT_DIR/uploads"
 
-                    docker run -d \
-                        --name "$APP_CONTAINER" \
-                        --network "$NETWORK_NAME" \
-                        --restart on-failure:5 \
-                        -v "$PROJECT_DIR/uploads:/app/uploads" \
-                        -e SPRING_PROFILES_ACTIVE=docker \
-                        -e SPRING_DATASOURCE_URL="jdbc:mysql://$MYSQL_CONTAINER:3306/archivage_doc?useUnicode=true&allowPublicKeyRetrieval=true&useSSL=false&serverTimezone=UTC" \
-                        -e SPRING_DATASOURCE_USERNAME="archivage_user" \
-                        -e SPRING_DATASOURCE_PASSWORD="archivage_pass" \
-                        -e GITHUB_OAUTH_SECRET="${GITHUB_OAUTH_SECRET:-test}" \
-                        -e JWT_SECRET="${JWT_SECRET:-test}" \
-                        "$DOCKER_IMAGE" >/dev/null
+                        docker run -d \
+                            --name "$APP_CONTAINER" \
+                            --network "$NETWORK_NAME" \
+                            --restart on-failure:5 \
+                            -v "$PROJECT_DIR/uploads:/app/uploads" \
+                            -e SPRING_PROFILES_ACTIVE=docker \
+                            -e SPRING_DATASOURCE_URL="jdbc:mysql://$MYSQL_CONTAINER:3306/archivage_doc?useUnicode=true&allowPublicKeyRetrieval=true&useSSL=false&serverTimezone=UTC" \
+                            -e SPRING_DATASOURCE_USERNAME="archivage_user" \
+                            -e SPRING_DATASOURCE_PASSWORD="archivage_pass" \
+                            -e GITHUB_OAUTH_SECRET="$GITHUB_OAUTH_SECRET" \
+                            -e JWT_SECRET="$JWT_SECRET" \
+                            "$DOCKER_IMAGE" >/dev/null
 
-                    READY=0
-                    for i in $(seq 1 30); do
-                        CODE=$(docker run --rm --network "$NETWORK_NAME" curlimages/curl:8.7.1 \
-                               -s -o /dev/null -w "%{http_code}" \
-                               "http://$APP_CONTAINER:$APP_PORT/actuator/health" || true)
-                        if echo "$CODE" | grep -qE "200|301|302|401|403|404"; then
-                            READY=1
-                            break
+                        READY=0
+                        for i in $(seq 1 30); do
+                            CODE=$(docker run --rm --network "$NETWORK_NAME" curlimages/curl:8.7.1 \
+                                   -s -o /dev/null -w "%{http_code}" \
+                                   "http://$APP_CONTAINER:$APP_PORT/actuator/health" || true)
+                            if echo "$CODE" | grep -qE "200|301|302|401|403|404"; then
+                                READY=1
+                                break
+                            fi
+                            sleep 5
+                        done
+
+                        if [ "$READY" -ne 1 ]; then
+                            docker logs "$APP_CONTAINER" --tail 200 || true
+                            exit 1
                         fi
-                        sleep 5
-                    done
-
-                    if [ "$READY" -ne 1 ]; then
-                        docker logs "$APP_CONTAINER" --tail 200 || true
-                        exit 1
-                    fi
-                '''
+                    '''
+                }
             }
         }
 
@@ -655,7 +662,7 @@ PYEOF
                             || echo '{"site":[{"alerts":[]}]}' > "$PROJECT_DIR/reports/zap/zap-report.json"
 
                         docker run --rm \
-                            --volumes-from jenkins \
+                            --volumes-from $JENKINS_CONTAINER \
                             -w "$PROJECT_DIR/reports/zap" \
                             python:3.12-alpine \
                             python zap_to_html.py
@@ -667,32 +674,34 @@ PYEOF
         // ── 11. POLICY - OPA SECURITY GATE ──────────────────────────────────
         stage('Policy - OPA Gate') {
             steps {
-                sh '''
-                    set -eu
+                catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
+                    sh '''
+                        set -eu
 
-                    docker run --rm \
-                        --volumes-from jenkins \
-                        -w "$PROJECT_DIR" \
-                        python:3.12-alpine \
-                        python reports/opa/build_input.py
+                        docker run --rm \
+                            --volumes-from $JENKINS_CONTAINER \
+                            -w "$PROJECT_DIR" \
+                            python:3.12-alpine \
+                            python reports/opa/build_input.py
 
-                    docker run --rm \
-                        --volumes-from jenkins \
-                        -w "$PROJECT_DIR" \
-                        openpolicyagent/opa:latest \
-                        eval \
-                            --format raw \
-                            --data "$PROJECT_DIR/policy/security-gate.rego" \
-                            --input "$PROJECT_DIR/reports/opa/input.json" \
-                            "data.security.allow" \
-                        > "$PROJECT_DIR/reports/opa/opa-result.txt"
+                        docker run --rm \
+                            --volumes-from $JENKINS_CONTAINER \
+                            -w "$PROJECT_DIR" \
+                            openpolicyagent/opa:latest \
+                            eval \
+                                --format raw \
+                                --data "$PROJECT_DIR/policy/security-gate.rego" \
+                                --input "$PROJECT_DIR/reports/opa/input.json" \
+                                "data.security.allow" \
+                            > "$PROJECT_DIR/reports/opa/opa-result.txt"
 
-                    cat "$PROJECT_DIR/reports/opa/opa-result.txt"
+                        cat "$PROJECT_DIR/reports/opa/opa-result.txt"
 
-                    if ! grep -qx "true" "$PROJECT_DIR/reports/opa/opa-result.txt"; then
-                        exit 1
-                    fi
-                '''
+                        if ! grep -qx "true" "$PROJECT_DIR/reports/opa/opa-result.txt"; then
+                            exit 1
+                        fi
+                    '''
+                }
             }
         }
     }
@@ -736,7 +745,7 @@ PYEOF
 
                             docker run --rm \
                                 --network "$NETWORK_NAME" \
-                                --volumes-from jenkins \
+                                --volumes-from $JENKINS_CONTAINER \
                                 --add-host=host.docker.internal:host-gateway \
                                 -e SONAR_HOST_URL="$SONAR_HOST_URL" \
                                 -e SONAR_AUTH_TOKEN="$SONAR_AUTH_TOKEN" \
@@ -760,7 +769,7 @@ PYEOF
                         set +e
                         cd "$PROJECT_DIR"
                         docker run --rm \
-                            --volumes-from jenkins \
+                            --volumes-from $JENKINS_CONTAINER \
                             -w "$PROJECT_DIR" \
                             python:3.12-alpine \
                             python reports/dashboard/patch_csp.py \
