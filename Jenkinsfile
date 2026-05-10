@@ -28,7 +28,7 @@ pipeline {
             steps {
                 script {
                     env.PROJECT_DIR = "${env.WORKSPACE}/src"
-                    env.TRIVY_CACHE = "${env.WORKSPACE}/src/.trivycache"
+                    env.TRIVY_CACHE = "/var/jenkins_home/.trivycache"
                     env.JENKINS_UID = sh(returnStdout: true, script: 'id -u').trim()
                     env.JENKINS_GID = sh(returnStdout: true, script: 'id -g').trim()
                 }
@@ -208,7 +208,7 @@ PY
                     cd "$PROJECT_DIR"
                     echo "=== PREPARE WORKSPACE ==="
 
-                    rm -rf reports .trivycache policy
+                    rm -rf reports policy
                     mkdir -p \
                         reports/gitleaks \
                         reports/trivy \
@@ -216,7 +216,6 @@ PY
                         reports/zap \
                         reports/opa \
                         reports/dashboard \
-                        .trivycache \
                         policy
 
                     docker network inspect "$NETWORK_NAME" >/dev/null 2>&1 \
@@ -476,11 +475,17 @@ PYEOF
 
                                 echo "=== TRIVY : vérification socket Docker ==="
                                 test -S /var/run/docker.sock \
-                                    || { echo "[ERREUR] /var/run/docker.sock absent ou inaccessible"; exit 1; }
+                                    || { echo "[ERREUR] /var/run/docker.sock absent"; exit 1; }
 
                                 echo "=== TRIVY : vérification image locale ==="
                                 docker image inspect "$DOCKER_IMAGE" >/dev/null 2>&1 \
-                                    || { echo "[ERREUR] Image $DOCKER_IMAGE absente localement"; exit 1; }
+                                    || { echo "[ERREUR] Image absente localement"; exit 1; }
+
+                                echo "=== TRIVY : préparation dossier sortie ==="
+                                mkdir -p "$PROJECT_DIR/reports/trivy"
+                                chmod 777 "$PROJECT_DIR/reports/trivy"
+                                touch "$PROJECT_DIR/reports/trivy/trivy-report.json"
+                                chmod 666 "$PROJECT_DIR/reports/trivy/trivy-report.json"
 
                                 echo "=== TRIVY : scan JSON en cours ==="
                                 docker run --rm \
@@ -495,20 +500,18 @@ PYEOF
                                         --output /trivy-reports/trivy-report.json \
                                         "$DOCKER_IMAGE"
 
+                                echo "=== TRIVY : correction permissions post-scan ==="
+                                docker run --rm \
+                                    -u 0:0 \
+                                    -v "$PROJECT_DIR/reports/trivy:/trivy-reports" \
+                                    alpine:3.19 \
+                                    sh -c "chown -R ${JENKINS_UID}:${JENKINS_GID} /trivy-reports || true"
+
                                 echo "=== TRIVY : vérification fichier ==="
                                 if test -s "$PROJECT_DIR/reports/trivy/trivy-report.json"; then
-                                    echo "[OK] trivy-report.json présent"
-                                    # Afficher le résumé des vulnérabilités
-                                    docker run --rm \
-                                        -v /var/run/docker.sock:/var/run/docker.sock \
-                                        -v "$TRIVY_CACHE:/root/.cache/trivy" \
-                                        ghcr.io/aquasecurity/trivy:latest image \
-                                            --no-progress \
-                                            --scanners vuln \
-                                            --severity CRITICAL,HIGH,MEDIUM,LOW \
-                                            "$DOCKER_IMAGE" || true
+                                    echo "[OK] trivy-report.json présent — $(wc -c < $PROJECT_DIR/reports/trivy/trivy-report.json) octets"
                                 else
-                                    echo "[WARN] trivy-report.json vide ou absent — fallback"
+                                    echo "[WARN] trivy-report.json vide — fallback"
                                     echo '{"Results":[]}' > "$PROJECT_DIR/reports/trivy/trivy-report.json"
                                 fi
                             '''
@@ -661,8 +664,14 @@ PYEOF
                         set -eu
                         cd "$PROJECT_DIR"
 
+                        echo "=== ZAP : préparation dossier avec permissions ouvertes ==="
                         mkdir -p "$PROJECT_DIR/reports/zap"
                         chmod 777 "$PROJECT_DIR/reports/zap"
+                        # Pré-créer les fichiers pour que ZAP (root) puisse y écrire
+                        touch "$PROJECT_DIR/reports/zap/zap-report.json"
+                        touch "$PROJECT_DIR/reports/zap/zap-report.html"
+                        chmod 666 "$PROJECT_DIR/reports/zap/zap-report.json"
+                        chmod 666 "$PROJECT_DIR/reports/zap/zap-report.html"
 
                         echo "=== ZAP : lancement du scan ==="
                         docker run --rm \
@@ -676,19 +685,19 @@ PYEOF
                                 -r "zap-report.html" \
                                 -a -j -I || true
 
-                        echo "=== ZAP : contenu du dossier rapport ==="
-                        ls -lah "$PROJECT_DIR/reports/zap/" || true
-
+                        echo "=== ZAP : correction permissions post-scan ==="
                         docker run --rm \
                             -u 0:0 \
                             -v "$PROJECT_DIR/reports/zap:/zap/wrk" \
                             alpine:3.19 \
                             sh -c "chown -R ${JENKINS_UID}:${JENKINS_GID} /zap/wrk || true"
 
+                        echo "=== ZAP : contenu du dossier ==="
+                        ls -lah "$PROJECT_DIR/reports/zap/"
+
                         echo "=== ZAP : vérification rapport JSON ==="
                         if test -s "$PROJECT_DIR/reports/zap/zap-report.json"; then
-                            echo "[OK] zap-report.json présent et non vide"
-                            head -30 "$PROJECT_DIR/reports/zap/zap-report.json" || true
+                            echo "[OK] zap-report.json présent — $(wc -c < $PROJECT_DIR/reports/zap/zap-report.json) octets"
                         else
                             echo "[WARN] zap-report.json absent ou vide — fallback"
                             echo '{"site":[{"alerts":[]}]}' > "$PROJECT_DIR/reports/zap/zap-report.json"
@@ -703,8 +712,8 @@ PYEOF
 
                         echo "=== ZAP : vérification rapport HTML ==="
                         test -s "$PROJECT_DIR/reports/zap/zap-report.html" \
-                            && echo "[OK] zap-report.html généré ($(wc -c < $PROJECT_DIR/reports/zap/zap-report.html) octets)" \
-                            || echo "[WARN] zap-report.html absent ou vide"
+                            && echo "[OK] zap-report.html — $(wc -c < $PROJECT_DIR/reports/zap/zap-report.html) octets" \
+                            || echo "[WARN] zap-report.html absent"
                     '''
                 }
             }
