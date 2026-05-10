@@ -809,7 +809,7 @@ PYEOF
                             sh -lc '
                                 status=0
                                 cd /zap || exit 1
-                                ./zap-baseline.py -t "http://'"$APP_CONTAINER"':'"$APP_PORT"'/\" -a -j -I 2>&1 | tee /zap/wrk/zap-baseline.log || status=$?
+                                ./zap-baseline.py -t "http://'"$APP_CONTAINER"':'"$APP_PORT"'/" -a -j -I > /zap/wrk/zap-baseline.log 2>&1 || status=$?
                                 echo "$status" > /zap/wrk/zap-exit-code.txt
                                 exit 0
                             '
