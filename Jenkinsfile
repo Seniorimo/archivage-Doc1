@@ -21,7 +21,7 @@ pipeline {
         JENKINS_CONTAINER         = 'jenkins'
 
         ENFORCE_SECURITY_GATE     = 'false'
-        IGNORE_TEST_APP_FINDINGS  = 'true'
+        IGNORE_TEST_APP_FINDINGS  = 'false'
     }
 
     stages {
@@ -809,7 +809,7 @@ PYEOF
                             sh -lc '
                                 status=0
                                 cd /zap || exit 1
-                                ./zap-baseline.py -t "http://'"$APP_CONTAINER"':'"$APP_PORT"'/" -a -j -I 2>&1 | tee /zap/wrk/zap-baseline.log || status=$?
+                                ./zap-baseline.py -t "http://'"$APP_CONTAINER"':'"$APP_PORT"'/\" -a -j -I 2>&1 | tee /zap/wrk/zap-baseline.log || status=$?
                                 echo "$status" > /zap/wrk/zap-exit-code.txt
                                 exit 0
                             '
