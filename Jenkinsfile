@@ -85,46 +85,55 @@ stage('Login & Pull Image') {
             passwordVariable: 'DOCKER_HUB_PASSWORD'
         )]) {
             script {
-                def repoName = 'archivage-app'
+                def repo = "${env.DOCKER_HUB_USERNAME}/archivage-app"
 
-                env.RESOLVED_IMAGE_TAG = sh(
+                def loginPayload = groovy.json.JsonOutput.toJson([
+                    username: env.DOCKER_HUB_USERNAME,
+                    password: env.DOCKER_HUB_PASSWORD
+                ])
+
+                def loginResponse = sh(
                     returnStdout: true,
-                    script: '''
-                        set -euo pipefail
-
-                        REPO="${DOCKER_HUB_USERNAME}/archivage-app"
-
-                        TOKEN=$(curl -fsSL \
-                          -H "Content-Type: application/json" \
+                    script: """
+                        set -eu
+                        curl -fsSL \
+                          -H 'Content-Type: application/json' \
                           -X POST \
-                          -d "{\"username\":\"$DOCKER_HUB_USERNAME\",\"password\":\"$DOCKER_HUB_PASSWORD\"}" \
-                          https://hub.docker.com/v2/users/login/ \
-                          | python3 -c "import sys, json; print(json.load(sys.stdin)['token'])")
-
-                        TAG=$(curl -fsSL \
-                          -H "Authorization: JWT $TOKEN" \
-                          "https://hub.docker.com/v2/repositories/$REPO/tags?page_size=25&ordering=-last_updated" \
-                          | python3 -c "
-import sys, json
-data = json.load(sys.stdin)
-results = data.get('results', [])
-tags = [t.get('name','') for t in results if t.get('name') and t.get('name') != 'latest']
-print(tags[0] if tags else '')
-")
-
-                        if [ -z "$TAG" ]; then
-                          echo "ERROR: aucun tag exploitable trouvé sur Docker Hub" >&2
-                          exit 1
-                        fi
-
-                        echo "$TAG"
-                    '''
+                          --data '${loginPayload}' \
+                          https://hub.docker.com/v2/users/login/
+                    """
                 ).trim()
 
-                env.DOCKER_IMAGE = "${env.DOCKER_HUB_USERNAME}/${repoName}:${env.RESOLVED_IMAGE_TAG}"
+                def loginJson = new groovy.json.JsonSlurperClassic().parseText(loginResponse)
+                def token = loginJson.token
+                if (!token) {
+                    error('Token Docker Hub introuvable.')
+                }
 
-                echo "IMAGE_TAG récupéré automatiquement depuis Docker Hub : ${env.RESOLVED_IMAGE_TAG}"
-                echo "Image cible : ${env.DOCKER_IMAGE}"
+                def tagsResponse = sh(
+                    returnStdout: true,
+                    script: """
+                        set -eu
+                        curl -fsSL \
+                          -H 'Authorization: JWT ${token}' \
+                          'https://hub.docker.com/v2/repositories/${repo}/tags?page_size=25&ordering=-last_updated'
+                    """
+                ).trim()
+
+                def tagsJson = new groovy.json.JsonSlurperClassic().parseText(tagsResponse)
+                def tag = (tagsJson.results ?: [])
+                    .collect { it.name }
+                    .find { it && it != 'latest' }
+
+                if (!tag) {
+                    error("Aucun tag exploitable trouvé pour ${repo}")
+                }
+
+                env.RESOLVED_IMAGE_TAG = tag
+                env.DOCKER_IMAGE = "${repo}:${tag}"
+
+                echo "IMAGE_TAG auto : ${env.RESOLVED_IMAGE_TAG}"
+                echo "Image cible    : ${env.DOCKER_IMAGE}"
             }
 
             sh '''
