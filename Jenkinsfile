@@ -77,75 +77,101 @@ pipeline {
         }
 
         // ── 4. LOGIN & PULL IMAGE ────────────────────────────────────────────
-stage('Login & Pull Image') {
-    steps {
-        withCredentials([usernamePassword(
-            credentialsId: 'docker-hub-creds',
-            usernameVariable: 'DOCKER_HUB_USERNAME',
-            passwordVariable: 'DOCKER_HUB_PASSWORD'
-        )]) {
-            script {
-                def repo = "${env.DOCKER_HUB_USERNAME}/archivage-app"
+        stage('Login & Pull Image') {
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: 'docker-hub-creds',
+                    usernameVariable: 'DOCKER_HUB_USERNAME',
+                    passwordVariable: 'DOCKER_HUB_PASSWORD'
+                )]) {
+                    script {
+                        env.RESOLVED_IMAGE_TAG = sh(
+                            returnStdout: true,
+                            script: '''
+                                set -eu
 
-                def loginPayload = groovy.json.JsonOutput.toJson([
-                    username: env.DOCKER_HUB_USERNAME,
-                    password: env.DOCKER_HUB_PASSWORD
-                ])
+                                docker run --rm \
+                                  -e DOCKER_HUB_USERNAME="$DOCKER_HUB_USERNAME" \
+                                  -e DOCKER_HUB_PASSWORD="$DOCKER_HUB_PASSWORD" \
+                                  -e GIT_SHA="$GIT_SHA" \
+                                  python:3.12-alpine \
+                                  python - <<'PY'
+import json
+import os
+import sys
+import urllib.request
 
-                def loginResponse = sh(
-                    returnStdout: true,
-                    script: """
+username = os.environ["DOCKER_HUB_USERNAME"]
+password = os.environ["DOCKER_HUB_PASSWORD"]
+git_sha = os.environ.get("GIT_SHA", "").strip()
+short_sha = git_sha[:7] if git_sha else ""
+repo = f"{username}/archivage-app"
+
+def request_json(url, method="GET", data=None, headers=None):
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers=headers or {},
+        method=method
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+login_payload = json.dumps({
+    "username": username,
+    "password": password
+}).encode("utf-8")
+
+login = request_json(
+    "https://hub.docker.com/v2/users/login/",
+    method="POST",
+    data=login_payload,
+    headers={"Content-Type": "application/json"}
+)
+
+token = login.get("token")
+if not token:
+    sys.exit("Token Docker Hub introuvable")
+
+data = request_json(
+    f"https://hub.docker.com/v2/repositories/{repo}/tags?page_size=100&ordering=-last_updated",
+    headers={"Authorization": f"JWT {token}"}
+)
+
+results = data.get("results", []) or []
+names = [item.get("name", "").strip() for item in results if item.get("name")]
+
+for preferred in [git_sha, short_sha]:
+    if preferred and preferred in names:
+        print(preferred)
+        sys.exit(0)
+
+for name in names:
+    if name and name != "latest":
+        print(name)
+        sys.exit(0)
+
+sys.exit("Aucun tag exploitable trouvé sur Docker Hub")
+PY
+                            '''
+                        ).trim()
+
+                        env.DOCKER_IMAGE = "${env.DOCKER_HUB_USERNAME}/archivage-app:${env.RESOLVED_IMAGE_TAG}"
+
+                        echo "IMAGE_TAG auto : ${env.RESOLVED_IMAGE_TAG}"
+                        echo "Image cible    : ${env.DOCKER_IMAGE}"
+                    }
+
+                    sh '''
                         set -eu
-                        curl -fsSL \
-                          -H 'Content-Type: application/json' \
-                          -X POST \
-                          --data '${loginPayload}' \
-                          https://hub.docker.com/v2/users/login/
-                    """
-                ).trim()
-
-                def loginJson = new groovy.json.JsonSlurperClassic().parseText(loginResponse)
-                def token = loginJson.token
-                if (!token) {
-                    error('Token Docker Hub introuvable.')
+                        echo "=== LOGIN & PULL IMAGE ==="
+                        echo "$DOCKER_HUB_PASSWORD" | docker login -u "$DOCKER_HUB_USERNAME" --password-stdin
+                        docker pull "$DOCKER_IMAGE"
+                        echo "Image récupérée : $DOCKER_IMAGE"
+                    '''
                 }
-
-                def tagsResponse = sh(
-                    returnStdout: true,
-                    script: """
-                        set -eu
-                        curl -fsSL \
-                          -H 'Authorization: JWT ${token}' \
-                          'https://hub.docker.com/v2/repositories/${repo}/tags?page_size=25&ordering=-last_updated'
-                    """
-                ).trim()
-
-                def tagsJson = new groovy.json.JsonSlurperClassic().parseText(tagsResponse)
-                def tag = (tagsJson.results ?: [])
-                    .collect { it.name }
-                    .find { it && it != 'latest' }
-
-                if (!tag) {
-                    error("Aucun tag exploitable trouvé pour ${repo}")
-                }
-
-                env.RESOLVED_IMAGE_TAG = tag
-                env.DOCKER_IMAGE = "${repo}:${tag}"
-
-                echo "IMAGE_TAG auto : ${env.RESOLVED_IMAGE_TAG}"
-                echo "Image cible    : ${env.DOCKER_IMAGE}"
             }
-
-            sh '''
-                set -eu
-                echo "=== LOGIN & PULL IMAGE ==="
-                echo "$DOCKER_HUB_PASSWORD" | docker login -u "$DOCKER_HUB_USERNAME" --password-stdin
-                docker pull "$DOCKER_IMAGE"
-                echo "Image récupérée : $DOCKER_IMAGE"
-            '''
         }
-    }
-}
 
         // ── 5. PREPARE WORKSPACE ─────────────────────────────────────────────
         stage('Prepare Workspace') {
@@ -353,9 +379,9 @@ def patch(path_str: str):
         print(f"[OK] CSP déjà présente : {p}")
         return
     if "<head>" in html:
-        html = html.replace("<head>", "<head>\n  " + META, 1)
+        html = html.replace("<head>", "<head>\\n  " + META, 1)
     else:
-        html = META + "\n" + html
+        html = META + "\\n" + html
     p.write_text(html, encoding="utf-8")
     print(f"[OK] CSP ajoutée : {p}")
 
@@ -644,7 +670,6 @@ PYEOF
                 '''
             }
         }
-
     }
 
     post {
@@ -699,17 +724,13 @@ PYEOF
                                     --sonar-url "$SONAR_HOST_URL" \
                                     --sonar-token "$SONAR_AUTH_TOKEN" \
                                     --sonar-project "$APP_NAME" || true
-
-                            docker run --rm \
-                                --volumes-from jenkins \
-                                -w "$PROJECT_DIR" \
-                                python:3.12-alpine \
-                                python reports/dashboard/patch_csp.py \
-                                    reports/dashboard/security-dashboard.html \
-                                    reports/zap/zap-report.html || true
                         '''
                     }
-                } else {
+                }
+            }
+
+            script {
+                if (fileExists('src/reports/dashboard/patch_csp.py')) {
                     sh '''
                         set +e
                         cd "$PROJECT_DIR"
@@ -721,6 +742,8 @@ PYEOF
                                 reports/dashboard/security-dashboard.html \
                                 reports/zap/zap-report.html || true
                     '''
+                } else {
+                    echo 'patch_csp.py absent, patch CSP ignoré.'
                 }
             }
 
@@ -765,7 +788,7 @@ PYEOF
                             'src/reports/dashboard/security-dashboard.html'
                         ].join(','),
                         allowEmptyArchive: true,
-                        fingerprint      : true
+                        fingerprint      : false
                     )
                 }
             }
