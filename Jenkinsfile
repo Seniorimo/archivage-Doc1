@@ -842,7 +842,6 @@ PYEOF
         }
     }
 }
-        }
 
         stage('Policy - OPA Gate') {
             steps {
