@@ -2,14 +2,6 @@ pipeline {
 
     agent any
 
-    parameters {
-        string(
-            name: 'IMAGE_TAG',
-            defaultValue: '',
-            description: 'Optionnel. Si vide, le tag est déduit automatiquement du commit checkouté (git SHA).'
-        )
-    }
-
     options {
         skipDefaultCheckout(true)
         timestamps()
@@ -85,37 +77,66 @@ pipeline {
         }
 
         // ── 4. LOGIN & PULL IMAGE ────────────────────────────────────────────
-        stage('Login & Pull Image') {
-            steps {
-                withCredentials([usernamePassword(
-                    credentialsId: 'docker-hub-creds',
-                    usernameVariable: 'DOCKER_HUB_USERNAME',
-                    passwordVariable: 'DOCKER_HUB_PASSWORD'
-                )]) {
-                    script {
-                        // Priorité : paramètre manuel → SHA du commit
-                        env.RESOLVED_IMAGE_TAG = params.IMAGE_TAG?.trim() ?: env.GIT_SHA
+stage('Login & Pull Image') {
+    steps {
+        withCredentials([usernamePassword(
+            credentialsId: 'docker-hub-creds',
+            usernameVariable: 'DOCKER_HUB_USERNAME',
+            passwordVariable: 'DOCKER_HUB_PASSWORD'
+        )]) {
+            script {
+                def repoName = 'archivage-app'
 
-                        if (params.IMAGE_TAG?.trim()) {
-                            echo "IMAGE_TAG fourni manuellement : ${env.RESOLVED_IMAGE_TAG}"
-                        } else {
-                            echo "IMAGE_TAG non fourni → tag déduit du commit : ${env.RESOLVED_IMAGE_TAG}"
-                        }
+                env.RESOLVED_IMAGE_TAG = sh(
+                    returnStdout: true,
+                    script: '''
+                        set -euo pipefail
 
-                        env.DOCKER_IMAGE = "${env.DOCKER_HUB_USERNAME}/archivage-app:${env.RESOLVED_IMAGE_TAG}"
-                        echo "Image cible : ${env.DOCKER_IMAGE}"
-                    }
+                        REPO="${DOCKER_HUB_USERNAME}/archivage-app"
 
-                    sh '''
-                        set -eu
-                        echo "=== LOGIN & PULL IMAGE ==="
-                        echo "$DOCKER_HUB_PASSWORD" | docker login -u "$DOCKER_HUB_USERNAME" --password-stdin
-                        docker pull "$DOCKER_IMAGE"
-                        echo "Image récupérée : $DOCKER_IMAGE"
+                        TOKEN=$(curl -fsSL \
+                          -H "Content-Type: application/json" \
+                          -X POST \
+                          -d "{\"username\":\"$DOCKER_HUB_USERNAME\",\"password\":\"$DOCKER_HUB_PASSWORD\"}" \
+                          https://hub.docker.com/v2/users/login/ \
+                          | python3 -c "import sys, json; print(json.load(sys.stdin)['token'])")
+
+                        TAG=$(curl -fsSL \
+                          -H "Authorization: JWT $TOKEN" \
+                          "https://hub.docker.com/v2/repositories/$REPO/tags?page_size=25&ordering=-last_updated" \
+                          | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+results = data.get('results', [])
+tags = [t.get('name','') for t in results if t.get('name') and t.get('name') != 'latest']
+print(tags[0] if tags else '')
+")
+
+                        if [ -z "$TAG" ]; then
+                          echo "ERROR: aucun tag exploitable trouvé sur Docker Hub" >&2
+                          exit 1
+                        fi
+
+                        echo "$TAG"
                     '''
-                }
+                ).trim()
+
+                env.DOCKER_IMAGE = "${env.DOCKER_HUB_USERNAME}/${repoName}:${env.RESOLVED_IMAGE_TAG}"
+
+                echo "IMAGE_TAG récupéré automatiquement depuis Docker Hub : ${env.RESOLVED_IMAGE_TAG}"
+                echo "Image cible : ${env.DOCKER_IMAGE}"
             }
+
+            sh '''
+                set -eu
+                echo "=== LOGIN & PULL IMAGE ==="
+                echo "$DOCKER_HUB_PASSWORD" | docker login -u "$DOCKER_HUB_USERNAME" --password-stdin
+                docker pull "$DOCKER_IMAGE"
+                echo "Image récupérée : $DOCKER_IMAGE"
+            '''
         }
+    }
+}
 
         // ── 5. PREPARE WORKSPACE ─────────────────────────────────────────────
         stage('Prepare Workspace') {
