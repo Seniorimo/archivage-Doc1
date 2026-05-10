@@ -85,12 +85,16 @@ pipeline {
                     passwordVariable: 'DOCKER_HUB_PASSWORD'
                 )]) {
                     script {
+                        if (!env.GIT_SHA?.trim()) {
+                            error("GIT_SHA vide")
+                        }
+
                         env.RESOLVED_IMAGE_TAG = sh(
                             returnStdout: true,
                             script: '''
                                 set -eu
 
-                                docker run --rm \
+                                docker run --rm -i \
                                   -e DOCKER_HUB_USERNAME="$DOCKER_HUB_USERNAME" \
                                   -e DOCKER_HUB_PASSWORD="$DOCKER_HUB_PASSWORD" \
                                   -e GIT_SHA="$GIT_SHA" \
@@ -101,60 +105,81 @@ import os
 import sys
 import urllib.request
 
-username = os.environ["DOCKER_HUB_USERNAME"]
-password = os.environ["DOCKER_HUB_PASSWORD"]
+username = os.environ["DOCKER_HUB_USERNAME"].strip()
+pat = os.environ["DOCKER_HUB_PASSWORD"].strip()
 git_sha = os.environ.get("GIT_SHA", "").strip()
 short_sha = git_sha[:7] if git_sha else ""
-repo = f"{username}/archivage-app"
+repo = "archivage-app"
 
-def request_json(url, method="GET", data=None, headers=None):
-    req = urllib.request.Request(
+def req(url, method="GET", data=None, headers=None):
+    request = urllib.request.Request(
         url,
         data=data,
         headers=headers or {},
         method=method
     )
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    with urllib.request.urlopen(request, timeout=30) as resp:
+        return resp.read().decode("utf-8")
 
-login_payload = json.dumps({
-    "username": username,
-    "password": password
-}).encode("utf-8")
+try:
+    token_payload = json.dumps({
+        "identifier": username,
+        "secret": pat
+    }).encode("utf-8")
 
-login = request_json(
-    "https://hub.docker.com/v2/users/login/",
-    method="POST",
-    data=login_payload,
-    headers={"Content-Type": "application/json"}
-)
+    token_resp = req(
+        "https://hub.docker.com/v2/auth/token",
+        method="POST",
+        data=token_payload,
+        headers={"Content-Type": "application/json"}
+    )
 
-token = login.get("token")
+    token = json.loads(token_resp).get("access_token", "")
+except Exception as e:
+    print(f"ERREUR_AUTH: {e}", file=sys.stderr)
+    sys.exit(1)
+
 if not token:
-    sys.exit("Token Docker Hub introuvable")
+    print("ERREUR_AUTH: token vide", file=sys.stderr)
+    sys.exit(1)
 
-data = request_json(
-    f"https://hub.docker.com/v2/repositories/{repo}/tags?page_size=100&ordering=-last_updated",
-    headers={"Authorization": f"JWT {token}"}
-)
+url = f"https://hub.docker.com/v2/namespaces/{username}/repositories/{repo}/tags?page_size=100&ordering=-last_updated"
+tags = []
 
-results = data.get("results", []) or []
-names = [item.get("name", "").strip() for item in results if item.get("name")]
+while url:
+    try:
+        resp = req(url, headers={"Authorization": f"Bearer {token}"})
+        data = json.loads(resp)
+    except Exception as e:
+        print(f"ERREUR_TAGS: {e}", file=sys.stderr)
+        sys.exit(1)
 
-for preferred in [git_sha, short_sha]:
-    if preferred and preferred in names:
-        print(preferred)
+    tags.extend([
+        item.get("name", "").strip()
+        for item in data.get("results", []) or []
+        if item.get("name")
+    ])
+    url = data.get("next")
+
+for candidate in [git_sha, short_sha]:
+    if candidate and candidate in tags:
+        print(candidate)
         sys.exit(0)
 
-for name in names:
-    if name and name != "latest":
-        print(name)
+for tag in tags:
+    if tag and tag != "latest":
+        print(tag)
         sys.exit(0)
 
-sys.exit("Aucun tag exploitable trouvé sur Docker Hub")
+print("ERREUR: aucun tag exploitable trouvé sur Docker Hub", file=sys.stderr)
+sys.exit(1)
 PY
                             '''
                         ).trim()
+
+                        if (!env.RESOLVED_IMAGE_TAG?.trim()) {
+                            error("RESOLVED_IMAGE_TAG est vide")
+                        }
 
                         env.DOCKER_IMAGE = "${env.DOCKER_HUB_USERNAME}/archivage-app:${env.RESOLVED_IMAGE_TAG}"
 
