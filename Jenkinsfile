@@ -1,5 +1,4 @@
 pipeline {
-
     agent any
 
     options {
@@ -11,14 +10,29 @@ pipeline {
     }
 
     environment {
-        APP_NAME          = 'archivage-Doc'
-        APP_CONTAINER     = 'app-archivage'
-        MYSQL_CONTAINER   = 'mysql-archivage'
-        NETWORK_NAME      = 'archivage-net'
-        APP_PORT          = '8090'
-        MAVEN_REPO        = '/var/jenkins_home/.m2/repository'
-        SONARQUBE_ENV     = 'sonar'
-        JENKINS_CONTAINER = 'jenkins'
+        APP_NAME         = 'archivage-Doc'
+        APP_CONTAINER    = 'app-archivage'
+        MYSQL_CONTAINER  = 'mysql-archivage'
+        NETWORK_NAME     = 'archivage-net'
+        APP_PORT         = '8090'
+        PROJECT_SUBDIR   = 'src'
+
+        JENKINS_HOME_DIR = '/var/jenkins_home'
+        MAVEN_CACHE_DIR  = '/var/jenkins_home/.m2'
+        MAVEN_REPO       = '/var/jenkins_home/.m2/repository'
+        TRIVY_CACHE      = '/var/jenkins_home/.trivycache'
+
+        SONARQUBE_ENV    = 'sonar'
+
+        // Images pinning for stability
+        PYTHON_IMAGE     = 'python:3.12.8-alpine3.20'
+        MAVEN_IMAGE      = 'maven:3.9.9-eclipse-temurin-17'
+        GITLEAKS_IMAGE   = 'zricethezav/gitleaks:v8.18.4'
+        TRIVY_IMAGE      = 'ghcr.io/aquasecurity/trivy:0.70.0'
+        ZAP_IMAGE        = 'owasp/zap2docker-stable'
+        OPA_IMAGE        = 'openpolicyagent/opa:0.70.0'
+        MYSQL_IMAGE      = 'mysql:8.0.40'
+        CURL_IMAGE       = 'curlimages/curl:8.10.1'
     }
 
     stages {
@@ -26,11 +40,48 @@ pipeline {
         stage('Init') {
             steps {
                 script {
-                    env.PROJECT_DIR = "${env.WORKSPACE}/src"
-                    env.TRIVY_CACHE = "/var/jenkins_home/.trivycache"
-                    env.JENKINS_UID = sh(returnStdout: true, script: 'id -u').trim()
-                    env.JENKINS_GID = sh(returnStdout: true, script: 'id -g').trim()
+                    env.PROJECT_DIR      = "${env.WORKSPACE}/${env.PROJECT_SUBDIR}"
+                    env.REPORTS_DIR      = "${env.PROJECT_DIR}/reports"
+                    env.POLICY_DIR       = "${env.PROJECT_DIR}/policy"
+                    env.UPLOADS_DIR      = "${env.PROJECT_DIR}/uploads"
+                    env.JENKINS_UID      = sh(returnStdout: true, script: 'id -u').trim()
+                    env.JENKINS_GID      = sh(returnStdout: true, script: 'id -g').trim()
+                    env.DOCKER_GROUP_GID = sh(returnStdout: true, script: 'stat -c %g /var/run/docker.sock 2>/dev/null || true').trim()
                 }
+
+                sh '''
+                    set -eux
+                    echo "=== INIT ==="
+                    echo "WORKSPACE       = $WORKSPACE"
+                    echo "PROJECT_DIR     = $PROJECT_DIR"
+                    echo "REPORTS_DIR     = $REPORTS_DIR"
+                    echo "POLICY_DIR      = $POLICY_DIR"
+                    echo "UPLOADS_DIR     = $UPLOADS_DIR"
+                    echo "JENKINS_UID:GID = $JENKINS_UID:$JENKINS_GID"
+                    echo "DOCKER_SOCK_GID = ${DOCKER_GROUP_GID:-<empty>}"
+
+                    test -S /var/run/docker.sock || {
+                        echo "[ERREUR] /var/run/docker.sock introuvable"
+                        exit 1
+                    }
+
+                    mkdir -p \
+                        "$WORKSPACE" \
+                        "$PROJECT_DIR" \
+                        "$REPORTS_DIR" \
+                        "$POLICY_DIR" \
+                        "$UPLOADS_DIR" \
+                        "$MAVEN_CACHE_DIR/repository" \
+                        "$TRIVY_CACHE"
+
+                    chown -R "$JENKINS_UID:$JENKINS_GID" \
+                        "$WORKSPACE" \
+                        "$MAVEN_CACHE_DIR" \
+                        "$TRIVY_CACHE" || true
+
+                    chmod 755 "$WORKSPACE" "$PROJECT_DIR" "$REPORTS_DIR" "$POLICY_DIR" "$UPLOADS_DIR" || true
+                    chmod 700 "$MAVEN_CACHE_DIR" "$TRIVY_CACHE" || true
+                '''
             }
         }
 
@@ -39,27 +90,30 @@ pipeline {
                 sh '''
                     set -eux
                     echo "=== FORCE CLEAN WORKSPACE ==="
+
                     docker run --rm \
                         -u 0:0 \
                         -v "$WORKSPACE:/ws" \
                         alpine:3.19 \
-                        sh -euxc "
+                        sh -euxc '
                             find /ws -mindepth 1 -maxdepth 1 -exec rm -rf {} + || true
                             mkdir -p /ws/src
-                            chown -R ${JENKINS_UID}:${JENKINS_GID} /ws
+                            chown -R '"${JENKINS_UID}"':'"${JENKINS_GID}"' /ws
                             ls -la /ws
-                        "
-                    echo "Workspace nettoyé de force avec succès."
+                        '
+
+                    echo "Workspace nettoyé."
                 '''
             }
         }
 
         stage('Checkout') {
             steps {
-                dir('src') {
+                dir("${PROJECT_SUBDIR}") {
                     deleteDir()
                     checkout scm
                 }
+
                 script {
                     env.GIT_SHA = sh(
                         returnStdout: true,
@@ -70,8 +124,19 @@ pipeline {
                         '''
                     ).trim()
                     env.GIT_SHORT_SHA = env.GIT_SHA.take(7)
-                    echo "Commit checkouté : ${env.GIT_SHA}"
                 }
+
+                sh '''
+                    set -eux
+                    echo "=== CHECKOUT ==="
+                    echo "GIT_SHA       = $GIT_SHA"
+                    echo "GIT_SHORT_SHA = $GIT_SHORT_SHA"
+                    test -f "$PROJECT_DIR/pom.xml" || {
+                        echo "[ERREUR] pom.xml introuvable dans $PROJECT_DIR"
+                        exit 1
+                    }
+                    chown -R "$JENKINS_UID:$JENKINS_GID" "$PROJECT_DIR" || true
+                '''
             }
         }
 
@@ -83,20 +148,17 @@ pipeline {
                     passwordVariable: 'DOCKER_HUB_PASSWORD'
                 )]) {
                     script {
-                        if (!env.GIT_SHA?.trim()) {
-                            error("GIT_SHA vide")
-                        }
-
                         env.RESOLVED_IMAGE_TAG = sh(
                             returnStdout: true,
                             script: '''
                                 set -eu
-
                                 docker run --rm -i \
+                                  -u "$JENKINS_UID:$JENKINS_GID" \
+                                  -e HOME=/tmp \
                                   -e DOCKER_HUB_USERNAME="$DOCKER_HUB_USERNAME" \
                                   -e DOCKER_HUB_PASSWORD="$DOCKER_HUB_PASSWORD" \
                                   -e GIT_SHA="$GIT_SHA" \
-                                  python:3.12-alpine \
+                                  "$PYTHON_IMAGE" \
                                   python - <<'PY'
 import json
 import os
@@ -159,13 +221,13 @@ while url:
     url = data.get("next")
 
 for candidate in [git_sha, short_sha]:
-    if candidate in tags:
+    if candidate and candidate in tags:
         print(candidate)
         sys.exit(0)
 
 print(
-    f"ERREUR: tag exact introuvable sur Docker Hub pour ce commit. "
-    f"attendus: {git_sha} ou {short_sha}",
+    f"ERREUR: tag Docker Hub exact introuvable pour le commit {git_sha} "
+    f"(attendus: {git_sha} ou {short_sha})",
     file=sys.stderr
 )
 sys.exit(1)
@@ -177,26 +239,27 @@ PY
                             error("RESOLVED_IMAGE_TAG est vide")
                         }
 
-                        env.DOCKER_IMAGE = sh(
-                            returnStdout: true,
-                            script: '''
-                                set -eu
-                                printf "%s/archivage-app:%s" "$DOCKER_HUB_USERNAME" "$RESOLVED_IMAGE_TAG"
-                            '''
-                        ).trim()
-
+                        env.DOCKER_IMAGE = "${env.DOCKER_HUB_USERNAME}/archivage-app:${env.RESOLVED_IMAGE_TAG}"
                         echo "IMAGE_TAG exact : ${env.RESOLVED_IMAGE_TAG}"
-                        echo "Image cible      : ${env.DOCKER_IMAGE}"
+                        echo "Image cible     : ${env.DOCKER_IMAGE}"
                     }
 
                     sh '''
-                        set -eu
+                        set -eux
                         echo "=== LOGIN & PULL IMAGE ==="
+                        test -n "$RESOLVED_IMAGE_TAG" || {
+                            echo "[ERREUR] RESOLVED_IMAGE_TAG vide"
+                            exit 1
+                        }
+                        test -n "$DOCKER_IMAGE" || {
+                            echo "[ERREUR] DOCKER_IMAGE vide"
+                            exit 1
+                        }
+
                         trap 'docker logout >/dev/null 2>&1 || true' EXIT
                         echo "$DOCKER_HUB_PASSWORD" | docker login -u "$DOCKER_HUB_USERNAME" --password-stdin
                         docker pull "$DOCKER_IMAGE"
                         docker image inspect "$DOCKER_IMAGE" >/dev/null
-                        echo "Image récupérée : $DOCKER_IMAGE"
                     '''
                 }
             }
@@ -205,48 +268,57 @@ PY
         stage('Prepare Workspace') {
             steps {
                 sh '''
-                    set -eu
-                    cd "$PROJECT_DIR"
+                    set -eux
                     echo "=== PREPARE WORKSPACE ==="
 
-                    rm -rf reports policy
                     mkdir -p \
-                        reports/gitleaks \
-                        reports/trivy \
-                        reports/sbom \
-                        reports/zap \
-                        reports/opa \
-                        reports/dashboard \
-                        policy
+                        "$REPORTS_DIR/gitleaks" \
+                        "$REPORTS_DIR/trivy" \
+                        "$REPORTS_DIR/sbom" \
+                        "$REPORTS_DIR/zap" \
+                        "$REPORTS_DIR/opa" \
+                        "$REPORTS_DIR/dashboard" \
+                        "$POLICY_DIR" \
+                        "$UPLOADS_DIR"
 
-                    docker network inspect "$NETWORK_NAME" >/dev/null 2>&1 \
-                        || docker network create "$NETWORK_NAME"
+                    chown -R "$JENKINS_UID:$JENKINS_GID" "$PROJECT_DIR" || true
+                    find "$PROJECT_DIR" -type d -exec chmod 755 {} + || true
+                    find "$PROJECT_DIR" -type f -exec chmod 644 {} + || true
 
-                    if [ -f generate_dashboard.py ]; then
-                        chmod +x generate_dashboard.py || true
-                        echo "Dashboard script détecté : generate_dashboard.py"
+                    docker network inspect "$NETWORK_NAME" >/dev/null 2>&1 || docker network create "$NETWORK_NAME"
+
+                    if [ -f "$PROJECT_DIR/generate_dashboard.py" ]; then
+                        chmod 755 "$PROJECT_DIR/generate_dashboard.py" || true
+                        echo "Dashboard script détecté."
                     else
-                        echo "[WARN] Script dashboard absent : generate_dashboard.py"
+                        echo "[WARN] generate_dashboard.py absent"
                     fi
 
-                    cat > policy/security-gate.rego <<'REGO'
+                    cat > "$POLICY_DIR/security-gate.rego" <<'REGO'
 package security
 
 default allow := false
 
-allow if {
+technical_ok if {
     input.scan_status.gitleaks == "ok"
     input.scan_status.trivy == "ok"
     input.scan_status.zap == "ok"
+}
+
+policy_ok if {
     input.trivy.critical == 0
     count(input.gitleaks) == 0
     input.zap.high == 0
 }
+
+allow if {
+    technical_ok
+    policy_ok
+}
 REGO
 
-                    cat > reports/opa/build_input.py <<'PYEOF'
+                    cat > "$REPORTS_DIR/opa/build_input.py" <<'PYEOF'
 import json
-import sys
 from pathlib import Path
 
 def load_json(path_str):
@@ -322,23 +394,9 @@ Path("reports/opa/input.json").write_text(
     json.dumps(payload, indent=2),
     encoding="utf-8"
 )
-
-print("=== OPA INPUT SUMMARY ===")
-print("scan_status:", scan_status)
-print("Gitleaks secrets :", len(gitleaks))
-print("Trivy CRITICAL   :", sev["CRITICAL"])
-print("Trivy HIGH       :", sev["HIGH"])
-print("Trivy MEDIUM     :", sev["MEDIUM"])
-print("Trivy LOW        :", sev["LOW"])
-print("ZAP HIGH         :", zap_counts["high"])
-print("ZAP MEDIUM       :", zap_counts["medium"])
-print("ZAP LOW          :", zap_counts["low"])
-print("ZAP INFO         :", zap_counts["info"])
-print("=========================")
-sys.exit(0)
 PYEOF
 
-                    cat > reports/zap/parse_zap_log.py <<'PYEOF'
+                    cat > "$REPORTS_DIR/zap/parse_zap_log.py" <<'PYEOF'
 import json
 import re
 import sys
@@ -357,8 +415,8 @@ if not src.exists() or src.stat().st_size == 0:
 
 lines = src.read_text(encoding="utf-8", errors="ignore").splitlines()
 
-alert_re = re.compile(r'^(WARN|FAIL)-(?:NEW|INPROG):\\s+(.+?)\\s+\\[(\\d+)\\]\\s+x\\s+(\\d+)\\s*$')
-url_re = re.compile(r'^\\s*(https?://\\S+)\\s+\\(([^)]+)\\)\\s*$')
+alert_re = re.compile(r'^(WARN|FAIL)-(?:NEW|INPROG):\s+(.+?)\s+\[(\d+)\]\s+x\s+(\d+)\s*$')
+url_re = re.compile(r'^\s*(https?://\S+)\s+\(([^)]+)\)\s*$')
 
 alerts = []
 current = None
@@ -405,7 +463,7 @@ out.write_text(json.dumps(data, indent=2), encoding="utf-8")
 print(f"Parsed {len(alerts)} ZAP alerts into {out}")
 PYEOF
 
-                    cat > reports/zap/zap_to_html.py <<'ZAPEOF'
+                    cat > "$REPORTS_DIR/zap/zap_to_html.py" <<'PYEOF'
 import json
 from pathlib import Path
 
@@ -497,9 +555,9 @@ html = f"""<!DOCTYPE html>
 
 out.write_text(html, encoding="utf-8")
 print("Rapport HTML ZAP généré : " + str(out))
-ZAPEOF
+PYEOF
 
-                    cat > reports/dashboard/patch_csp.py <<'PYEOF'
+                    cat > "$REPORTS_DIR/dashboard/patch_csp.py" <<'PYEOF'
 from pathlib import Path
 import sys
 
@@ -515,9 +573,9 @@ def patch(path_str: str):
         print(f"[OK] CSP déjà présente : {p}")
         return
     if "<head>" in html:
-        html = html.replace("<head>", "<head>\\n  " + META, 1)
+        html = html.replace("<head>", "<head>\n  " + META, 1)
     else:
-        html = META + "\\n" + html
+        html = META + "\n" + html
     p.write_text(html, encoding="utf-8")
     print(f"[OK] CSP ajoutée : {p}")
 
@@ -525,7 +583,7 @@ for target in sys.argv[1:]:
     patch(target)
 PYEOF
 
-                    echo "Workspace préparé avec succès."
+                    chown -R "$JENKINS_UID:$JENKINS_GID" "$PROJECT_DIR" || true
                 '''
             }
         }
@@ -533,18 +591,26 @@ PYEOF
         stage('Compile Light') {
             steps {
                 sh '''
-                    set -eu
-                    cd "$PROJECT_DIR"
+                    set -eux
                     echo "=== COMPILE LIGHT ==="
+
+                    mkdir -p "$MAVEN_CACHE_DIR/repository"
+                    chown -R "$JENKINS_UID:$JENKINS_GID" "$MAVEN_CACHE_DIR" || true
+
                     docker run --rm \
-                        --user "${JENKINS_UID}:${JENKINS_GID}" \
-                        -e HOME=/tmp \
-                        --volumes-from "$JENKINS_CONTAINER" \
+                        --user "$JENKINS_UID:$JENKINS_GID" \
+                        -e HOME=/tmp/jenkins-home \
+                        -e MAVEN_CONFIG=/var/jenkins_home/.m2 \
+                        -v "$PROJECT_DIR:$PROJECT_DIR" \
+                        -v "$MAVEN_CACHE_DIR:$MAVEN_CACHE_DIR" \
                         -w "$PROJECT_DIR" \
-                        maven:3.9.9-eclipse-temurin-17 \
-                        sh -lc "mvn -B -f '$PROJECT_DIR/pom.xml' \
-                                    -Dmaven.repo.local='$MAVEN_REPO' \
-                                    clean compile -DskipTests"
+                        "$MAVEN_IMAGE" \
+                        sh -lc '
+                            mkdir -p "$HOME" "$MAVEN_CONFIG"
+                            mvn -B -f "'"$PROJECT_DIR"'/pom.xml" \
+                                -Dmaven.repo.local="'"$MAVEN_REPO"'" \
+                                clean compile -DskipTests
+                        '
                 '''
             }
         }
@@ -556,25 +622,30 @@ PYEOF
                     steps {
                         catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
                             sh '''
-                                set -eu
-                                cd "$PROJECT_DIR"
+                                set -eux
+                                echo "=== GITLEAKS ==="
 
-                                rm -f reports/gitleaks/gitleaks-report.json
+                                rm -f "$REPORTS_DIR/gitleaks/gitleaks-report.json"
 
                                 docker run --rm \
-                                    --volumes-from "$JENKINS_CONTAINER" \
+                                    --user "$JENKINS_UID:$JENKINS_GID" \
+                                    -e HOME=/tmp/jenkins-home \
+                                    -v "$PROJECT_DIR:$PROJECT_DIR" \
                                     -w "$PROJECT_DIR" \
-                                    zricethezav/gitleaks:latest detect \
+                                    "$GITLEAKS_IMAGE" detect \
                                         --source . \
                                         --log-opts="--all" \
                                         --report-format json \
-                                        --report-path reports/gitleaks/gitleaks-report.json \
+                                        --report-path "$REPORTS_DIR/gitleaks/gitleaks-report.json" \
                                         --exit-code 0
 
-                                test -s reports/gitleaks/gitleaks-report.json \
-                                    || { echo "[ERREUR] gitleaks-report.json absent ou vide"; exit 1; }
+                                test -s "$REPORTS_DIR/gitleaks/gitleaks-report.json" || {
+                                    echo "[ERREUR] gitleaks-report.json absent ou vide"
+                                    exit 1
+                                }
 
-                                ls -lh reports/gitleaks/gitleaks-report.json
+                                chown "$JENKINS_UID:$JENKINS_GID" "$REPORTS_DIR/gitleaks/gitleaks-report.json" || true
+                                ls -lh "$REPORTS_DIR/gitleaks/gitleaks-report.json"
                             '''
                         }
                     }
@@ -584,43 +655,56 @@ PYEOF
                     steps {
                         catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
                             sh '''
-                                set -eu
-                                cd "$PROJECT_DIR"
+                                set -eux
+                                echo "=== TRIVY ==="
 
-                                echo "=== TRIVY : vérification socket Docker ==="
-                                test -S /var/run/docker.sock \
-                                    || { echo "[ERREUR] /var/run/docker.sock absent"; exit 1; }
+                                test -S /var/run/docker.sock || {
+                                    echo "[ERREUR] /var/run/docker.sock absent"
+                                    exit 1
+                                }
 
-                                echo "=== TRIVY : vérification image locale ==="
-                                docker image inspect "$DOCKER_IMAGE" >/dev/null 2>&1 \
-                                    || { echo "[ERREUR] Image absente localement : $DOCKER_IMAGE"; exit 1; }
+                                docker image inspect "$DOCKER_IMAGE" >/dev/null 2>&1 || {
+                                    echo "[ERREUR] Image absente localement : $DOCKER_IMAGE"
+                                    exit 1
+                                }
 
-                                mkdir -p reports/trivy
-                                rm -f reports/trivy/trivy-report.json reports/trivy/trivy.stderr.log
+                                mkdir -p "$REPORTS_DIR/trivy" "$TRIVY_CACHE"
+                                rm -f "$REPORTS_DIR/trivy/trivy-report.json" "$REPORTS_DIR/trivy/trivy.stderr.log"
+                                chmod 700 "$TRIVY_CACHE" || true
 
-                                echo "=== TRIVY : scan JSON en cours ==="
+                                EXTRA_GROUP_ARGS=""
+                                if [ -n "${DOCKER_GROUP_GID:-}" ]; then
+                                    EXTRA_GROUP_ARGS="--group-add ${DOCKER_GROUP_GID}"
+                                fi
+
                                 docker run --rm \
+                                    --user "$JENKINS_UID:$JENKINS_GID" \
+                                    $EXTRA_GROUP_ARGS \
+                                    -e HOME=/tmp/jenkins-home \
+                                    -e TRIVY_CACHE_DIR="$TRIVY_CACHE" \
                                     -v /var/run/docker.sock:/var/run/docker.sock \
-                                    -v "$TRIVY_CACHE:/root/.cache/trivy" \
-                                    ghcr.io/aquasecurity/trivy:latest image \
-                                        --quiet \
+                                    -v "$TRIVY_CACHE:$TRIVY_CACHE" \
+                                    -v "$REPORTS_DIR/trivy:$REPORTS_DIR/trivy" \
+                                    -v "$PROJECT_DIR:$PROJECT_DIR" \
+                                    -w "$PROJECT_DIR" \
+                                    "$TRIVY_IMAGE" image \
+                                        --cache-dir "$TRIVY_CACHE" \
+                                        --no-progress \
                                         --scanners vuln \
                                         --severity CRITICAL,HIGH,MEDIUM,LOW \
                                         --format json \
+                                        --output "$REPORTS_DIR/trivy/trivy-report.json" \
                                         "$DOCKER_IMAGE" \
-                                    > reports/trivy/trivy-report.json \
-                                    2> reports/trivy/trivy.stderr.log
+                                    2> "$REPORTS_DIR/trivy/trivy.stderr.log"
 
-                                test -s reports/trivy/trivy-report.json \
-                                    || {
-                                        echo "[ERREUR] trivy-report.json absent ou vide"
-                                        tail -n 100 reports/trivy/trivy.stderr.log || true
-                                        exit 1
-                                    }
+                                test -s "$REPORTS_DIR/trivy/trivy-report.json" || {
+                                    echo "[ERREUR] trivy-report.json absent ou vide"
+                                    tail -n 100 "$REPORTS_DIR/trivy/trivy.stderr.log" || true
+                                    exit 1
+                                }
 
-                                ls -lh reports/trivy/trivy-report.json reports/trivy/trivy.stderr.log
-                                head -c 300 reports/trivy/trivy-report.json || true
-                                echo
+                                chown -R "$JENKINS_UID:$JENKINS_GID" "$REPORTS_DIR/trivy" "$TRIVY_CACHE" || true
+                                ls -lh "$REPORTS_DIR/trivy/trivy-report.json" "$REPORTS_DIR/trivy/trivy.stderr.log"
                             '''
                         }
                     }
@@ -632,27 +716,37 @@ PYEOF
                             script {
                                 withSonarQubeEnv("${SONARQUBE_ENV}") {
                                     sh '''
-                                        set -eu
-                                        cd "$PROJECT_DIR"
-                                        test -d "$PROJECT_DIR/target/classes"
+                                        set -eux
+                                        echo "=== SONARQUBE ==="
+
+                                        test -d "$PROJECT_DIR/target/classes" || {
+                                            echo "[ERREUR] target/classes introuvable"
+                                            exit 1
+                                        }
 
                                         docker run --rm \
-                                            --user "${JENKINS_UID}:${JENKINS_GID}" \
-                                            -e HOME=/tmp \
+                                            --user "$JENKINS_UID:$JENKINS_GID" \
+                                            -e HOME=/tmp/jenkins-home \
+                                            -e MAVEN_CONFIG=/var/jenkins_home/.m2 \
                                             --network "$NETWORK_NAME" \
-                                            --volumes-from "$JENKINS_CONTAINER" \
                                             --add-host=host.docker.internal:host-gateway \
                                             -e SONAR_HOST_URL="$SONAR_HOST_URL" \
                                             -e SONAR_AUTH_TOKEN="$SONAR_AUTH_TOKEN" \
+                                            -v "$PROJECT_DIR:$PROJECT_DIR" \
+                                            -v "$MAVEN_CACHE_DIR:$MAVEN_CACHE_DIR" \
                                             -w "$PROJECT_DIR" \
-                                            maven:3.9.9-eclipse-temurin-17 \
-                                            sh -lc "mvn -B -f '$PROJECT_DIR/pom.xml' \
-                                                        -Dmaven.repo.local='$MAVEN_REPO' \
-                                                        org.sonarsource.scanner.maven:sonar-maven-plugin:4.0.0.4121:sonar \
-                                                        -Dsonar.projectKey='$APP_NAME' \
-                                                        -Dsonar.host.url='$SONAR_HOST_URL' \
-                                                        -Dsonar.token='$SONAR_AUTH_TOKEN' \
-                                                        -Dsonar.java.binaries='target/classes'"
+                                            "$MAVEN_IMAGE" \
+                                            sh -lc '
+                                                mkdir -p "$HOME" "$MAVEN_CONFIG"
+                                                mvn -B -f "'"$PROJECT_DIR"'/pom.xml" \
+                                                    -Dmaven.repo.local="'"$MAVEN_REPO"'" \
+                                                    org.sonarsource.scanner.maven:sonar-maven-plugin:4.0.0.4121:sonar \
+                                                    -Dsonar.projectKey="'"$APP_NAME"'" \
+                                                    -Dsonar.host.url="'"$SONAR_HOST_URL"'" \
+                                                    -Dsonar.token="'"$SONAR_AUTH_TOKEN"'" \
+                                                    -Dsonar.java.binaries=target/classes \
+                                                    -Dsonar.coverage.jacoco.xmlReportPaths=target/site/jacoco/jacoco.xml
+                                            '
                                     '''
                                 }
                             }
@@ -664,36 +758,45 @@ PYEOF
                     steps {
                         catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
                             sh '''
-                                set -eu
-                                cd "$PROJECT_DIR"
+                                set -eux
+                                echo "=== CYCLONEDX SBOM ==="
+
+                                rm -f "$REPORTS_DIR/sbom/bom.xml" "$REPORTS_DIR/sbom/bom.json"
 
                                 docker run --rm \
-                                    --user "${JENKINS_UID}:${JENKINS_GID}" \
-                                    -e HOME=/tmp \
-                                    --volumes-from "$JENKINS_CONTAINER" \
+                                    --user "$JENKINS_UID:$JENKINS_GID" \
+                                    -e HOME=/tmp/jenkins-home \
+                                    -e MAVEN_CONFIG=/var/jenkins_home/.m2 \
+                                    -v "$PROJECT_DIR:$PROJECT_DIR" \
+                                    -v "$MAVEN_CACHE_DIR:$MAVEN_CACHE_DIR" \
                                     -w "$PROJECT_DIR" \
-                                    maven:3.9.9-eclipse-temurin-17 \
-                                    sh -lc "mvn -B -f '$PROJECT_DIR/pom.xml' \
-                                                -Dmaven.repo.local='$MAVEN_REPO' \
-                                                org.cyclonedx:cyclonedx-maven-plugin:2.7.11:makeAggregateBom \
-                                                -DoutputFormat=all"
+                                    "$MAVEN_IMAGE" \
+                                    sh -lc '
+                                        mkdir -p "$HOME" "$MAVEN_CONFIG"
+                                        mvn -B -f "'"$PROJECT_DIR"'/pom.xml" \
+                                            -Dmaven.repo.local="'"$MAVEN_REPO"'" \
+                                            org.cyclonedx:cyclonedx-maven-plugin:2.7.11:makeAggregateBom \
+                                            -DoutputFormat=all
+                                    '
 
-                                test -f "$PROJECT_DIR/target/bom.xml" \
-                                    && cp -f "$PROJECT_DIR/target/bom.xml" "$PROJECT_DIR/reports/sbom/bom.xml" || true
-                                test -f "$PROJECT_DIR/target/bom.json" \
-                                    && cp -f "$PROJECT_DIR/target/bom.json" "$PROJECT_DIR/reports/sbom/bom.json" || true
+                                test -f "$PROJECT_DIR/target/bom.xml" && cp -f "$PROJECT_DIR/target/bom.xml" "$REPORTS_DIR/sbom/bom.xml" || true
+                                test -f "$PROJECT_DIR/target/bom.json" && cp -f "$PROJECT_DIR/target/bom.json" "$REPORTS_DIR/sbom/bom.json" || true
+
+                                chown -R "$JENKINS_UID:$JENKINS_GID" "$REPORTS_DIR/sbom" || true
+                                ls -lah "$REPORTS_DIR/sbom" || true
                             '''
                         }
                     }
                 }
-
             }
         }
 
         stage('Deploy MySQL') {
             steps {
                 sh '''
-                    set -eu
+                    set -eux
+                    echo "=== DEPLOY MYSQL ==="
+
                     docker rm -f "$MYSQL_CONTAINER" >/dev/null 2>&1 || true
 
                     docker run -d \
@@ -703,11 +806,11 @@ PYEOF
                         -e MYSQL_DATABASE=archivage_doc \
                         -e MYSQL_USER=archivage_user \
                         -e MYSQL_PASSWORD=archivage_pass \
-                        mysql:8.0 >/dev/null
+                        "$MYSQL_IMAGE" >/dev/null
 
                     READY=0
                     for i in $(seq 1 30); do
-                        if docker run --rm --network "$NETWORK_NAME" mysql:8.0 \
+                        if docker run --rm --network "$NETWORK_NAME" "$MYSQL_IMAGE" \
                                 mysqladmin ping -h"$MYSQL_CONTAINER" -uroot -proot --silent; then
                             READY=1
                             break
@@ -715,8 +818,11 @@ PYEOF
                         sleep 5
                     done
 
-                    test "$READY" -eq 1 || { echo "MySQL ne répond pas après 30 tentatives."; exit 1; }
-                    sleep 10
+                    test "$READY" -eq 1 || {
+                        echo "[ERREUR] MySQL ne répond pas après 30 tentatives"
+                        docker logs "$MYSQL_CONTAINER" --tail 200 || true
+                        exit 1
+                    }
                 '''
             }
         }
@@ -724,9 +830,12 @@ PYEOF
         stage('Deploy App') {
             steps {
                 sh '''
-                    set -eu
+                    set -eux
+                    echo "=== DEPLOY APP ==="
+
                     docker rm -f "$APP_CONTAINER" >/dev/null 2>&1 || true
-                    mkdir -p "$PROJECT_DIR/uploads"
+                    mkdir -p "$UPLOADS_DIR"
+                    chown -R "$JENKINS_UID:$JENKINS_GID" "$UPLOADS_DIR" || true
 
                     _GITHUB_SECRET="${GITHUB_OAUTH_SECRET:-changeme-github}"
                     _JWT_SECRET="${JWT_SECRET:-changeme-jwt-secret-32chars-min}"
@@ -735,7 +844,7 @@ PYEOF
                         --name "$APP_CONTAINER" \
                         --network "$NETWORK_NAME" \
                         --restart on-failure:5 \
-                        -v "$PROJECT_DIR/uploads:/app/uploads" \
+                        -v "$UPLOADS_DIR:/app/uploads" \
                         -e SPRING_PROFILES_ACTIVE=docker \
                         -e SPRING_DATASOURCE_URL="jdbc:mysql://$MYSQL_CONTAINER:3306/archivage_doc?useUnicode=true&allowPublicKeyRetrieval=true&useSSL=false&serverTimezone=UTC" \
                         -e SPRING_DATASOURCE_USERNAME="archivage_user" \
@@ -746,21 +855,24 @@ PYEOF
 
                     READY=0
                     for i in $(seq 1 30); do
-                        CODE=$(docker run --rm --network "$NETWORK_NAME" curlimages/curl:8.7.1 \
-                               -s -o /dev/null -w "%{http_code}" \
-                               "http://$APP_CONTAINER:$APP_PORT/actuator/health" || true)
+                        CODE=$(docker run --rm --network "$NETWORK_NAME" "$CURL_IMAGE" \
+                            -s -o /dev/null -w "%{http_code}" \
+                            "http://$APP_CONTAINER:$APP_PORT/actuator/health" || true)
+
                         echo "HTTP=$CODE"
-                        if echo "$CODE" | grep -qE "^(200|301|302|401|403|404)$"; then
+
+                        if echo "$CODE" | grep -qE '^(200|301|302|401|403|404)$'; then
                             READY=1
                             break
                         fi
                         sleep 5
                     done
 
-                    if [ "$READY" -ne 1 ]; then
+                    test "$READY" -eq 1 || {
+                        echo "[ERREUR] Application non joignable sur /actuator/health"
                         docker logs "$APP_CONTAINER" --tail 200 || true
                         exit 1
-                    fi
+                    }
                 '''
             }
         }
@@ -769,55 +881,69 @@ PYEOF
             steps {
                 catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
                     sh '''
-                        set -eu
-                        cd "$PROJECT_DIR"
+                        set -eux
+                        echo "=== ZAP BASELINE ==="
 
-                        mkdir -p reports/zap
+                        mkdir -p "$REPORTS_DIR/zap"
                         rm -f \
-                          reports/zap/zap-report.json \
-                          reports/zap/zap-report.html \
-                          reports/zap/zap-baseline.log \
-                          reports/zap/zap-exit-code.txt
+                            "$REPORTS_DIR/zap/zap-report.json" \
+                            "$REPORTS_DIR/zap/zap-report.html" \
+                            "$REPORTS_DIR/zap/zap-baseline.log" \
+                            "$REPORTS_DIR/zap/zap-exit-code.txt"
 
-                        echo "=== ZAP : lancement du baseline scan ==="
                         docker run --rm \
-                            --user root \
+                            --user "$JENKINS_UID:$JENKINS_GID" \
                             --network "$NETWORK_NAME" \
-                            -v "$PROJECT_DIR/reports/zap:/zap/wrk:rw" \
-                            ghcr.io/zaproxy/zaproxy:stable \
-                            sh -lc '
+                            -e HOME=/tmp/jenkins-home \
+                            -v "$REPORTS_DIR/zap:/zap/wrk" \
+                            "$ZAP_IMAGE" \
+                            bash -lc '
+                                cd /zap
                                 status=0
-                                zap-baseline.py -t "http://'"$APP_CONTAINER"':'"$APP_PORT"'/" -a -j -I 2>&1 | tee /zap/wrk/zap-baseline.log || status=$?
+                                ./zap-baseline.py \
+                                    -t "http://'"$APP_CONTAINER"':'"$APP_PORT"'/" \
+                                    -r /zap/wrk/zap-report.html \
+                                    -a -j -I -m 5 2>&1 | tee /zap/wrk/zap-baseline.log || status=$?
                                 echo "$status" > /zap/wrk/zap-exit-code.txt
                                 exit 0
                             '
 
-                        test -s "$PROJECT_DIR/reports/zap/zap-baseline.log" \
-                            || { echo "[ERREUR] zap-baseline.log absent ou vide"; exit 1; }
+                        test -s "$REPORTS_DIR/zap/zap-baseline.log" || {
+                            echo "[ERREUR] zap-baseline.log absent ou vide"
+                            exit 1
+                        }
 
-                        echo "=== ZAP : parsing log -> JSON ==="
                         docker run --rm \
-                            --volumes-from "$JENKINS_CONTAINER" \
-                            -w "$PROJECT_DIR/reports/zap" \
-                            python:3.12-alpine \
+                            --user "$JENKINS_UID:$JENKINS_GID" \
+                            -e HOME=/tmp/jenkins-home \
+                            -v "$REPORTS_DIR/zap:$REPORTS_DIR/zap" \
+                            -w "$REPORTS_DIR/zap" \
+                            "$PYTHON_IMAGE" \
                             python parse_zap_log.py zap-baseline.log zap-report.json
 
-                        test -s "$PROJECT_DIR/reports/zap/zap-report.json" \
-                            || { echo "[ERREUR] zap-report.json absent ou vide"; exit 1; }
+                        test -s "$REPORTS_DIR/zap/zap-report.json" || {
+                            echo "[ERREUR] zap-report.json absent ou vide"
+                            exit 1
+                        }
 
-                        echo "=== ZAP : génération rapport HTML ==="
-                        docker run --rm \
-                            --volumes-from "$JENKINS_CONTAINER" \
-                            -w "$PROJECT_DIR/reports/zap" \
-                            python:3.12-alpine \
-                            python zap_to_html.py
+                        # On garde le HTML brut de ZAP s'il existe, sinon on en produit un simple à partir du JSON.
+                        if [ ! -s "$REPORTS_DIR/zap/zap-report.html" ]; then
+                            docker run --rm \
+                                --user "$JENKINS_UID:$JENKINS_GID" \
+                                -e HOME=/tmp/jenkins-home \
+                                -v "$REPORTS_DIR/zap:$REPORTS_DIR/zap" \
+                                -w "$REPORTS_DIR/zap" \
+                                "$PYTHON_IMAGE" \
+                                python zap_to_html.py
+                        fi
 
-                        test -s "$PROJECT_DIR/reports/zap/zap-report.html" \
-                            || { echo "[ERREUR] zap-report.html absent ou vide"; exit 1; }
+                        test -s "$REPORTS_DIR/zap/zap-report.html" || {
+                            echo "[ERREUR] zap-report.html absent ou vide"
+                            exit 1
+                        }
 
-                        ls -lah "$PROJECT_DIR/reports/zap"
-                        head -c 300 "$PROJECT_DIR/reports/zap/zap-report.json" || true
-                        echo
+                        chown -R "$JENKINS_UID:$JENKINS_GID" "$REPORTS_DIR/zap" || true
+                        ls -lah "$REPORTS_DIR/zap"
                     '''
                 }
             }
@@ -825,72 +951,118 @@ PYEOF
 
         stage('Policy - OPA Gate') {
             steps {
-                catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
-                    sh '''
-                        set -eu
-                        cd "$PROJECT_DIR"
+                sh '''
+                    set -eux
+                    echo "=== OPA INPUT BUILD ==="
 
-                        echo "=== OPA : génération input.json ==="
-                        docker run --rm \
-                            --volumes-from "$JENKINS_CONTAINER" \
-                            -w "$PROJECT_DIR" \
-                            python:3.12-alpine \
-                            python reports/opa/build_input.py
+                    docker run --rm \
+                        --user "$JENKINS_UID:$JENKINS_GID" \
+                        -e HOME=/tmp/jenkins-home \
+                        -v "$PROJECT_DIR:$PROJECT_DIR" \
+                        -w "$PROJECT_DIR" \
+                        "$PYTHON_IMAGE" \
+                        python reports/opa/build_input.py
 
-                        echo "=== OPA : contenu complet de input.json ==="
-                        cat "$PROJECT_DIR/reports/opa/input.json"
+                    test -s "$REPORTS_DIR/opa/input.json" || {
+                        echo "[ERREUR TECHNIQUE] input.json OPA absent ou vide"
+                        exit 1
+                    }
 
-                        echo "=== OPA : contenu de la règle security-gate.rego ==="
-                        cat "$PROJECT_DIR/policy/security-gate.rego"
+                    echo "=== OPA INPUT ==="
+                    cat "$REPORTS_DIR/opa/input.json"
+                '''
 
-                        echo "=== OPA : évaluation pretty ==="
-                        docker run --rm \
-                            --volumes-from "$JENKINS_CONTAINER" \
-                            -w "$PROJECT_DIR" \
-                            openpolicyagent/opa:latest \
-                            eval \
-                                --format pretty \
-                                --data "$PROJECT_DIR/policy/security-gate.rego" \
-                                --input "$PROJECT_DIR/reports/opa/input.json" \
-                                "data.security" \
-                            | tee "$PROJECT_DIR/reports/opa/opa-debug.txt"
+                script {
+                    def technicalOk = sh(
+                        returnStatus: true,
+                        script: '''
+                            set -eu
+                            docker run --rm \
+                                --user "$JENKINS_UID:$JENKINS_GID" \
+                                -e HOME=/tmp/jenkins-home \
+                                -v "$PROJECT_DIR:$PROJECT_DIR" \
+                                -w "$PROJECT_DIR" \
+                                "$OPA_IMAGE" \
+                                eval \
+                                    --format raw \
+                                    --data "$POLICY_DIR/security-gate.rego" \
+                                    --input "$REPORTS_DIR/opa/input.json" \
+                                    "data.security.technical_ok" \
+                                > "$REPORTS_DIR/opa/opa-technical-ok.txt"
 
-                        echo "=== OPA : résultat brut ==="
-                        docker run --rm \
-                            --volumes-from "$JENKINS_CONTAINER" \
-                            -w "$PROJECT_DIR" \
-                            openpolicyagent/opa:latest \
-                            eval \
-                                --format raw \
-                                --data "$PROJECT_DIR/policy/security-gate.rego" \
-                                --input "$PROJECT_DIR/reports/opa/input.json" \
-                                "data.security.allow" \
-                            > "$PROJECT_DIR/reports/opa/opa-result.txt"
+                            grep -qx "true" "$REPORTS_DIR/opa/opa-technical-ok.txt"
+                        '''
+                    ) == 0
 
-                        cat "$PROJECT_DIR/reports/opa/opa-result.txt"
+                    if (!technicalOk) {
+                        sh '''
+                            set -eu
+                            docker run --rm \
+                                --user "$JENKINS_UID:$JENKINS_GID" \
+                                -e HOME=/tmp/jenkins-home \
+                                -v "$PROJECT_DIR:$PROJECT_DIR" \
+                                -w "$PROJECT_DIR" \
+                                "$OPA_IMAGE" \
+                                eval \
+                                    --format pretty \
+                                    --data "$POLICY_DIR/security-gate.rego" \
+                                    --input "$REPORTS_DIR/opa/input.json" \
+                                    "data.security" \
+                                | tee "$REPORTS_DIR/opa/opa-debug.txt"
+                        '''
+                        error("[ERREUR TECHNIQUE] Un rapport requis est absent ou invalide. Voir reports/opa/input.json et reports/opa/opa-debug.txt")
+                    }
 
-                        if ! grep -qx "true" "$PROJECT_DIR/reports/opa/opa-result.txt"; then
-                            echo "[FAIL] Security gate non passé — voir reports/opa/input.json et reports/opa/opa-debug.txt"
-                            exit 1
-                        fi
+                    def policyOk = sh(
+                        returnStatus: true,
+                        script: '''
+                            set -eu
+                            docker run --rm \
+                                --user "$JENKINS_UID:$JENKINS_GID" \
+                                -e HOME=/tmp/jenkins-home \
+                                -v "$PROJECT_DIR:$PROJECT_DIR" \
+                                -w "$PROJECT_DIR" \
+                                "$OPA_IMAGE" \
+                                eval \
+                                    --format pretty \
+                                    --data "$POLICY_DIR/security-gate.rego" \
+                                    --input "$REPORTS_DIR/opa/input.json" \
+                                    "data.security" \
+                                | tee "$REPORTS_DIR/opa/opa-debug.txt"
 
-                        echo "[OK] Security gate passé"
-                    '''
+                            docker run --rm \
+                                --user "$JENKINS_UID:$JENKINS_GID" \
+                                -e HOME=/tmp/jenkins-home \
+                                -v "$PROJECT_DIR:$PROJECT_DIR" \
+                                -w "$PROJECT_DIR" \
+                                "$OPA_IMAGE" \
+                                eval \
+                                    --format raw \
+                                    --data "$POLICY_DIR/security-gate.rego" \
+                                    --input "$REPORTS_DIR/opa/input.json" \
+                                    "data.security.allow" \
+                                > "$REPORTS_DIR/opa/opa-result.txt"
+
+                            grep -qx "true" "$REPORTS_DIR/opa/opa-result.txt"
+                        '''
+                    ) == 0
+
+                    if (!policyOk) {
+                        currentBuild.result = 'FAILURE'
+                        error("[ECHEC POLICY OPA] Les scans existent, mais la policy sécurité n’est pas satisfaite. Voir reports/opa/input.json et reports/opa/opa-debug.txt")
+                    }
                 }
             }
         }
     }
 
     post {
-
         always {
             sh '''
                 set +e
-                docker run --rm \
-                    -u 0:0 \
-                    -v "$WORKSPACE:/ws" \
-                    alpine:3.19 \
-                    sh -c "chown -R ${JENKINS_UID}:${JENKINS_GID} /ws 2>/dev/null || true"
+                echo "=== POST DIAGNOSTICS ==="
+                ls -lah "$PROJECT_DIR" || true
+                find "$REPORTS_DIR" -maxdepth 2 -type f -ls 2>/dev/null || true
             '''
 
             script {
@@ -913,19 +1085,21 @@ PYEOF
                     withSonarQubeEnv("${SONARQUBE_ENV}") {
                         sh '''
                             set +e
-                            cd "$PROJECT_DIR"
-                            mkdir -p reports/dashboard
-                            docker network inspect "$NETWORK_NAME" >/dev/null 2>&1 \
-                                || docker network create "$NETWORK_NAME" >/dev/null 2>&1 || true
+                            echo "=== POST DASHBOARD ==="
+
+                            mkdir -p "$REPORTS_DIR/dashboard"
+                            docker network inspect "$NETWORK_NAME" >/dev/null 2>&1 || docker network create "$NETWORK_NAME" >/dev/null 2>&1 || true
 
                             docker run --rm \
+                                --user "$JENKINS_UID:$JENKINS_GID" \
+                                -e HOME=/tmp/jenkins-home \
                                 --network "$NETWORK_NAME" \
-                                --volumes-from "$JENKINS_CONTAINER" \
                                 --add-host=host.docker.internal:host-gateway \
                                 -e SONAR_HOST_URL="$SONAR_HOST_URL" \
                                 -e SONAR_AUTH_TOKEN="$SONAR_AUTH_TOKEN" \
+                                -v "$PROJECT_DIR:$PROJECT_DIR" \
                                 -w "$PROJECT_DIR" \
-                                python:3.12-alpine \
+                                "$PYTHON_IMAGE" \
                                 python generate_dashboard.py \
                                     --reports reports \
                                     --output reports/dashboard/security-dashboard.html \
@@ -933,6 +1107,8 @@ PYEOF
                                     --sonar-url "$SONAR_HOST_URL" \
                                     --sonar-token "$SONAR_AUTH_TOKEN" \
                                     --sonar-project "$APP_NAME" || true
+
+                            chown -R "$JENKINS_UID:$JENKINS_GID" "$REPORTS_DIR/dashboard" || true
                         '''
                     }
                 }
@@ -942,11 +1118,14 @@ PYEOF
                 if (fileExists('src/reports/dashboard/patch_csp.py')) {
                     sh '''
                         set +e
-                        cd "$PROJECT_DIR"
+                        echo "=== POST CSP PATCH ==="
+
                         docker run --rm \
-                            --volumes-from "$JENKINS_CONTAINER" \
+                            --user "$JENKINS_UID:$JENKINS_GID" \
+                            -e HOME=/tmp/jenkins-home \
+                            -v "$PROJECT_DIR:$PROJECT_DIR" \
                             -w "$PROJECT_DIR" \
-                            python:3.12-alpine \
+                            "$PYTHON_IMAGE" \
                             python reports/dashboard/patch_csp.py \
                                 reports/dashboard/security-dashboard.html \
                                 reports/zap/zap-report.html || true
@@ -995,9 +1174,10 @@ PYEOF
                             'src/reports/zap/zap-exit-code.txt',
                             'src/reports/zap/zap-report.html',
                             'src/reports/zap/zap-report.json',
-                            'src/reports/opa/opa-result.txt',
-                            'src/reports/opa/opa-debug.txt',
                             'src/reports/opa/input.json',
+                            'src/reports/opa/opa-debug.txt',
+                            'src/reports/opa/opa-technical-ok.txt',
+                            'src/reports/opa/opa-result.txt',
                             'src/reports/sbom/bom.json',
                             'src/reports/sbom/bom.xml',
                             'src/reports/dashboard/security-dashboard.html'
@@ -1010,6 +1190,9 @@ PYEOF
 
             sh '''
                 set +e
+                echo "=== POST CLEANUP ==="
+                chown -R "$JENKINS_UID:$JENKINS_GID" "$WORKSPACE" 2>/dev/null || true
+
                 docker logout >/dev/null 2>&1 || true
                 docker rm -f "$APP_CONTAINER" >/dev/null 2>&1 || true
                 docker rm -f "$MYSQL_CONTAINER" >/dev/null 2>&1 || true
@@ -1018,15 +1201,15 @@ PYEOF
         }
 
         failure {
-            echo 'Pipeline FAILED — consulter les logs de scan et les rapports archivés.'
+            echo 'Pipeline FAILED — consulter les logs et les rapports archivés.'
         }
 
         unstable {
-            echo 'Pipeline UNSTABLE — des problèmes de sécurité ont été détectés.'
+            echo 'Pipeline UNSTABLE — au moins un scan a rencontré une erreur technique ou a trouvé des problèmes.'
         }
 
         success {
-            echo 'Pipeline SUCCESS — tous les security gates sont passés.'
+            echo 'Pipeline SUCCESS — exécution complète et policy OPA validée.'
         }
     }
 }
