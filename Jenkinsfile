@@ -383,10 +383,11 @@ def patch(path_str: str):
     if 'http-equiv="Content-Security-Policy"' in html or "http-equiv='Content-Security-Policy'" in html:
         print(f"[OK] CSP déjà présente : {p}")
         return
+    nl = chr(10)
     if "<head>" in html:
-        html = html.replace("<head>", "<head>\n  " + META, 1)
+        html = html.replace("<head>", "<head>" + nl + "  " + META, 1)
     else:
-        html = META + "\n" + html
+        html = META + nl + html
     p.write_text(html, encoding="utf-8")
     print(f"[OK] CSP ajoutée : {p}")
 
@@ -645,26 +646,26 @@ PYEOF
 
                         TARGET_URL="http://$APP_CONTAINER:$APP_PORT/"
 
-                        # FIX 1 : --volumes-from au lieu du bind mount -v qui ne fonctionne
-                        #          pas quand Jenkins est lui-même dans un container.
-                        # FIX 2 : $TARGET_URL sans accolades pour éviter l'interpolation Groovy.
-                        # FIX 3 : chemins relatifs au -w PROJECT_DIR ; ZAP génère directement
-                        #          le JSON (-J) et le HTML (-r) sans script de parsing externe.
+                        # ZAP a besoin d'un environnement propre.
+                        # --volumes-from jenkins pollue /root et /home du container ZAP
+                        # et provoque un crash immediat avec exit code 3.
+                        # On monte UNIQUEMENT le dossier reports/zap via bind mount direct.
+                        # ZAP ecrit ses fichiers dans /zap/wrk mappe sur reports/zap.
                         docker run --rm \
                             --user root \
                             --network "$NETWORK_NAME" \
-                            --volumes-from "$JENKINS_CONTAINER" \
-                            -w "$PROJECT_DIR" \
+                            -v "$PROJECT_DIR/reports/zap:/zap/wrk:rw" \
+                            -e HOME=/zap \
                             ghcr.io/zaproxy/zaproxy:stable \
                             bash -c '
                                 status=0
                                 zap-baseline.py \
                                     -t "'"$TARGET_URL"'" \
                                     -a -I \
-                                    -J reports/zap/zap-report.json \
-                                    -r reports/zap/zap-report.html \
-                                    > reports/zap/zap-baseline.log 2>&1 || status=$?
-                                echo "$status" > reports/zap/zap-exit-code.txt
+                                    -J /zap/wrk/zap-report.json \
+                                    -r /zap/wrk/zap-report.html \
+                                    > /zap/wrk/zap-baseline.log 2>&1 || status=$?
+                                echo "$status" > /zap/wrk/zap-exit-code.txt
                                 exit 0
                             '
 
