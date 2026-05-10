@@ -368,168 +368,6 @@ print("zap low            :", zap_counts["low"])
 print("zap info           :", zap_counts["info"])
 PYEOF
 
-                    cat > reports/zap/parse_zap_log.py <<'PYEOF'
-import json
-import re
-import sys
-from pathlib import Path
-
-if len(sys.argv) != 3:
-    print("Usage: parse_zap_log.py <log> <json>", file=sys.stderr)
-    sys.exit(1)
-
-src = Path(sys.argv[1])
-out = Path(sys.argv[2])
-
-if not src.exists() or src.stat().st_size == 0:
-    print("ZAP log absent ou vide", file=sys.stderr)
-    sys.exit(1)
-
-lines = src.read_text(encoding="utf-8", errors="ignore").splitlines()
-
-alert_re = re.compile(r'^(WARN|FAIL)-(?:NEW|INPROG):\\s+(.+?)\\s+\\[(\\d+)\\]\\s+x\\s+(\\d+)\\s*$')
-url_re = re.compile(r'^\\s*(?:\\[(https?://[^\\]]+)\\]\\((https?://[^)]+)\\)|(https?://\\S+))\\s+\\(([^)]+)\\)\\s*$')
-
-alerts = []
-current = None
-
-for raw in lines:
-    line = raw.rstrip()
-
-    m = alert_re.match(line.strip())
-    if m:
-        level, name, plugin_id, count = m.groups()
-        riskcode = "3" if level == "FAIL" else "2"
-        current = {
-            "alert": name,
-            "name": name,
-            "pluginid": plugin_id,
-            "riskcode": riskcode,
-            "desc": "Alert parsed from zap-baseline.py console output.",
-            "solution": "Review the affected response, headers, cookies, and client-side resources.",
-            "instances": [],
-            "count": int(count)
-        }
-        alerts.append(current)
-        continue
-
-    m = url_re.match(line)
-    if m and current is not None:
-        uri = m.group(1) or m.group(2) or m.group(3)
-        evidence = m.group(4)
-        current["instances"].append({
-            "uri": uri,
-            "evidence": evidence,
-            "method": "GET"
-        })
-
-data = {
-    "site": [
-        {
-            "@name": "baseline-scan",
-            "alerts": alerts
-        }
-    ]
-}
-
-out.write_text(json.dumps(data, indent=2), encoding="utf-8")
-print(f"Parsed {len(alerts)} ZAP alerts into {out}")
-PYEOF
-
-                    cat > reports/zap/zap_to_html.py <<'PYEOF'
-import json
-from pathlib import Path
-
-src = Path("zap-report.json")
-out = Path("zap-report.html")
-
-try:
-    data = json.loads(src.read_text(encoding="utf-8"))
-except Exception:
-    data = {"site": [{"alerts": []}]}
-
-RISK_LABEL = {"3": "HIGH", "2": "MEDIUM", "1": "LOW", "0": "INFO"}
-RISK_COLOR = {"3": "#c0392b", "2": "#e67e22", "1": "#f1c40f", "0": "#2980b9"}
-
-all_alerts = []
-target = "N/A"
-
-for site in data.get("site", []) or []:
-    if target == "N/A":
-        target = site.get("@name", site.get("name", "N/A"))
-    for alert in site.get("alerts", []) or []:
-        all_alerts.append(alert)
-
-all_alerts.sort(key=lambda a: -int(a.get("riskcode", 0)))
-
-rows = ""
-for a in all_alerts:
-    rc = str(a.get("riskcode", "0"))
-    name = a.get("alert", a.get("name", "?"))
-    desc = (a.get("desc", "") or "")[:300].replace("<", "&lt;").replace(">", "&gt;")
-    sol = (a.get("solution", "") or "")[:300].replace("<", "&lt;").replace(">", "&gt;")
-    url = ""
-    for inst in a.get("instances", [])[:1]:
-        url = inst.get("uri", "")
-    color = RISK_COLOR.get(rc, "#999")
-    label = RISK_LABEL.get(rc, rc)
-    rows += f"""<tr>
-  <td><span style="background:{color};color:#fff;padding:2px 8px;border-radius:4px;font-size:12px">{label}</span></td>
-  <td><strong>{name}</strong><br><small style="color:#555">{url}</small></td>
-  <td style="font-size:12px">{desc}</td>
-  <td style="font-size:12px">{sol}</td>
-</tr>"""
-
-counts = {"3": 0, "2": 0, "1": 0, "0": 0}
-for a in all_alerts:
-    rc = str(a.get("riskcode", "0"))
-    if rc in counts:
-        counts[rc] += 1
-
-html = f"""<!DOCTYPE html>
-<html lang="fr">
-<head>
-  <meta charset="UTF-8">
-  <title>ZAP Security Report</title>
-  <style>
-    body {{ font-family: Arial, sans-serif; margin: 0; padding: 20px; background: #f5f5f5; color: #333; }}
-    h1 {{ color: #2c3e50; border-bottom: 3px solid #e74c3c; padding-bottom: 10px; }}
-    .summary {{ display: flex; gap: 15px; margin: 20px 0; flex-wrap: wrap; }}
-    .badge {{ padding: 15px 25px; border-radius: 8px; color: #fff; text-align: center; min-width: 100px; }}
-    .badge .num {{ font-size: 2em; font-weight: bold; }}
-    .badge .lbl {{ font-size: 12px; }}
-    table {{ width: 100%; border-collapse: collapse; background: #fff; box-shadow: 0 1px 4px rgba(0,0,0,.1); }}
-    th {{ background: #2c3e50; color: #fff; padding: 10px; text-align: left; }}
-    td {{ padding: 10px; border-bottom: 1px solid #eee; vertical-align: top; }}
-    tr:hover {{ background: #fafafa; }}
-    .meta {{ background: #fff; padding: 15px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 1px 4px rgba(0,0,0,.1); }}
-  </style>
-</head>
-<body>
-  <h1>ZAP Baseline Scan — Security Report</h1>
-  <div class="meta">
-    <strong>Cible :</strong> {target}<br>
-    <strong>Total alertes :</strong> {len(all_alerts)}
-  </div>
-  <div class="summary">
-    <div class="badge" style="background:#c0392b"><div class="num">{counts["3"]}</div><div class="lbl">HIGH</div></div>
-    <div class="badge" style="background:#e67e22"><div class="num">{counts["2"]}</div><div class="lbl">MEDIUM</div></div>
-    <div class="badge" style="background:#c8a200"><div class="num">{counts["1"]}</div><div class="lbl">LOW</div></div>
-    <div class="badge" style="background:#2980b9"><div class="num">{counts["0"]}</div><div class="lbl">INFO</div></div>
-  </div>
-  <table>
-    <thead><tr><th>Risque</th><th>Alerte</th><th>Description</th><th>Solution</th></tr></thead>
-    <tbody>
-      {rows if rows else '<tr><td colspan="4" style="text-align:center;padding:30px;color:#27ae60"><strong>Aucune alerte détectée</strong></td></tr>'}
-    </tbody>
-  </table>
-</body>
-</html>"""
-
-out.write_text(html, encoding="utf-8")
-print("Rapport HTML ZAP généré :", out)
-PYEOF
-
                     cat > reports/dashboard/patch_csp.py <<'PYEOF'
 from pathlib import Path
 import sys
@@ -546,9 +384,9 @@ def patch(path_str: str):
         print(f"[OK] CSP déjà présente : {p}")
         return
     if "<head>" in html:
-        html = html.replace("<head>", "<head>\\n  " + META, 1)
+        html = html.replace("<head>", "<head>\n  " + META, 1)
     else:
-        html = META + "\\n" + html
+        html = META + "\n" + html
     p.write_text(html, encoding="utf-8")
     print(f"[OK] CSP ajoutée : {p}")
 
@@ -793,50 +631,64 @@ PYEOF
         }
 
         stage('DAST - OWASP ZAP') {
-    steps {
-        catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
-            sh '''
-                set -eu
-                cd "$PROJECT_DIR"
+            steps {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
+                    sh '''
+                        set -eu
+                        cd "$PROJECT_DIR"
 
-                mkdir -p reports/zap
-                rm -f reports/zap/zap-baseline.log \
-                      reports/zap/zap-exit-code.txt \
-                      reports/zap/zap-report.json \
-                      reports/zap/zap-report.html
+                        mkdir -p reports/zap
+                        rm -f reports/zap/zap-baseline.log \
+                              reports/zap/zap-exit-code.txt \
+                              reports/zap/zap-report.json \
+                              reports/zap/zap-report.html
 
-                TARGET_URL="http://$APP_CONTAINER:$APP_PORT/"
+                        TARGET_URL="http://$APP_CONTAINER:$APP_PORT/"
 
-                docker run --rm \
-                    --user root \
-                    --network "$NETWORK_NAME" \
-                    --volumes-from "$JENKINS_CONTAINER" \
-                    -w "$PROJECT_DIR" \
-                    ghcr.io/zaproxy/zaproxy:stable \
-                    bash -c "
-                        status=0
-                        zap-baseline.py \
-                            -t '${TARGET_URL}' \
-                            -a -I \
-                            -J 'reports/zap/zap-report.json' \
-                            -r 'reports/zap/zap-report.html' \
-                            > reports/zap/zap-baseline.log 2>&1 || status=\$?
-                        echo \"\$status\" > reports/zap/zap-exit-code.txt
-                        exit 0
-                    "
+                        # FIX 1 : --volumes-from au lieu du bind mount -v qui ne fonctionne
+                        #          pas quand Jenkins est lui-même dans un container.
+                        # FIX 2 : $TARGET_URL sans accolades pour éviter l'interpolation Groovy.
+                        # FIX 3 : chemins relatifs au -w PROJECT_DIR ; ZAP génère directement
+                        #          le JSON (-J) et le HTML (-r) sans script de parsing externe.
+                        docker run --rm \
+                            --user root \
+                            --network "$NETWORK_NAME" \
+                            --volumes-from "$JENKINS_CONTAINER" \
+                            -w "$PROJECT_DIR" \
+                            ghcr.io/zaproxy/zaproxy:stable \
+                            bash -c '
+                                status=0
+                                zap-baseline.py \
+                                    -t "'"$TARGET_URL"'" \
+                                    -a -I \
+                                    -J reports/zap/zap-report.json \
+                                    -r reports/zap/zap-report.html \
+                                    > reports/zap/zap-baseline.log 2>&1 || status=$?
+                                echo "$status" > reports/zap/zap-exit-code.txt
+                                exit 0
+                            '
 
-                test -s reports/zap/zap-baseline.log \
-                    || { echo "[ERREUR] zap-baseline.log absent ou vide"; exit 1; }
+                        # Vérification du log
+                        test -s reports/zap/zap-baseline.log \
+                            || { echo "[ERREUR] zap-baseline.log absent ou vide"; exit 1; }
 
-                # Fallback JSON si ZAP n'en a pas produit
-                test -s reports/zap/zap-report.json \
-                    || echo '{"site":[{"@name":"baseline-scan","alerts":[]}]}' \
-                       > reports/zap/zap-report.json
-            '''
+                        # Affichage du code de sortie ZAP pour diagnostic
+                        echo "ZAP exit code : $(cat reports/zap/zap-exit-code.txt)"
+
+                        # Fallback JSON si ZAP n'en a pas produit (scan vide)
+                        test -s reports/zap/zap-report.json \
+                            || echo '{"site":[{"@name":"baseline-scan","alerts":[]}]}' \
+                               > reports/zap/zap-report.json
+
+                        # Fallback HTML minimaliste si ZAP n'en a pas produit
+                        if [ ! -s reports/zap/zap-report.html ]; then
+                            echo "<html><body><p>Aucune alerte ZAP détectée.</p></body></html>" \
+                                > reports/zap/zap-report.html
+                        fi
+                    '''
+                }
+            }
         }
-    }
-}
-        
 
         stage('Policy - OPA Gate') {
             steps {
