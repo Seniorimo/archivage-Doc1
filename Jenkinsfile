@@ -793,58 +793,55 @@ PYEOF
         }
 
         stage('DAST - OWASP ZAP') {
-            steps {
-                catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
-                    sh '''
-                        set -eu
-                        cd "$PROJECT_DIR"
+    steps {
+        catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
+            sh '''
+                set -eu
+                cd "$PROJECT_DIR"
 
-                        mkdir -p reports/zap
-                        rm -f \
-                            reports/zap/zap-baseline.log \
-                            reports/zap/zap-exit-code.txt \
-                            reports/zap/zap-report.json \
-                            reports/zap/zap-report.html
+                mkdir -p reports/zap
+                rm -f reports/zap/zap-baseline.log reports/zap/zap-exit-code.txt reports/zap/zap-report.json reports/zap/zap-report.html
 
-                        docker run --rm \
-                            --user root \
-                            --network "$NETWORK_NAME" \
-                            -v "$PROJECT_DIR/reports/zap:/zap/wrk:rw" \
-                            ghcr.io/zaproxy/zaproxy:stable \
-                            sh -lc '
-                                status=0
-                                cd /zap || exit 1
-                                ./zap-baseline.py -t "http://'"$APP_CONTAINER"':'"$APP_PORT"'/" -a -j -I > /zap/wrk/zap-baseline.log 2>&1 || status=$?
-                                echo "$status" > /zap/wrk/zap-exit-code.txt
-                                exit 0
-                            '
+                TARGET_URL="http://$APP_CONTAINER:$APP_PORT/"
 
-                        test -s reports/zap/zap-baseline.log \
-                            || { echo "[ERREUR] zap-baseline.log absent ou vide"; exit 1; }
+                docker run --rm \
+                    --user root \
+                    --network "$NETWORK_NAME" \
+                    -v "$PROJECT_DIR/reports/zap:/zap/wrk:rw" \
+                    ghcr.io/zaproxy/zaproxy:stable \
+                    sh -lc "
+                        status=0
+                        cd /zap || exit 1
+                        ./zap-baseline.py -t '$TARGET_URL' -a -I > /zap/wrk/zap-baseline.log 2>&1 || status=\\$?
+                        echo \\\"\\$status\\\" > /zap/wrk/zap-exit-code.txt
+                        exit 0
+                    "
 
-                        docker run --rm \
-                            --volumes-from "$JENKINS_CONTAINER" \
-                            -w "$PROJECT_DIR/reports/zap" \
-                            python:3.12-alpine \
-                            python parse_zap_log.py zap-baseline.log zap-report.json
+                test -s reports/zap/zap-baseline.log \
+                    || { echo "[ERREUR] zap-baseline.log absent ou vide"; cat reports/zap/zap-exit-code.txt 2>/dev/null || true; exit 1; }
 
-                        test -s reports/zap/zap-report.json \
-                            || echo '{"site":[{"@name":"baseline-scan","alerts":[]}]}' > reports/zap/zap-report.json
+                docker run --rm \
+                    --volumes-from "$JENKINS_CONTAINER" \
+                    -w "$PROJECT_DIR/reports/zap" \
+                    python:3.12-alpine \
+                    python parse_zap_log.py zap-baseline.log zap-report.json
 
-                        docker run --rm \
-                            --volumes-from "$JENKINS_CONTAINER" \
-                            -w "$PROJECT_DIR/reports/zap" \
-                            python:3.12-alpine \
-                            python zap_to_html.py
+                test -s reports/zap/zap-report.json \
+                    || echo '{"site":[{"@name":"baseline-scan","alerts":[]}]}' > reports/zap/zap-report.json
 
-                        test -s reports/zap/zap-report.html \
-                            || { echo "[ERREUR] zap-report.html absent ou vide"; exit 1; }
+                docker run --rm \
+                    --volumes-from "$JENKINS_CONTAINER" \
+                    -w "$PROJECT_DIR/reports/zap" \
+                    python:3.12-alpine \
+                    python zap_to_html.py
 
-                        ls -lah "$PROJECT_DIR/reports/zap"
-                    '''
-                }
-            }
+                test -s reports/zap/zap-report.html \
+                    || { echo "[ERREUR] zap-report.html absent ou vide"; exit 1; }
+            '''
         }
+    }
+}
+        
 
         stage('Policy - OPA Gate') {
             steps {
