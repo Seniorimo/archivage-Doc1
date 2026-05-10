@@ -473,18 +473,41 @@ PYEOF
                             sh '''
                                 set -eu
                                 cd "$PROJECT_DIR"
+
+                                echo "=== TRIVY : vérification socket Docker ==="
+                                test -S /var/run/docker.sock \
+                                    || { echo "[ERREUR] /var/run/docker.sock absent ou inaccessible"; exit 1; }
+
+                                echo "=== TRIVY : vérification image locale ==="
+                                docker image inspect "$DOCKER_IMAGE" >/dev/null 2>&1 \
+                                    || { echo "[ERREUR] Image $DOCKER_IMAGE absente localement"; exit 1; }
+
+                                echo "=== TRIVY : scan en cours ==="
                                 docker run --rm \
                                     -v /var/run/docker.sock:/var/run/docker.sock \
                                     -v "$PROJECT_DIR/reports/trivy:/reports" \
                                     -v "$TRIVY_CACHE:/root/.cache/trivy" \
                                     ghcr.io/aquasecurity/trivy:latest image \
                                         --no-progress \
-                                        --quiet \
                                         --scanners vuln \
-                                        --severity CRITICAL,HIGH \
+                                        --severity CRITICAL,HIGH,MEDIUM,LOW \
                                         --format json \
                                         --output /reports/trivy-report.json \
                                         "$DOCKER_IMAGE"
+
+                                echo "=== TRIVY : résultat brut (100 premières lignes) ==="
+                                head -100 reports/trivy/trivy-report.json || true
+
+                                echo "=== TRIVY : résumé vulnérabilités ==="
+                                docker run --rm \
+                                    -v /var/run/docker.sock:/var/run/docker.sock \
+                                    -v "$PROJECT_DIR/reports/trivy:/reports" \
+                                    -v "$TRIVY_CACHE:/root/.cache/trivy" \
+                                    ghcr.io/aquasecurity/trivy:latest image \
+                                        --no-progress \
+                                        --scanners vuln \
+                                        --severity CRITICAL,HIGH,MEDIUM,LOW \
+                                        "$DOCKER_IMAGE" || true
 
                                 test -s reports/trivy/trivy-report.json \
                                     || echo '{"Results":[]}' > reports/trivy/trivy-report.json
@@ -642,6 +665,7 @@ PYEOF
                         mkdir -p "$PROJECT_DIR/reports/zap"
                         chmod 777 "$PROJECT_DIR/reports/zap"
 
+                        echo "=== ZAP : lancement du scan ==="
                         docker run --rm \
                             --user root \
                             --network "$NETWORK_NAME" \
@@ -650,7 +674,11 @@ PYEOF
                             zap-baseline.py \
                                 -t "http://$APP_CONTAINER:$APP_PORT/" \
                                 -J "zap-report.json" \
+                                -r "zap-report.html" \
                                 -a -j -I || true
+
+                        echo "=== ZAP : contenu du dossier rapport ==="
+                        ls -lah "$PROJECT_DIR/reports/zap/" || true
 
                         docker run --rm \
                             -u 0:0 \
@@ -658,14 +686,26 @@ PYEOF
                             alpine:3.19 \
                             sh -c "chown -R ${JENKINS_UID}:${JENKINS_GID} /zap/wrk || true"
 
-                        test -s "$PROJECT_DIR/reports/zap/zap-report.json" \
-                            || echo '{"site":[{"alerts":[]}]}' > "$PROJECT_DIR/reports/zap/zap-report.json"
+                        echo "=== ZAP : vérification rapport JSON ==="
+                        if test -s "$PROJECT_DIR/reports/zap/zap-report.json"; then
+                            echo "[OK] zap-report.json présent et non vide"
+                            head -30 "$PROJECT_DIR/reports/zap/zap-report.json" || true
+                        else
+                            echo "[WARN] zap-report.json absent ou vide — fallback"
+                            echo '{"site":[{"alerts":[]}]}' > "$PROJECT_DIR/reports/zap/zap-report.json"
+                        fi
 
+                        echo "=== ZAP : génération rapport HTML enrichi ==="
                         docker run --rm \
                             --volumes-from $JENKINS_CONTAINER \
                             -w "$PROJECT_DIR/reports/zap" \
                             python:3.12-alpine \
                             python zap_to_html.py
+
+                        echo "=== ZAP : vérification rapport HTML ==="
+                        test -s "$PROJECT_DIR/reports/zap/zap-report.html" \
+                            && echo "[OK] zap-report.html généré ($(wc -c < $PROJECT_DIR/reports/zap/zap-report.html) octets)" \
+                            || echo "[WARN] zap-report.html absent ou vide"
                     '''
                 }
             }
@@ -678,11 +718,30 @@ PYEOF
                     sh '''
                         set -eu
 
+                        echo "=== OPA : génération input.json ==="
                         docker run --rm \
                             --volumes-from $JENKINS_CONTAINER \
                             -w "$PROJECT_DIR" \
                             python:3.12-alpine \
                             python reports/opa/build_input.py
+
+                        echo "=== OPA : contenu complet de input.json ==="
+                        cat "$PROJECT_DIR/reports/opa/input.json"
+
+                        echo "=== OPA : contenu de la règle security-gate.rego ==="
+                        cat "$PROJECT_DIR/policy/security-gate.rego"
+
+                        echo "=== OPA : évaluation ==="
+                        docker run --rm \
+                            --volumes-from $JENKINS_CONTAINER \
+                            -w "$PROJECT_DIR" \
+                            openpolicyagent/opa:latest \
+                            eval \
+                                --format pretty \
+                                --data "$PROJECT_DIR/policy/security-gate.rego" \
+                                --input "$PROJECT_DIR/reports/opa/input.json" \
+                                "data.security" \
+                            | tee "$PROJECT_DIR/reports/opa/opa-debug.txt" || true
 
                         docker run --rm \
                             --volumes-from $JENKINS_CONTAINER \
@@ -695,11 +754,14 @@ PYEOF
                                 "data.security.allow" \
                             > "$PROJECT_DIR/reports/opa/opa-result.txt"
 
+                        echo "=== OPA : résultat final ==="
                         cat "$PROJECT_DIR/reports/opa/opa-result.txt"
 
                         if ! grep -qx "true" "$PROJECT_DIR/reports/opa/opa-result.txt"; then
+                            echo "[FAIL] Security gate non passé — voir input.json et opa-debug.txt"
                             exit 1
                         fi
+                        echo "[OK] Security gate passé"
                     '''
                 }
             }
@@ -709,6 +771,14 @@ PYEOF
     post {
 
         always {
+            // ── Désactiver la CSP Jenkins pour afficher les rapports HTML ──
+            script {
+                System.setProperty(
+                    "hudson.model.DirectoryBrowserSupport.CSP",
+                    "default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob: https:;"
+                )
+            }
+
             sh '''
                 set +e
                 docker run --rm \
@@ -816,6 +886,7 @@ PYEOF
                             'src/reports/zap/zap-report.html',
                             'src/reports/zap/zap-report.json',
                             'src/reports/opa/opa-result.txt',
+                            'src/reports/opa/opa-debug.txt',
                             'src/reports/opa/input.json',
                             'src/reports/sbom/bom.json',
                             'src/reports/sbom/bom.xml',
