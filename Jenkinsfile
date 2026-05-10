@@ -11,13 +11,14 @@ pipeline {
     }
 
     environment {
-        APP_NAME        = 'archivage-Doc'
-        APP_CONTAINER   = 'app-archivage'
-        MYSQL_CONTAINER = 'mysql-archivage'
-        NETWORK_NAME    = 'archivage-net'
-        APP_PORT        = '8090'
-        MAVEN_REPO      = '/var/jenkins_home/.m2/repository'
-        SONARQUBE_ENV   = 'sonar'
+        APP_NAME          = 'archivage-Doc'
+        APP_CONTAINER     = 'app-archivage'
+        MYSQL_CONTAINER   = 'mysql-archivage'
+        NETWORK_NAME      = 'archivage-net'
+        APP_PORT          = '8090'
+        MAVEN_REPO        = '/var/jenkins_home/.m2/repository'
+        SONARQUBE_ENV     = 'sonar'
+        JENKINS_CONTAINER = 'jenkins'   // si ton conteneur Jenkins a un autre nom, change ici
     }
 
     stages {
@@ -27,13 +28,14 @@ pipeline {
             steps {
                 script {
                     env.PROJECT_DIR = "${env.WORKSPACE}/src"
-                    env.TRIVY_CACHE  = "${env.WORKSPACE}/src/.trivycache"
-                    env.JENKINS_UID  = sh(returnStdout: true, script: 'id -u').trim()
-                    env.JENKINS_GID  = sh(returnStdout: true, script: 'id -g').trim()
+                    env.TRIVY_CACHE = "${env.WORKSPACE}/src/.trivycache"
+                    env.JENKINS_UID = sh(returnStdout: true, script: 'id -u').trim()
+                    env.JENKINS_GID = sh(returnStdout: true, script: 'id -g').trim()
 
                     echo "✅ Environment initialized"
                     echo "   PROJECT_DIR: ${env.PROJECT_DIR}"
                     echo "   JENKINS_UID: ${env.JENKINS_UID}"
+                    echo "   JENKINS_CONTAINER: ${env.JENKINS_CONTAINER}"
                 }
             }
         }
@@ -58,6 +60,7 @@ pipeline {
                     }
 
                     env.GIT_SHORT_SHA = env.GIT_SHA.take(7)
+
                     echo "✅ Commit: ${env.GIT_SHA}"
                     echo "✅ Short SHA: ${env.GIT_SHORT_SHA}"
                 }
@@ -73,7 +76,7 @@ pipeline {
                     passwordVariable: 'DOCKER_HUB_PASSWORD'
                 )]) {
                     script {
-                        def tags = [env.GIT_SHORT_SHA, "latest", "main"]
+                        def tags = [env.GIT_SHORT_SHA, 'latest', 'main']
                         def imageFound = false
 
                         for (tag in tags) {
@@ -86,10 +89,11 @@ pipeline {
                                     echo "✅ Image pulled successfully"
                                 """
                                 env.RESOLVED_IMAGE_TAG = tag
+                                env.DOCKER_IMAGE = "${env.DOCKER_HUB_USERNAME}/archivage-app:${tag}"
                                 imageFound = true
                                 break
                             } catch (Exception e) {
-                                echo "⚠️  Tag not found: ${tag}, trying next..."
+                                echo "⚠️ Tag not found: ${tag}, trying next..."
                             }
                         }
 
@@ -97,7 +101,6 @@ pipeline {
                             error("❌ No image found on Docker Hub with tags: ${tags.join(', ')}")
                         }
 
-                        env.DOCKER_IMAGE = "\${env.DOCKER_HUB_USERNAME}/archivage-app:${env.RESOLVED_IMAGE_TAG}"
                         echo "✅ Using image: ${env.DOCKER_IMAGE}"
                     }
                 }
@@ -139,275 +142,6 @@ allow if {
 }
 REGO
 
-                    # ── generate_dashboard.py ──────────────────────────────
-                    cat > generate_dashboard.py <<'PYDASH'
-#!/usr/bin/env python3
-"""
-generate_dashboard.py — Security Dashboard consolidé pour archivage-Doc
-Agrège Gitleaks, Trivy, ZAP, OPA, SBOM (et SonarQube si dispo).
-"""
-import argparse
-import json
-import os
-import sys
-import urllib.request
-import urllib.error
-from datetime import datetime
-from pathlib import Path
-
-def load_json(path, default):
-    p = Path(path)
-    if not p.exists() or p.stat().st_size == 0:
-        return default
-    try:
-        return json.loads(p.read_text(encoding="utf-8"))
-    except Exception as e:
-        print(f"[WARN] Cannot parse {path}: {e}", file=sys.stderr)
-        return default
-
-def fetch_sonar(base_url, token, project_key):
-    if not base_url or not token or not project_key:
-        return None
-    try:
-        import base64
-        creds = base64.b64encode(f"{token}:".encode()).decode()
-        url = (
-            f"{base_url.rstrip('/')}/api/measures/component"
-            f"?component={project_key}"
-            f"&metricKeys=bugs,vulnerabilities,code_smells,"
-            f"coverage,duplicated_lines_density,security_hotspots"
-        )
-        req = urllib.request.Request(url, headers={"Authorization": f"Basic {creds}"})
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            measures = {
-                m["metric"]: m.get("value", "N/A")
-                for m in data.get("component", {}).get("measures", [])
-            }
-            return measures
-    except Exception as e:
-        print(f"[WARN] SonarQube fetch failed: {e}", file=sys.stderr)
-        return None
-
-def badge(value, label, color):
-    return (
-        f'<div class="badge" style="background:{color}">'
-        f'<div class="num">{value}</div>'
-        f'<div class="lbl">{label}</div></div>'
-    )
-
-def severity_color(sev):
-    return {"CRITICAL": "#8e1a1a", "HIGH": "#c0392b",
-            "MEDIUM": "#e67e22", "LOW": "#c8a200", "INFO": "#2980b9"}.get(sev, "#999")
-
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--reports",       default="reports")
-    ap.add_argument("--output",        default="reports/dashboard/security-dashboard.html")
-    ap.add_argument("--project",       default="archivage-Doc")
-    ap.add_argument("--sonar-url",     default="")
-    ap.add_argument("--sonar-token",   default="")
-    ap.add_argument("--sonar-project", default="")
-    args = ap.parse_args()
-
-    r = Path(args.reports)
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    # ── Load data ──────────────────────────────────────────────────────
-    gitleaks_data = load_json(r / "gitleaks/gitleaks-report.json", [])
-    trivy_data    = load_json(r / "trivy/trivy-report.json", {"Results": []})
-    zap_data      = load_json(r / "zap/zap-report.json", {"site": [{"alerts": []}]})
-    opa_result    = (r / "opa/opa-result.txt").read_text(encoding="utf-8").strip() \
-                        if (r / "opa/opa-result.txt").exists() else "unknown"
-    sbom_exists   = (r / "sbom/bom.json").exists() or (r / "sbom/bom.xml").exists()
-    opa_input     = load_json(r / "opa/input.json", {})
-    sonar_data    = fetch_sonar(args.sonar_url, args.sonar_token, args.sonar_project)
-
-    # ── Trivy stats ────────────────────────────────────────────────────
-    trivy_sev = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
-    trivy_vulns = []
-    for res in trivy_data.get("Results", []) or []:
-        for v in res.get("Vulnerabilities", []) or []:
-            s = (v.get("Severity") or "").upper()
-            if s in trivy_sev:
-                trivy_sev[s] += 1
-            trivy_vulns.append(v)
-
-    # ── ZAP stats ──────────────────────────────────────────────────────
-    RISK_LABEL = {"3": "HIGH", "2": "MEDIUM", "1": "LOW", "0": "INFO"}
-    RISK_COLOR = {"3": "#c0392b", "2": "#e67e22", "1": "#f1c40f", "0": "#2980b9"}
-    zap_counts = {"3": 0, "2": 0, "1": 0, "0": 0}
-    zap_alerts = []
-    for site in zap_data.get("site", []) or []:
-        for alert in site.get("alerts", []) or []:
-            rc = str(alert.get("riskcode", "0"))
-            zap_counts[rc] = zap_counts.get(rc, 0) + 1
-            zap_alerts.append(alert)
-
-    gitleaks_count = len(gitleaks_data) if isinstance(gitleaks_data, list) else 0
-    gate_color   = "#27ae60" if opa_result == "true" else "#c0392b"
-    gate_label   = "PASSED ✅" if opa_result == "true" else "BLOCKED ❌"
-
-    # ── Trivy rows ─────────────────────────────────────────────────────
-    trivy_rows = ""
-    for v in sorted(trivy_vulns, key=lambda x: ["CRITICAL","HIGH","MEDIUM","LOW"].index(
-            (x.get("Severity","LOW")).upper()) if (x.get("Severity","LOW")).upper()
-            in ["CRITICAL","HIGH","MEDIUM","LOW"] else 99)[:50]:
-        sev = (v.get("Severity") or "LOW").upper()
-        color = severity_color(sev)
-        cve   = v.get("VulnerabilityID", "N/A")
-        pkg   = v.get("PkgName", "N/A")
-        ver   = v.get("InstalledVersion", "N/A")
-        fix   = v.get("FixedVersion", "—")
-        title = (v.get("Title") or "")[:80]
-        trivy_rows += f"""<tr>
-            <td><span class="badge-inline" style="background:{color}">{sev}</span></td>
-            <td>{cve}</td><td>{pkg}</td><td>{ver}</td>
-            <td style="color:#27ae60">{fix}</td>
-            <td style="font-size:12px">{title}</td></tr>"""
-
-    # ── ZAP rows ───────────────────────────────────────────────────────
-    zap_rows = ""
-    for a in sorted(zap_alerts, key=lambda x: -int(x.get("riskcode", 0)))[:30]:
-        rc    = str(a.get("riskcode", "0"))
-        name  = (a.get("alert") or a.get("name") or "?")
-        desc  = (a.get("desc") or "")[:200].replace("<","&lt;").replace(">","&gt;")
-        sol   = (a.get("solution") or "")[:200].replace("<","&lt;").replace(">","&gt;")
-        url   = next((i.get("uri","") for i in a.get("instances",[])[:1]), "")
-        color = RISK_COLOR.get(rc, "#999")
-        label = RISK_LABEL.get(rc, rc)
-        zap_rows += f"""<tr>
-            <td><span class="badge-inline" style="background:{color}">{label}</span></td>
-            <td><strong>{name}</strong><br><small style="color:#777">{url}</small></td>
-            <td style="font-size:12px">{desc}</td>
-            <td style="font-size:12px">{sol}</td></tr>"""
-
-    # ── Gitleaks rows ──────────────────────────────────────────────────
-    gitleaks_rows = ""
-    for leak in (gitleaks_data[:20] if isinstance(gitleaks_data, list) else []):
-        rule    = leak.get("RuleID", "?")
-        file_   = leak.get("File", "?")
-        line    = leak.get("StartLine", "?")
-        commit  = (leak.get("Commit") or "")[:8]
-        gitleaks_rows += f"""<tr>
-            <td><span class="badge-inline" style="background:#8e1a1a">SECRET</span></td>
-            <td>{rule}</td><td>{file_}:{line}</td><td>{commit}</td></tr>"""
-
-    # ── SonarQube section ──────────────────────────────────────────────
-    sonar_html = ""
-    if sonar_data:
-        sonar_html = f"""
-        <h2>🔵 SonarQube</h2>
-        <div class="badges-row">
-            {badge(sonar_data.get("bugs","N/A"), "Bugs", "#c0392b")}
-            {badge(sonar_data.get("vulnerabilities","N/A"), "Vulnérabilités", "#8e1a1a")}
-            {badge(sonar_data.get("code_smells","N/A"), "Code Smells", "#e67e22")}
-            {badge(sonar_data.get("security_hotspots","N/A"), "Hotspots", "#c0392b")}
-            {badge(sonar_data.get("coverage","N/A") + "%", "Couverture", "#27ae60")}
-        </div>"""
-
-    # ── SBOM section ───────────────────────────────────────────────────
-    sbom_html = ""
-    if sbom_exists:
-        sbom_path = r / "sbom/bom.json"
-        sbom_raw  = load_json(sbom_path, {})
-        comp_count = len(sbom_raw.get("components", []))
-        sbom_html = f"""
-        <h2>📦 SBOM — CycloneDX</h2>
-        <div class="badges-row">
-            {badge(comp_count, "Composants", "#2980b9")}
-            {badge("✅", "bom.xml", "#27ae60")}
-            {badge("✅", "bom.json", "#27ae60")}
-        </div>"""
-
-    # ── HTML ───────────────────────────────────────────────────────────
-    html = f"""<!DOCTYPE html>
-<html lang="fr">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Security Dashboard — {args.project}</title>
-  <style>
-    *{{box-sizing:border-box;margin:0;padding:0}}
-    body{{font-family:'Segoe UI',Arial,sans-serif;background:#1a1a2e;color:#e0e0e0;padding:20px}}
-    h1{{color:#00d4ff;font-size:1.8em;margin-bottom:6px}}
-    h2{{color:#a0c4ff;font-size:1.1em;margin:28px 0 12px;border-left:4px solid #00d4ff;padding-left:10px}}
-    .meta{{color:#aaa;font-size:13px;margin-bottom:24px}}
-    .gate{{display:inline-block;padding:10px 28px;border-radius:6px;font-size:1.1em;
-           font-weight:bold;color:#fff;background:{gate_color};margin-bottom:24px}}
-    .badges-row{{display:flex;gap:14px;flex-wrap:wrap;margin-bottom:20px}}
-    .badge{{padding:14px 22px;border-radius:8px;color:#fff;text-align:center;min-width:90px}}
-    .badge .num{{font-size:1.8em;font-weight:bold;line-height:1.1}}
-    .badge .lbl{{font-size:11px;opacity:0.9;margin-top:4px}}
-    .badge-inline{{padding:2px 8px;border-radius:4px;color:#fff;font-size:11px;font-weight:bold}}
-    table{{width:100%;border-collapse:collapse;background:#16213e;border-radius:8px;
-           overflow:hidden;margin-bottom:28px;font-size:13px}}
-    th{{background:#0f3460;color:#a0c4ff;padding:10px;text-align:left}}
-    td{{padding:9px 10px;border-bottom:1px solid #1e2a4a;vertical-align:top}}
-    tr:hover{{background:#1e2a4a}}
-    .ok{{color:#27ae60;font-weight:bold}}
-    .warn{{color:#e67e22;font-weight:bold}}
-    .danger{{color:#c0392b;font-weight:bold}}
-    .section{{background:#16213e;border-radius:8px;padding:16px 20px;margin-bottom:20px}}
-  </style>
-</head>
-<body>
-  <h1>🛡️ Security Dashboard — {args.project}</h1>
-  <div class="meta">Généré le {now}</div>
-
-  <div class="gate">🚪 OPA Security Gate : {gate_label}</div>
-
-  <h2>🔴 Gitleaks — Secrets détectés</h2>
-  <div class="badges-row">
-    {badge(gitleaks_count, "Secrets", "#8e1a1a" if gitleaks_count > 0 else "#27ae60")}
-  </div>
-  {"" if not gitleaks_rows else f"""
-  <table><thead><tr><th>Sévérité</th><th>Règle</th><th>Fichier:Ligne</th><th>Commit</th></tr></thead>
-  <tbody>{gitleaks_rows}</tbody></table>"""}
-
-  <h2>🟠 Trivy — Vulnérabilités image</h2>
-  <div class="badges-row">
-    {badge(trivy_sev["CRITICAL"], "CRITICAL", "#8e1a1a")}
-    {badge(trivy_sev["HIGH"],     "HIGH",     "#c0392b")}
-    {badge(trivy_sev["MEDIUM"],   "MEDIUM",   "#e67e22")}
-    {badge(trivy_sev["LOW"],      "LOW",      "#c8a200")}
-  </div>
-  {"" if not trivy_rows else f"""
-  <table><thead><tr><th>Sévérité</th><th>CVE</th><th>Package</th>
-  <th>Version</th><th>Fix</th><th>Titre</th></tr></thead>
-  <tbody>{trivy_rows}</tbody></table>"""}
-
-  <h2>🟡 OWASP ZAP — Scan DAST</h2>
-  <div class="badges-row">
-    {badge(zap_counts["3"], "HIGH",   "#c0392b")}
-    {badge(zap_counts["2"], "MEDIUM", "#e67e22")}
-    {badge(zap_counts["1"], "LOW",    "#c8a200")}
-    {badge(zap_counts["0"], "INFO",   "#2980b9")}
-  </div>
-  {"" if not zap_rows else f"""
-  <table><thead><tr><th>Risque</th><th>Alerte</th>
-  <th>Description</th><th>Solution</th></tr></thead>
-  <tbody>{zap_rows}</tbody></table>"""}
-
-  {sonar_html}
-  {sbom_html}
-
-  <h2>📋 OPA Input Summary</h2>
-  <div class="section"><pre style="font-size:13px;color:#a0ffa0">{json.dumps(opa_input, indent=2)}</pre></div>
-
-</body>
-</html>"""
-
-    out = Path(args.output)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(html, encoding="utf-8")
-    print(f"✅ Dashboard généré : {out}")
-
-if __name__ == "__main__":
-    main()
-PYDASH
-
-                    # ── zap_to_html.py ──────────────────────────────────────
                     cat > reports/zap/zap_to_html.py <<'ZAPEOF'
 import json
 from pathlib import Path
@@ -489,7 +223,7 @@ html = f"""<!DOCTYPE html>
   <table>
     <thead><tr><th>Risque</th><th>Alerte</th><th>Description</th><th>Solution</th></tr></thead>
     <tbody>
-      {rows if rows else '<tr><td colspan="4" style="text-align:center;padding:30px;color:#27ae60"><strong>Aucune alerte</strong></td></tr>'}
+      {rows if rows else '<tr><td colspan="4" style="text-align:center;padding:30px;color:#27ae60"><strong>Aucune alerte détectée</strong></td></tr>'}
     </tbody>
   </table>
 </body>
@@ -499,7 +233,6 @@ out.write_text(html, encoding="utf-8")
 print("Rapport HTML ZAP généré : " + str(out))
 ZAPEOF
 
-                    # ── patch_csp.py ─────────────────────────────────────────
                     cat > reports/dashboard/patch_csp.py <<'PYEOF'
 from pathlib import Path
 import sys
@@ -512,19 +245,258 @@ def patch(path_str):
         print(f"[SKIP] Fichier absent : {p}")
         return
     html = p.read_text(encoding="utf-8", errors="ignore")
-    if 'http-equiv="Content-Security-Policy"' in html:
+    if 'http-equiv="Content-Security-Policy"' in html or "http-equiv='Content-Security-Policy'" in html:
         print(f"[OK] CSP déjà présente : {p}")
         return
     if "<head>" in html:
-        html = html.replace("<head>", "<head>\n  " + META, 1)
+        html = html.replace("<head>", "<head>\\n  " + META, 1)
     else:
-        html = META + "\n" + html
+        html = META + "\\n" + html
     p.write_text(html, encoding="utf-8")
     print(f"[OK] CSP ajoutée : {p}")
 
 for target in sys.argv[1:]:
     patch(target)
 PYEOF
+
+                    cat > reports/dashboard/generate_dashboard.py <<'PYDASH'
+#!/usr/bin/env python3
+import argparse
+import base64
+import json
+import sys
+import urllib.request
+from datetime import datetime
+from pathlib import Path
+
+def load_json(path, default):
+    p = Path(path)
+    if not p.exists() or p.stat().st_size == 0:
+        return default
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception as e:
+        print(f"[WARN] Cannot parse {path}: {e}", file=sys.stderr)
+        return default
+
+def fetch_sonar(base_url, token, project_key):
+    if not base_url or not token or not project_key:
+        return None
+    try:
+        creds = base64.b64encode(f"{token}:".encode()).decode()
+        url = (
+            f"{base_url.rstrip('/')}/api/measures/component"
+            f"?component={project_key}"
+            f"&metricKeys=bugs,vulnerabilities,code_smells,"
+            f"coverage,duplicated_lines_density,security_hotspots"
+        )
+        req = urllib.request.Request(url, headers={"Authorization": f"Basic {creds}"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            return {
+                m["metric"]: m.get("value", "N/A")
+                for m in data.get("component", {}).get("measures", [])
+            }
+    except Exception as e:
+        print(f"[WARN] SonarQube fetch failed: {e}", file=sys.stderr)
+        return None
+
+def badge(value, label, color):
+    return (
+        f'<div class="badge" style="background:{color}">'
+        f'<div class="num">{value}</div>'
+        f'<div class="lbl">{label}</div></div>'
+    )
+
+def sev_color(sev):
+    return {
+        "CRITICAL": "#8e1a1a",
+        "HIGH": "#c0392b",
+        "MEDIUM": "#e67e22",
+        "LOW": "#c8a200",
+        "INFO": "#2980b9"
+    }.get(sev, "#999")
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--reports", default="reports")
+    ap.add_argument("--output", default="reports/dashboard/security-dashboard.html")
+    ap.add_argument("--project", default="archivage-Doc")
+    ap.add_argument("--sonar-url", default="")
+    ap.add_argument("--sonar-token", default="")
+    ap.add_argument("--sonar-project", default="")
+    args = ap.parse_args()
+
+    r = Path(args.reports)
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    gitleaks = load_json(r / "gitleaks/gitleaks-report.json", [])
+    trivy    = load_json(r / "trivy/trivy-report.json", {"Results": []})
+    zap      = load_json(r / "zap/zap-report.json", {"site": [{"alerts": []}]})
+    opa_in   = load_json(r / "opa/input.json", {})
+    opa_txt  = (r / "opa/opa-result.txt").read_text(encoding="utf-8").strip() if (r / "opa/opa-result.txt").exists() else "unknown"
+    sonar    = fetch_sonar(args.sonar_url, args.sonar_token, args.sonar_project)
+    sbom_json_exists = (r / "sbom/bom.json").exists()
+    sbom_xml_exists  = (r / "sbom/bom.xml").exists()
+
+    trivy_sev = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
+    trivy_rows = ""
+    all_vulns = []
+    for result in trivy.get("Results", []) or []:
+        for v in result.get("Vulnerabilities", []) or []:
+            s = (v.get("Severity") or "").upper()
+            if s in trivy_sev:
+                trivy_sev[s] += 1
+            all_vulns.append(v)
+
+    for v in all_vulns[:50]:
+        sev = (v.get("Severity") or "LOW").upper()
+        trivy_rows += f"""<tr>
+<td><span class="badge-inline" style="background:{sev_color(sev)}">{sev}</span></td>
+<td>{v.get("VulnerabilityID","N/A")}</td>
+<td>{v.get("PkgName","N/A")}</td>
+<td>{v.get("InstalledVersion","N/A")}</td>
+<td>{v.get("FixedVersion","—")}</td>
+<td style="font-size:12px">{(v.get("Title") or "")[:100]}</td>
+</tr>"""
+
+    zap_counts = {"3": 0, "2": 0, "1": 0, "0": 0}
+    zap_rows = ""
+    all_alerts = []
+    for site in zap.get("site", []) or []:
+        for alert in site.get("alerts", []) or []:
+            rc = str(alert.get("riskcode", "0"))
+            if rc in zap_counts:
+                zap_counts[rc] += 1
+            all_alerts.append(alert)
+
+    RISK_LABEL = {"3": "HIGH", "2": "MEDIUM", "1": "LOW", "0": "INFO"}
+    RISK_COLOR = {"3": "#c0392b", "2": "#e67e22", "1": "#f1c40f", "0": "#2980b9"}
+
+    for a in all_alerts[:30]:
+        rc = str(a.get("riskcode", "0"))
+        label = RISK_LABEL.get(rc, rc)
+        color = RISK_COLOR.get(rc, "#999")
+        url = next((i.get("uri","") for i in a.get("instances",[])[:1]), "")
+        zap_rows += f"""<tr>
+<td><span class="badge-inline" style="background:{color}">{label}</span></td>
+<td><strong>{a.get("alert", a.get("name","?"))}</strong><br><small style="color:#777">{url}</small></td>
+<td style="font-size:12px">{(a.get("desc","") or "")[:220].replace("<","&lt;").replace(">","&gt;")}</td>
+<td style="font-size:12px">{(a.get("solution","") or "")[:220].replace("<","&lt;").replace(">","&gt;")}</td>
+</tr>"""
+
+    gitleaks_count = len(gitleaks) if isinstance(gitleaks, list) else 0
+    gitleaks_rows = ""
+    for leak in (gitleaks[:20] if isinstance(gitleaks, list) else []):
+        gitleaks_rows += f"""<tr>
+<td><span class="badge-inline" style="background:#8e1a1a">SECRET</span></td>
+<td>{leak.get("RuleID","?")}</td>
+<td>{leak.get("File","?")}:{leak.get("StartLine","?")}</td>
+<td>{(leak.get("Commit","") or "")[:8]}</td>
+</tr>"""
+
+    gate_color = "#27ae60" if opa_txt == "true" else "#c0392b"
+    gate_label = "PASSED ✅" if opa_txt == "true" else "BLOCKED ❌"
+
+    sonar_html = ""
+    if sonar:
+        sonar_html = f"""
+<h2>🔵 SonarQube</h2>
+<div class="badges-row">
+  {badge(sonar.get("bugs","N/A"), "Bugs", "#c0392b")}
+  {badge(sonar.get("vulnerabilities","N/A"), "Vulnérabilités", "#8e1a1a")}
+  {badge(sonar.get("code_smells","N/A"), "Code Smells", "#e67e22")}
+  {badge(sonar.get("security_hotspots","N/A"), "Hotspots", "#c0392b")}
+  {badge(str(sonar.get("coverage","N/A")) + "%", "Coverage", "#27ae60")}
+</div>"""
+
+    comp_count = 0
+    if sbom_json_exists:
+        sbom_json = load_json(r / "sbom/bom.json", {})
+        comp_count = len(sbom_json.get("components", []))
+
+    sbom_html = f"""
+<h2>📦 SBOM — CycloneDX</h2>
+<div class="badges-row">
+  {badge(comp_count, "Composants", "#2980b9")}
+  {badge("YES" if sbom_json_exists else "NO", "bom.json", "#27ae60" if sbom_json_exists else "#7f8c8d")}
+  {badge("YES" if sbom_xml_exists else "NO", "bom.xml", "#27ae60" if sbom_xml_exists else "#7f8c8d")}
+</div>"""
+
+    html = f"""<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Security Dashboard — {args.project}</title>
+  <style>
+    *{{box-sizing:border-box;margin:0;padding:0}}
+    body{{font-family:'Segoe UI',Arial,sans-serif;background:#1a1a2e;color:#e0e0e0;padding:20px}}
+    h1{{color:#00d4ff;font-size:1.8em;margin-bottom:6px}}
+    h2{{color:#a0c4ff;font-size:1.1em;margin:28px 0 12px;border-left:4px solid #00d4ff;padding-left:10px}}
+    .meta{{color:#aaa;font-size:13px;margin-bottom:24px}}
+    .gate{{display:inline-block;padding:10px 28px;border-radius:6px;font-size:1.1em;font-weight:bold;color:#fff;background:{gate_color};margin-bottom:24px}}
+    .badges-row{{display:flex;gap:14px;flex-wrap:wrap;margin-bottom:20px}}
+    .badge{{padding:14px 22px;border-radius:8px;color:#fff;text-align:center;min-width:90px}}
+    .badge .num{{font-size:1.8em;font-weight:bold;line-height:1.1}}
+    .badge .lbl{{font-size:11px;opacity:0.9;margin-top:4px}}
+    .badge-inline{{padding:2px 8px;border-radius:4px;color:#fff;font-size:11px;font-weight:bold}}
+    table{{width:100%;border-collapse:collapse;background:#16213e;border-radius:8px;overflow:hidden;margin-bottom:28px;font-size:13px}}
+    th{{background:#0f3460;color:#a0c4ff;padding:10px;text-align:left}}
+    td{{padding:9px 10px;border-bottom:1px solid #1e2a4a;vertical-align:top}}
+    tr:hover{{background:#1e2a4a}}
+    .section{{background:#16213e;border-radius:8px;padding:16px 20px;margin-bottom:20px}}
+    pre{{white-space:pre-wrap;word-break:break-word}}
+  </style>
+</head>
+<body>
+  <h1>🛡️ Security Dashboard — {args.project}</h1>
+  <div class="meta">Généré le {now}</div>
+
+  <div class="gate">🚪 OPA Security Gate : {gate_label}</div>
+
+  <h2>🔴 Gitleaks</h2>
+  <div class="badges-row">
+    {badge(gitleaks_count, "Secrets", "#8e1a1a" if gitleaks_count > 0 else "#27ae60")}
+  </div>
+  {("" if not gitleaks_rows else f'<table><thead><tr><th>Sévérité</th><th>Règle</th><th>Fichier:Ligne</th><th>Commit</th></tr></thead><tbody>{gitleaks_rows}</tbody></table>')}
+
+  <h2>🟠 Trivy</h2>
+  <div class="badges-row">
+    {badge(trivy_sev["CRITICAL"], "CRITICAL", "#8e1a1a")}
+    {badge(trivy_sev["HIGH"], "HIGH", "#c0392b")}
+    {badge(trivy_sev["MEDIUM"], "MEDIUM", "#e67e22")}
+    {badge(trivy_sev["LOW"], "LOW", "#c8a200")}
+  </div>
+  {("" if not trivy_rows else f'<table><thead><tr><th>Sévérité</th><th>CVE</th><th>Package</th><th>Version</th><th>Fix</th><th>Titre</th></tr></thead><tbody>{trivy_rows}</tbody></table>')}
+
+  <h2>🟡 ZAP</h2>
+  <div class="badges-row">
+    {badge(zap_counts["3"], "HIGH", "#c0392b")}
+    {badge(zap_counts["2"], "MEDIUM", "#e67e22")}
+    {badge(zap_counts["1"], "LOW", "#c8a200")}
+    {badge(zap_counts["0"], "INFO", "#2980b9")}
+  </div>
+  {("" if not zap_rows else f'<table><thead><tr><th>Risque</th><th>Alerte</th><th>Description</th><th>Solution</th></tr></thead><tbody>{zap_rows}</tbody></table>')}
+
+  {sonar_html}
+  {sbom_html}
+
+  <h2>📋 OPA Input</h2>
+  <div class="section"><pre>{json.dumps(opa_in, indent=2)}</pre></div>
+</body>
+</html>"""
+
+    out = Path(args.output)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(html, encoding="utf-8")
+    print(f"Dashboard généré : {out}")
+
+if __name__ == "__main__":
+    main()
+PYDASH
+
+                    chmod +x reports/dashboard/generate_dashboard.py || true
 
                     echo "✅ Workspace prepared"
                 '''
@@ -539,7 +511,6 @@ PYEOF
                     cd "$PROJECT_DIR"
                     echo "=== COMPILE LIGHT ==="
 
-                    # Find pom.xml
                     if [ -f "$PROJECT_DIR/pom.xml" ]; then
                         POM_PATH="$PROJECT_DIR/pom.xml"
                         WORK_DIR="$PROJECT_DIR"
@@ -547,8 +518,8 @@ PYEOF
                         POM_PATH="$PROJECT_DIR/backend/pom.xml"
                         WORK_DIR="$PROJECT_DIR/backend"
                     else
-                        echo "❌ pom.xml not found in $PROJECT_DIR or $PROJECT_DIR/backend"
-                        find "$PROJECT_DIR" -name "pom.xml" -maxdepth 4 | head -5
+                        echo "❌ pom.xml not found"
+                        find "$PROJECT_DIR" -maxdepth 4 -name pom.xml || true
                         exit 1
                     fi
 
@@ -556,8 +527,9 @@ PYEOF
 
                     docker run --rm \
                         --user "${JENKINS_UID}:${JENKINS_GID}" \
-                        -v "$MAVEN_REPO:$MAVEN_REPO:rw" \
-                        -v "$PROJECT_DIR:$PROJECT_DIR:rw" \
+                        --volumes-from "$JENKINS_CONTAINER" \
+                        -e HOME=/var/jenkins_home \
+                        -e MAVEN_CONFIG=/var/jenkins_home/.m2 \
                         -w "$WORK_DIR" \
                         maven:3.9.9-eclipse-temurin-17 \
                         sh -lc "mvn -B -f '$POM_PATH' \
@@ -583,7 +555,7 @@ PYEOF
                                 echo "=== GITLEAKS SCAN ==="
 
                                 docker run --rm \
-                                    -v "$PROJECT_DIR:$PROJECT_DIR:ro" \
+                                    --volumes-from "$JENKINS_CONTAINER" \
                                     -w "$PROJECT_DIR" \
                                     zricethezav/gitleaks:latest detect \
                                         --source . \
@@ -608,19 +580,22 @@ PYEOF
                             sh '''
                                 set -eu
                                 cd "$PROJECT_DIR"
-                                echo "=== TRIVY SCA SCAN ==="
+                                echo "=== TRIVY IMAGE SCAN ==="
+
+                                mkdir -p "$TRIVY_CACHE"
 
                                 docker run --rm \
+                                    --volumes-from "$JENKINS_CONTAINER" \
                                     -v /var/run/docker.sock:/var/run/docker.sock \
-                                    -v "$PROJECT_DIR/reports/trivy:/reports:rw" \
-                                    -v "$TRIVY_CACHE:/root/.cache/trivy:rw" \
+                                    -w "$PROJECT_DIR" \
                                     ghcr.io/aquasecurity/trivy:latest image \
                                         --no-progress \
                                         --quiet \
+                                        --cache-dir "$TRIVY_CACHE" \
                                         --scanners vuln \
                                         --severity CRITICAL,HIGH \
                                         --format json \
-                                        --output /reports/trivy-report.json \
+                                        --output "$PROJECT_DIR/reports/trivy/trivy-report.json" \
                                         "$DOCKER_IMAGE"
 
                                 test -s reports/trivy/trivy-report.json \
@@ -641,30 +616,38 @@ PYEOF
                                     sh '''
                                         set -eu
                                         cd "$PROJECT_DIR"
-                                        echo "=== SONARQUBE SAST ==="
+                                        echo "=== SONARQUBE ANALYSIS ==="
 
-                                        # Find target/classes (root or backend/)
+                                        if [ -f "$PROJECT_DIR/pom.xml" ]; then
+                                            POM_PATH="$PROJECT_DIR/pom.xml"
+                                            WORK_DIR="$PROJECT_DIR"
+                                        elif [ -f "$PROJECT_DIR/backend/pom.xml" ]; then
+                                            POM_PATH="$PROJECT_DIR/backend/pom.xml"
+                                            WORK_DIR="$PROJECT_DIR/backend"
+                                        else
+                                            echo "❌ pom.xml not found for SonarQube"
+                                            exit 1
+                                        fi
+
                                         if [ -d "$PROJECT_DIR/target/classes" ]; then
                                             BINARIES="target/classes"
                                         elif [ -d "$PROJECT_DIR/backend/target/classes" ]; then
-                                            BINARIES="backend/target/classes"
+                                            BINARIES="target/classes"
                                         else
-                                            echo "⚠️  No compiled classes — skipping SonarQube"
+                                            echo "⚠️ No compiled classes — skipping SonarQube"
                                             exit 0
                                         fi
 
-                                        POM_PATH="$PROJECT_DIR/pom.xml"
-                                        [ -f "$POM_PATH" ] || POM_PATH="$PROJECT_DIR/backend/pom.xml"
-
                                         docker run --rm \
                                             --user "${JENKINS_UID}:${JENKINS_GID}" \
+                                            --volumes-from "$JENKINS_CONTAINER" \
                                             --network "$NETWORK_NAME" \
                                             --add-host=host.docker.internal:host-gateway \
-                                            -v "$MAVEN_REPO:$MAVEN_REPO:rw" \
-                                            -v "$PROJECT_DIR:$PROJECT_DIR:rw" \
-                                            -w "$PROJECT_DIR" \
+                                            -e HOME=/var/jenkins_home \
+                                            -e MAVEN_CONFIG=/var/jenkins_home/.m2 \
                                             -e SONAR_HOST_URL="$SONAR_HOST_URL" \
                                             -e SONAR_AUTH_TOKEN="$SONAR_AUTH_TOKEN" \
+                                            -w "$WORK_DIR" \
                                             maven:3.9.9-eclipse-temurin-17 \
                                             sh -lc "mvn -B -f '$POM_PATH' \
                                                         -Dmaven.repo.local='$MAVEN_REPO' \
@@ -691,31 +674,43 @@ PYEOF
                                 cd "$PROJECT_DIR"
                                 echo "=== CYCLONEDX SBOM ==="
 
-                                POM_PATH="$PROJECT_DIR/pom.xml"
-                                [ -f "$POM_PATH" ] || POM_PATH="$PROJECT_DIR/backend/pom.xml"
+                                if [ -f "$PROJECT_DIR/pom.xml" ]; then
+                                    POM_PATH="$PROJECT_DIR/pom.xml"
+                                    WORK_DIR="$PROJECT_DIR"
+                                elif [ -f "$PROJECT_DIR/backend/pom.xml" ]; then
+                                    POM_PATH="$PROJECT_DIR/backend/pom.xml"
+                                    WORK_DIR="$PROJECT_DIR/backend"
+                                else
+                                    echo "❌ pom.xml not found for CycloneDX"
+                                    exit 1
+                                fi
 
                                 docker run --rm \
                                     --user "${JENKINS_UID}:${JENKINS_GID}" \
-                                    -v "$MAVEN_REPO:$MAVEN_REPO:rw" \
-                                    -v "$PROJECT_DIR:$PROJECT_DIR:rw" \
-                                    -w "$PROJECT_DIR" \
+                                    --volumes-from "$JENKINS_CONTAINER" \
+                                    -e HOME=/var/jenkins_home \
+                                    -e MAVEN_CONFIG=/var/jenkins_home/.m2 \
+                                    -w "$WORK_DIR" \
                                     maven:3.9.9-eclipse-temurin-17 \
                                     sh -lc "mvn -B -f '$POM_PATH' \
                                                 -Dmaven.repo.local='$MAVEN_REPO' \
                                                 org.cyclonedx:cyclonedx-maven-plugin:2.7.11:makeAggregateBom \
                                                 -DoutputFormat=all"
 
-                                for BOM_DIR in "$PROJECT_DIR/target" "$PROJECT_DIR/backend/target"; do
-                                    [ -f "$BOM_DIR/bom.xml"  ] && cp -f "$BOM_DIR/bom.xml"  "$PROJECT_DIR/reports/sbom/bom.xml"  || true
-                                    [ -f "$BOM_DIR/bom.json" ] && cp -f "$BOM_DIR/bom.json" "$PROJECT_DIR/reports/sbom/bom.json" || true
-                                done
+                                test -f "$PROJECT_DIR/target/bom.xml" \
+                                    && cp -f "$PROJECT_DIR/target/bom.xml" "$PROJECT_DIR/reports/sbom/bom.xml" || true
+                                test -f "$PROJECT_DIR/target/bom.json" \
+                                    && cp -f "$PROJECT_DIR/target/bom.json" "$PROJECT_DIR/reports/sbom/bom.json" || true
+                                test -f "$PROJECT_DIR/backend/target/bom.xml" \
+                                    && cp -f "$PROJECT_DIR/backend/target/bom.xml" "$PROJECT_DIR/reports/sbom/bom.xml" || true
+                                test -f "$PROJECT_DIR/backend/target/bom.json" \
+                                    && cp -f "$PROJECT_DIR/backend/target/bom.json" "$PROJECT_DIR/reports/sbom/bom.json" || true
 
-                                echo "✅ CycloneDX SBOM completed"
+                                echo "✅ CycloneDX completed"
                             '''
                         }
                     }
                 }
-
             }
         }
 
@@ -810,7 +805,7 @@ PYEOF
             }
         }
 
-        // ── 9. DAST - OWASP ZAP ─────────────────────────────────────────────
+        // ── 9. DAST - OWASP ZAP ──────────────────────────────────────────────
         stage('DAST - OWASP ZAP') {
             options { timeout(time: 30, unit: 'MINUTES') }
             steps {
@@ -824,30 +819,25 @@ PYEOF
                         chmod 777 "$PROJECT_DIR/reports/zap"
 
                         docker run --rm \
+                            --volumes-from "$JENKINS_CONTAINER" \
                             --network "$NETWORK_NAME" \
-                            -v "$PROJECT_DIR/reports/zap:/zap/wrk:rw" \
+                            -w "$PROJECT_DIR/reports/zap" \
                             ghcr.io/zaproxy/zaproxy:stable \
                             zap-baseline.py \
                                 -t "http://$APP_CONTAINER:$APP_PORT/" \
                                 -J "zap-report.json" \
                                 -a -j -I || true
 
-                        docker run --rm \
-                            -u 0:0 \
-                            -v "$PROJECT_DIR/reports/zap:/zap/wrk" \
-                            alpine:3.19 \
-                            sh -c "chown -R ${JENKINS_UID}:${JENKINS_GID} /zap/wrk && chmod -R u+w /zap/wrk" || true
-
                         test -s "$PROJECT_DIR/reports/zap/zap-report.json" \
                             || echo '{"site":[{"alerts":[]}]}' > "$PROJECT_DIR/reports/zap/zap-report.json"
 
                         docker run --rm \
-                            -v "$PROJECT_DIR/reports/zap:$PROJECT_DIR/reports/zap:rw" \
+                            --volumes-from "$JENKINS_CONTAINER" \
                             -w "$PROJECT_DIR/reports/zap" \
                             python:3.12-alpine \
                             python zap_to_html.py
 
-                        echo "✅ ZAP scan completed"
+                        echo "✅ ZAP completed"
                     '''
                 }
             }
@@ -862,7 +852,7 @@ PYEOF
                     echo "=== OPA SECURITY GATE ==="
 
                     docker run --rm \
-                        -v "$PROJECT_DIR:$PROJECT_DIR:rw" \
+                        --volumes-from "$JENKINS_CONTAINER" \
                         -w "$PROJECT_DIR" \
                         python:3.12-alpine \
                         python - <<'PYEOF'
@@ -899,8 +889,12 @@ for site in zap.get("site", []) or []:
 
 payload = {
     "gitleaks": gitleaks if isinstance(gitleaks, list) else [],
-    "trivy": {"critical": sev["CRITICAL"], "high": sev["HIGH"],
-              "medium": sev["MEDIUM"], "low": sev["LOW"]},
+    "trivy": {
+        "critical": sev["CRITICAL"],
+        "high": sev["HIGH"],
+        "medium": sev["MEDIUM"],
+        "low": sev["LOW"]
+    },
     "zap": {"high": zap_high}
 }
 
@@ -916,7 +910,7 @@ print("=========================")
 PYEOF
 
                     docker run --rm \
-                        -v "$PROJECT_DIR:$PROJECT_DIR:ro" \
+                        --volumes-from "$JENKINS_CONTAINER" \
                         -w "$PROJECT_DIR" \
                         openpolicyagent/opa:latest \
                         eval \
@@ -947,7 +941,8 @@ PYEOF
 
             sh '''
                 set +e
-                docker run --rm -u 0:0 \
+                docker run --rm \
+                    -u 0:0 \
                     -v "$WORKSPACE:/ws" \
                     alpine:3.19 \
                     sh -c "chown -R ${JENKINS_UID}:${JENKINS_GID} /ws 2>/dev/null || true"
@@ -956,8 +951,8 @@ PYEOF
 
             // ── Dashboard consolidé ──────────────────────────────────────
             script {
-                if (fileExists('src/generate_dashboard.py')) {
-                    withSonarQubeEnv("${SONARQUBE_ENV}") {
+                if (fileExists('src/reports/dashboard/generate_dashboard.py')) {
+                    withSonarQubeEnv("${SONARQUBE_ENV}", envOnly: true) {
                         sh '''
                             set +e
                             cd "$PROJECT_DIR"
@@ -966,14 +961,14 @@ PYEOF
                                 || docker network create "$NETWORK_NAME" >/dev/null 2>&1 || true
 
                             docker run --rm \
+                                --volumes-from "$JENKINS_CONTAINER" \
                                 --network "$NETWORK_NAME" \
                                 --add-host=host.docker.internal:host-gateway \
-                                -v "$PROJECT_DIR:$PROJECT_DIR:rw" \
-                                -w "$PROJECT_DIR" \
                                 -e SONAR_HOST_URL="${SONAR_HOST_URL:-}" \
                                 -e SONAR_AUTH_TOKEN="${SONAR_AUTH_TOKEN:-}" \
+                                -w "$PROJECT_DIR" \
                                 python:3.12-alpine \
-                                python generate_dashboard.py \
+                                python reports/dashboard/generate_dashboard.py \
                                     --reports reports \
                                     --output reports/dashboard/security-dashboard.html \
                                     --project "$APP_NAME" \
@@ -983,7 +978,7 @@ PYEOF
                         '''
                     }
                 } else {
-                    echo '⚠️  generate_dashboard.py absent — dashboard skipped'
+                    echo '⚠️ reports/dashboard/generate_dashboard.py absent — dashboard skipped'
                 }
             }
 
@@ -994,7 +989,7 @@ PYEOF
                         set +e
                         cd "$PROJECT_DIR"
                         docker run --rm \
-                            -v "$PROJECT_DIR:$PROJECT_DIR:rw" \
+                            --volumes-from "$JENKINS_CONTAINER" \
                             -w "$PROJECT_DIR" \
                             python:3.12-alpine \
                             python reports/dashboard/patch_csp.py \
@@ -1073,7 +1068,7 @@ PYEOF
             sh '''
                 set +e
                 docker logout >/dev/null 2>&1 || true
-                docker rm -f "$APP_CONTAINER"   >/dev/null 2>&1 || true
+                docker rm -f "$APP_CONTAINER" >/dev/null 2>&1 || true
                 docker rm -f "$MYSQL_CONTAINER" >/dev/null 2>&1 || true
                 docker network rm "$NETWORK_NAME" >/dev/null 2>&1 || true
                 echo "✅ Cleanup completed"
@@ -1085,7 +1080,7 @@ PYEOF
         }
 
         unstable {
-            echo '⚠️  Pipeline UNSTABLE — Security issues detected'
+            echo '⚠️ Pipeline UNSTABLE — Security issues detected'
         }
 
         success {
