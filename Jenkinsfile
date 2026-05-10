@@ -800,43 +800,38 @@ PYEOF
                 cd "$PROJECT_DIR"
 
                 mkdir -p reports/zap
-                rm -f reports/zap/zap-baseline.log reports/zap/zap-exit-code.txt reports/zap/zap-report.json reports/zap/zap-report.html
+                rm -f reports/zap/zap-baseline.log \
+                      reports/zap/zap-exit-code.txt \
+                      reports/zap/zap-report.json \
+                      reports/zap/zap-report.html
 
                 TARGET_URL="http://$APP_CONTAINER:$APP_PORT/"
 
                 docker run --rm \
                     --user root \
                     --network "$NETWORK_NAME" \
-                    -v "$PROJECT_DIR/reports/zap:/zap/wrk:rw" \
+                    --volumes-from "$JENKINS_CONTAINER" \
+                    -w "$PROJECT_DIR" \
                     ghcr.io/zaproxy/zaproxy:stable \
-                    sh -lc "
+                    bash -c "
                         status=0
-                        cd /zap || exit 1
-                        ./zap-baseline.py -t '$TARGET_URL' -a -I > /zap/wrk/zap-baseline.log 2>&1 || status=\\$?
-                        echo \\\"\\$status\\\" > /zap/wrk/zap-exit-code.txt
+                        zap-baseline.py \
+                            -t '${TARGET_URL}' \
+                            -a -I \
+                            -J 'reports/zap/zap-report.json' \
+                            -r 'reports/zap/zap-report.html' \
+                            > reports/zap/zap-baseline.log 2>&1 || status=\$?
+                        echo \"\$status\" > reports/zap/zap-exit-code.txt
                         exit 0
                     "
 
                 test -s reports/zap/zap-baseline.log \
-                    || { echo "[ERREUR] zap-baseline.log absent ou vide"; cat reports/zap/zap-exit-code.txt 2>/dev/null || true; exit 1; }
+                    || { echo "[ERREUR] zap-baseline.log absent ou vide"; exit 1; }
 
-                docker run --rm \
-                    --volumes-from "$JENKINS_CONTAINER" \
-                    -w "$PROJECT_DIR/reports/zap" \
-                    python:3.12-alpine \
-                    python parse_zap_log.py zap-baseline.log zap-report.json
-
+                # Fallback JSON si ZAP n'en a pas produit
                 test -s reports/zap/zap-report.json \
-                    || echo '{"site":[{"@name":"baseline-scan","alerts":[]}]}' > reports/zap/zap-report.json
-
-                docker run --rm \
-                    --volumes-from "$JENKINS_CONTAINER" \
-                    -w "$PROJECT_DIR/reports/zap" \
-                    python:3.12-alpine \
-                    python zap_to_html.py
-
-                test -s reports/zap/zap-report.html \
-                    || { echo "[ERREUR] zap-report.html absent ou vide"; exit 1; }
+                    || echo '{"site":[{"@name":"baseline-scan","alerts":[]}]}' \
+                       > reports/zap/zap-report.json
             '''
         }
     }
