@@ -663,8 +663,8 @@ PYEOF
                                 zap-baseline.py \
                                     -t "'"$TARGET_URL"'" \
                                     -a -I \
-                                    -J /zap/wrk/zap-report.json \
-                                    -r /zap/wrk/zap-report.html \
+                                    -J zap-report.json \
+                                    -r zap-report.html \
                                     2>&1 | tee /zap/wrk/zap-baseline.log
                                 echo "$?" > /zap/wrk/zap-exit-code.txt
                                 exit 0
