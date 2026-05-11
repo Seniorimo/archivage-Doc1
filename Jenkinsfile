@@ -750,8 +750,8 @@ PYEOF
             steps {
                 script {
                     if (env.ENFORCE_SECURITY_GATE != 'true') {
-                        def findingsStatus = sh(
-                            returnStatus: true,
+                        def securityVerdict = sh(
+                            returnStdout: true,
                             script: '''
                                 set -eu
                                 cd "$PROJECT_DIR"
@@ -767,20 +767,50 @@ from pathlib import Path
 p = Path("reports/opa/input.json")
 d = json.loads(p.read_text(encoding="utf-8"))
 
+scan_status = d.get("scan_status", {})
+missing_scans = [
+    name for name, status in scan_status.items()
+    if status != "ok"
+]
+
 has_findings = (
     len(d.get("gitleaks", [])) > 0 or
     d.get("trivy", {}).get("critical", 0) > 0 or
     d.get("trivy", {}).get("high", 0) > 0 or
-    d.get("zap", {}).get("high", 0) > 0
+    d.get("trivy", {}).get("medium", 0) > 0 or
+    d.get("trivy", {}).get("low", 0) > 0 or
+    d.get("zap", {}).get("high", 0) > 0 or
+    d.get("zap", {}).get("medium", 0) > 0 or
+    d.get("zap", {}).get("low", 0) > 0
 )
 
-raise SystemExit(2 if has_findings else 0)
+if missing_scans:
+    print("UNSTABLE: scans manquants -> " + ", ".join(missing_scans))
+elif has_findings:
+    print(
+        "UNSTABLE: findings detectes -> "
+        + "gitleaks=" + str(len(d.get("gitleaks", [])))
+        + ", trivy="
+        + str(d.get("trivy", {}).get("critical", 0)) + "C/"
+        + str(d.get("trivy", {}).get("high", 0)) + "H/"
+        + str(d.get("trivy", {}).get("medium", 0)) + "M/"
+        + str(d.get("trivy", {}).get("low", 0)) + "L"
+        + ", zap="
+        + str(d.get("zap", {}).get("high", 0)) + "H/"
+        + str(d.get("zap", {}).get("medium", 0)) + "M/"
+        + str(d.get("zap", {}).get("low", 0)) + "L"
+    )
+else:
+    print("SUCCESS: aucun finding detecte")
 PY
                             '''
                         )
 
-                        if (findingsStatus == 2) {
-                            currentBuild.result = 'UNSTABLE'
+                        securityVerdict = securityVerdict.trim()
+                        echo securityVerdict
+
+                        if (securityVerdict.startsWith('UNSTABLE:')) {
+                            unstable(securityVerdict)
                             echo 'Findings de sécurité détectés, build marqué UNSTABLE (gate non strict).'
                         }
                     }
