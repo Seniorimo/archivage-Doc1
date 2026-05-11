@@ -61,6 +61,7 @@ public class SecurityConfig {
                 .requestMatchers("/api/auth/test-register").permitAll() // Nouvel endpoint pour tester la création d'utilisateurs
                 .requestMatchers("/api/auth/register/manager").permitAll() // TEMPORAIRE: Permettre la création de manager sans authentification
                 .requestMatchers("/api/auth/register/employee").permitAll() // TEMPORAIRE: Permettre la création d'employé sans authentification
+                .requestMatchers("/robots.txt", "/sitemap.xml").permitAll() // Decouverte OWASP ZAP pour la demonstration DevSecOps
                 .requestMatchers("/api/test/**").permitAll() // Point d'accès de test sans authentification
                 .requestMatchers(HttpMethod.PUT, "/api/users/{id}").permitAll() // TEMPORAIRE: Pour déboguer la mise à jour des utilisateurs
                 .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll() // Pour CORS
