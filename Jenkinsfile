@@ -756,7 +756,7 @@ PYEOF
                                 set -eu
                                 cd "$PROJECT_DIR"
 
-                                docker run --rm \
+                                docker run --rm -i \
                                     --volumes-from "$JENKINS_CONTAINER" \
                                     -w "$PROJECT_DIR" \
                                     python:3.12-alpine \
