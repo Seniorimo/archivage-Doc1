@@ -20,6 +20,9 @@ public class DevSecOpsZapDiscoveryController {
         return """
                 User-agent: *
                 Allow: /api/test/devsecops/zap-demo
+                Allow: /api/test/devsecops/assets/jquery-1.8.3.min.js
+                Allow: /api/test/devsecops/assets/angular-1.2.19.min.js
+                Allow: /api/test/devsecops/assets/bootstrap-3.3.7.min.js
                 Allow: /api/test/devsecops/sqli
                 Allow: /api/test/devsecops/cmd
                 Allow: /api/test/devsecops/path
@@ -35,12 +38,15 @@ public class DevSecOpsZapDiscoveryController {
                 <?xml version="1.0" encoding="UTF-8"?>
                 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
                     <url><loc>%s/api/test/devsecops/zap-demo</loc></url>
+                    <url><loc>%s/api/test/devsecops/assets/jquery-1.8.3.min.js</loc></url>
+                    <url><loc>%s/api/test/devsecops/assets/angular-1.2.19.min.js</loc></url>
+                    <url><loc>%s/api/test/devsecops/assets/bootstrap-3.3.7.min.js</loc></url>
                     <url><loc>%s/api/test/devsecops/sqli?username=admin</loc></url>
                     <url><loc>%s/api/test/devsecops/cmd?host=127.0.0.1</loc></url>
                     <url><loc>%s/api/test/devsecops/path?file=../../etc/passwd</loc></url>
                     <url><loc>%s/api/test/devsecops/crypto?value=demo</loc></url>
                 </urlset>
-                """.formatted(baseUrl, baseUrl, baseUrl, baseUrl, baseUrl);
+                """.formatted(baseUrl, baseUrl, baseUrl, baseUrl, baseUrl, baseUrl, baseUrl, baseUrl);
     }
 
     @GetMapping(value = "/api/test/devsecops/zap-demo", produces = MediaType.TEXT_HTML_VALUE)
@@ -51,9 +57,9 @@ public class DevSecOpsZapDiscoveryController {
                 <head>
                     <meta charset="UTF-8">
                     <title>DevSecOps ZAP Demo</title>
-                    <script src="https://code.jquery.com/jquery-1.8.3.min.js"></script>
-                    <script src="https://ajax.googleapis.com/ajax/libs/angularjs/1.2.19/angular.min.js"></script>
-                    <script src="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.7/js/bootstrap.min.js"></script>
+                    <script src="/api/test/devsecops/assets/jquery-1.8.3.min.js"></script>
+                    <script src="/api/test/devsecops/assets/angular-1.2.19.min.js"></script>
+                    <script src="/api/test/devsecops/assets/bootstrap-3.3.7.min.js"></script>
                 </head>
                 <body>
                     <h1>Page volontairement vulnerable pour OWASP ZAP</h1>
@@ -93,6 +99,64 @@ public class DevSecOpsZapDiscoveryController {
                 .header("Access-Control-Allow-Credentials", "true")
                 .contentType(MediaType.TEXT_HTML)
                 .body(html);
+    }
+
+    @GetMapping(value = "/api/test/devsecops/assets/jquery-1.8.3.min.js", produces = "application/javascript")
+    public ResponseEntity<String> vulnerableJquery() {
+        return javascript("""
+                /*! jQuery v1.8.3 jquery.com | jquery.org/license */
+                (function(window){
+                    var jQuery = function(selector){ return new jQuery.fn.init(selector); };
+                    jQuery.fn = jQuery.prototype = {
+                        jquery: "1.8.3",
+                        init: function(selector){ this.selector = selector; return this; },
+                        html: function(value){ document.body.innerHTML = value; }
+                    };
+                    jQuery.fn.init.prototype = jQuery.fn;
+                    window.jQuery = window.$ = jQuery;
+                })(window);
+                """);
+    }
+
+    @GetMapping(value = "/api/test/devsecops/assets/angular-1.2.19.min.js", produces = "application/javascript")
+    public ResponseEntity<String> vulnerableAngular() {
+        return javascript("""
+                /*
+                 AngularJS v1.2.19
+                 https://angularjs.org
+                */
+                (function(window){
+                    window.angular = {
+                        version: { full: "1.2.19" },
+                        element: function(node){ return node; },
+                        module: function(){ return { controller: function(){ return this; } }; }
+                    };
+                })(window);
+                """);
+    }
+
+    @GetMapping(value = "/api/test/devsecops/assets/bootstrap-3.3.7.min.js", produces = "application/javascript")
+    public ResponseEntity<String> vulnerableBootstrap() {
+        return javascript("""
+                /*!
+                 * Bootstrap v3.3.7 (http://getbootstrap.com)
+                 * Copyright 2011-2016 Twitter, Inc.
+                 */
+                +function($) {
+                    'use strict';
+                    var old = $.fn.modal;
+                    $.fn.modal = function(option) { return this; };
+                    $.fn.modal.Constructor = { VERSION: '3.3.7' };
+                    $.fn.modal.noConflict = function() { $.fn.modal = old; return this; };
+                }(jQuery);
+                """);
+    }
+
+    private ResponseEntity<String> javascript(String body) {
+        return ResponseEntity.ok()
+                .header(HttpHeaders.CACHE_CONTROL, "public, max-age=31536000")
+                .contentType(MediaType.parseMediaType("application/javascript"))
+                .body(body);
     }
 
     private String baseUrl(HttpServletRequest request) {
