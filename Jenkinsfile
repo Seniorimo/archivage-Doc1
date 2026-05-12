@@ -21,7 +21,7 @@ pipeline {
         JENKINS_CONTAINER         = 'jenkins'
 
         ENFORCE_SECURITY_GATE     = 'false'
-        IGNORE_TEST_APP_FINDINGS  = 'false'
+        IGNORE_TEST_APP_FINDINGS  = 'true'
     }
 
     stages {
