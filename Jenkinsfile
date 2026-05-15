@@ -633,7 +633,6 @@ PYEOF
 
         stage('DAST - OWASP ZAP') {
             steps {
-                	{
                     sh '''
                         set -eu
                         cd "$PROJECT_DIR"
@@ -693,7 +692,6 @@ PYEOF
                                 > reports/zap/zap-report.html
                         fi
                     '''
-                }
             }
         }
 
