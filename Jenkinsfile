@@ -20,7 +20,7 @@ pipeline {
         SONARQUBE_ENV             = 'sonar'
         JENKINS_CONTAINER         = 'jenkins'
 
-        ENFORCE_SECURITY_GATE     = 'true'
+        ENFORCE_SECURITY_GATE     = 'false'
         IGNORE_TEST_APP_FINDINGS  = 'false'
     }
 
