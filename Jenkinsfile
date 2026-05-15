@@ -20,7 +20,7 @@ pipeline {
         SONARQUBE_ENV             = 'sonar'
         JENKINS_CONTAINER         = 'jenkins'
 
-        ENFORCE_SECURITY_GATE     = 'false'
+        ENFORCE_SECURITY_GATE     = 'true'
         IGNORE_TEST_APP_FINDINGS  = 'false'
     }
 
@@ -252,7 +252,18 @@ from pathlib import Path
 raw = Path("reports/gitleaks/gitleaks-raw.json")
 out = Path("reports/gitleaks/gitleaks-report.json")
 
-ignore_test_app_findings = os.environ.get("IGNORE_TEST_APP_FINDINGS", "true").lower() == "true"
+ignore_test_app_findings = os.environ.get("IGNORE_TEST_APP_FINDINGS", "false").lower() == "true"
+
+# Test/demo paths to ignore
+IGNORED_PATHS = [
+    "src/main/resources/application.properties",
+    "Jenkinsfile",
+]
+
+# Test/demo rules to ignore (only when path matches)
+IGNORED_RULES = {
+    "Jenkinsfile": ["curl-auth-user"],
+}
 
 if not raw.exists() or raw.stat().st_size == 0:
     out.write_text("[]", encoding="utf-8")
@@ -267,15 +278,115 @@ for item in data:
     path = item.get("File")
 
     if ignore_test_app_findings:
-        if path == "src/main/resources/application.properties":
+        # Ignore specific test/demo paths
+        if path in IGNORED_PATHS:
             continue
-        if path == "Jenkinsfile" and rule == "curl-auth-user":
+        # Ignore specific rules on specific paths
+        if path in IGNORED_RULES and rule in IGNORED_RULES[path]:
             continue
 
     filtered.append(item)
 
+ignored_count = len(data) - len(filtered)
 out.write_text(json.dumps(filtered, indent=2), encoding="utf-8")
-print(f"Gitleaks raw={len(data)} filtered={len(filtered)}")
+print(f"Gitleaks raw={len(data)} filtered={len(filtered)} ignored_test={ignored_count}")
+PYEOF
+
+                    cat > reports/zap/filter_zap.py <<'PYEOF'
+import json
+import os
+from pathlib import Path
+
+raw = Path("reports/zap/zap-report.json")
+out = Path("reports/zap/zap-report.filtered.json")
+
+ignore_test_app_findings = os.environ.get("IGNORE_TEST_APP_FINDINGS", "false").lower() == "true"
+
+# Test/demo endpoint prefixes to ignore
+IGNORED_ENDPOINT_PREFIXES = [
+    "/api/test/devsecops/",
+]
+
+# Test/demo specific paths to ignore
+IGNORED_PATHS = [
+    "/api/test/devsecops/zap-demo",
+    "/api/test/devsecops/cmd",
+    "/api/test/devsecops/crypto",
+    "/api/test/devsecops/path",
+    "/api/test/devsecops/sqli",
+    "/api/test/devsecops/assets/",
+]
+
+# Demo JS libraries to ignore (only when under test/demo paths)
+IGNORED_DEMO_ASSETS = [
+    "angular-1.2.19.min.js",
+    "bootstrap-3.3.7.min.js",
+    "jquery-1.8.3.min.js",
+]
+
+if not raw.exists() or raw.stat().st_size == 0:
+    out.write_text(json.dumps({"site": [{"@name": "baseline-scan", "alerts": []}]}, indent=2), encoding="utf-8")
+    print("Aucun rapport brut ZAP, rapport filtré vide.")
+    raise SystemExit(0)
+
+data = json.loads(raw.read_text(encoding="utf-8"))
+filtered_alerts = []
+total_alerts = 0
+
+for site in data.get("site", []):
+    site_name = site.get("@name", "")
+    alerts = site.get("alerts", [])
+    total_alerts += len(alerts)
+    
+    for alert in alerts:
+        alert_name = alert.get("name", "")
+        instances = alert.get("instances", [])
+        
+        # Filter instances based on test/demo paths
+        filtered_instances = []
+        for instance in instances:
+            uri = instance.get("uri", "")
+            method = instance.get("method", "")
+            
+            should_ignore = False
+            
+            if ignore_test_app_findings:
+                # Check if URI matches test/demo paths
+                for prefix in IGNORED_ENDPOINT_PREFIXES:
+                    if uri.startswith(prefix):
+                        should_ignore = True
+                        break
+                
+                for path in IGNORED_PATHS:
+                    if uri.startswith(path):
+                        should_ignore = True
+                        break
+                
+                # Check for demo assets under test/demo paths
+                for asset in IGNORED_DEMO_ASSETS:
+                    if asset in uri and any(prefix in uri for prefix in IGNORED_ENDPOINT_PREFIXES):
+                        should_ignore = True
+                        break
+            
+            if not should_ignore:
+                filtered_instances.append(instance)
+        
+        # Only keep alert if it has non-ignored instances
+        if filtered_instances:
+            alert_copy = alert.copy()
+            alert_copy["instances"] = filtered_instances
+            filtered_alerts.append(alert_copy)
+
+# Rebuild filtered report
+filtered_data = {"site": []}
+for site in data.get("site", []):
+    site_copy = site.copy()
+    site_copy["alerts"] = filtered_alerts
+    filtered_data["site"].append(site_copy)
+
+ignored_count = total_alerts - len(filtered_alerts)
+out.write_text(json.dumps(filtered_data, indent=2), encoding="utf-8")
+print(f"ZAP raw={total_alerts} filtered={len(filtered_alerts)} ignored_test={ignored_count}")
 PYEOF
 
                     cat > reports/opa/build_input.py <<'PYEOF'
@@ -292,13 +403,26 @@ def load_json(path_str, default):
     except Exception:
         return default
 
+ignore_test_app_findings = os.environ.get("IGNORE_TEST_APP_FINDINGS", "false").lower() == "true"
+
 scan_status = {
     "gitleaks": "missing",
     "trivy": "missing",
     "zap": "missing"
 }
 
-gitleaks = load_json("reports/gitleaks/gitleaks-report.json", None)
+# Use filtered reports if IGNORE_TEST_APP_FINDINGS=true
+gitleaks_path = "reports/gitleaks/gitleaks-report.json"
+zap_path = "reports/zap/zap-report.json"
+
+if ignore_test_app_findings:
+    # Try to use filtered reports, fall back to regular reports if filtered not available
+    gitleaks_filtered = load_json("reports/gitleaks/gitleaks-report.json", None)
+    zap_filtered = load_json("reports/zap/zap-report.filtered.json", None)
+    if zap_filtered is not None:
+        zap_path = "reports/zap/zap-report.filtered.json"
+
+gitleaks = load_json(gitleaks_path, None)
 if isinstance(gitleaks, list):
     scan_status["gitleaks"] = "ok"
 else:
@@ -310,7 +434,7 @@ if isinstance(trivy, dict) and isinstance(trivy.get("Results", []), list):
 else:
     trivy = {"Results": []}
 
-zap = load_json("reports/zap/zap-report.json", None)
+zap = load_json(zap_path, None)
 if isinstance(zap, dict) and isinstance(zap.get("site", []), list):
     scan_status["zap"] = "ok"
 else:
@@ -691,6 +815,14 @@ PYEOF
                             echo "<html><body><p>Aucune alerte ZAP détectée.</p></body></html>" \
                                 > reports/zap/zap-report.html
                         fi
+
+                        # Run ZAP filter if IGNORE_TEST_APP_FINDINGS=true
+                        docker run --rm \
+                            -e IGNORE_TEST_APP_FINDINGS="$IGNORE_TEST_APP_FINDINGS" \
+                            --volumes-from "$JENKINS_CONTAINER" \
+                            -w "$PROJECT_DIR" \
+                            python:3.12-alpine \
+                            python reports/zap/filter_zap.py
                     '''
             }
         }
@@ -912,6 +1044,7 @@ PY
                             'src/reports/zap/zap-exit-code.txt',
                             'src/reports/zap/zap-report.html',
                             'src/reports/zap/zap-report.json',
+                            'src/reports/zap/zap-report.filtered.json',
                             'src/reports/opa/opa-result.txt',
                             'src/reports/opa/opa-debug.txt',
                             'src/reports/opa/input.json',
