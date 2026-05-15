@@ -633,7 +633,7 @@ PYEOF
 
         stage('DAST - OWASP ZAP') {
             steps {
-                catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
+                	{
                     sh '''
                         set -eu
                         cd "$PROJECT_DIR"
