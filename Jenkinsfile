@@ -697,50 +697,48 @@ PYEOF
 
         stage('Policy - OPA Gate') {
             steps {
-                catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
-                    sh '''
-                        set -eu
-                        cd "$PROJECT_DIR"
+                sh '''
+                    set -eu
+                    cd "$PROJECT_DIR"
 
-                        docker run --rm \
-                            -e ENFORCE_SECURITY_GATE="$ENFORCE_SECURITY_GATE" \
-                            --volumes-from "$JENKINS_CONTAINER" \
-                            -w "$PROJECT_DIR" \
-                            python:3.12-alpine \
-                            python reports/opa/build_input.py
+                    docker run --rm \
+                        -e ENFORCE_SECURITY_GATE="$ENFORCE_SECURITY_GATE" \
+                        --volumes-from "$JENKINS_CONTAINER" \
+                        -w "$PROJECT_DIR" \
+                        python:3.12-alpine \
+                        python reports/opa/build_input.py
 
-                        docker run --rm \
-                            --volumes-from "$JENKINS_CONTAINER" \
-                            -w "$PROJECT_DIR" \
-                            openpolicyagent/opa:latest \
-                            eval \
-                                --format pretty \
-                                --data "$PROJECT_DIR/policy/security-gate.rego" \
-                                --input "$PROJECT_DIR/reports/opa/input.json" \
-                                "data.security" \
-                            | tee "$PROJECT_DIR/reports/opa/opa-debug.txt"
+                    docker run --rm \
+                        --volumes-from "$JENKINS_CONTAINER" \
+                        -w "$PROJECT_DIR" \
+                        openpolicyagent/opa:latest \
+                        eval \
+                            --format pretty \
+                            --data "$PROJECT_DIR/policy/security-gate.rego" \
+                            --input "$PROJECT_DIR/reports/opa/input.json" \
+                            "data.security" \
+                        | tee "$PROJECT_DIR/reports/opa/opa-debug.txt"
 
-                        docker run --rm \
-                            --volumes-from "$JENKINS_CONTAINER" \
-                            -w "$PROJECT_DIR" \
-                            openpolicyagent/opa:latest \
-                            eval \
-                                --format raw \
-                                --data "$PROJECT_DIR/policy/security-gate.rego" \
-                                --input "$PROJECT_DIR/reports/opa/input.json" \
-                                "data.security.allow" \
-                            > "$PROJECT_DIR/reports/opa/opa-result.txt"
+                    docker run --rm \
+                        --volumes-from "$JENKINS_CONTAINER" \
+                        -w "$PROJECT_DIR" \
+                        openpolicyagent/opa:latest \
+                        eval \
+                            --format raw \
+                            --data "$PROJECT_DIR/policy/security-gate.rego" \
+                            --input "$PROJECT_DIR/reports/opa/input.json" \
+                            "data.security.allow" \
+                        > "$PROJECT_DIR/reports/opa/opa-result.txt"
 
-                        cat "$PROJECT_DIR/reports/opa/opa-result.txt"
+                    cat "$PROJECT_DIR/reports/opa/opa-result.txt"
 
-                        if ! grep -qx "true" "$PROJECT_DIR/reports/opa/opa-result.txt"; then
-                            echo "[WARN] Security gate non passé"
-                            if [ "$ENFORCE_SECURITY_GATE" = "true" ]; then
-                                exit 1
-                            fi
+                    if ! grep -qx "true" "$PROJECT_DIR/reports/opa/opa-result.txt"; then
+                        echo "[WARN] Security gate non passé"
+                        if [ "$ENFORCE_SECURITY_GATE" = "true" ]; then
+                            exit 1
                         fi
-                    '''
-                }
+                    fi
+                '''
             }
         }
 
