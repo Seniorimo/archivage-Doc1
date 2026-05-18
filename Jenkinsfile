@@ -47,6 +47,29 @@ pipeline {
             }
         }
 
+        stage('Docker Access Preflight') {
+            steps {
+                sh '''
+                    set -eu
+                    echo "=== DOCKER ACCESS PREFLIGHT ==="
+
+                    command -v docker >/dev/null 2>&1 \
+                        || { echo "[ERREUR] Docker CLI absent dans le conteneur Jenkins."; exit 1; }
+
+                    test -x "$(command -v docker)" \
+                        || { echo "[ERREUR] Docker CLI present mais non executable par Jenkins."; ls -l "$(command -v docker)"; exit 1; }
+
+                    test -S /var/run/docker.sock \
+                        || { echo "[ERREUR] Docker socket absent: /var/run/docker.sock"; exit 1; }
+
+                    docker version >/dev/null 2>&1 \
+                        || { echo "[ERREUR] Jenkins ne peut pas utiliser Docker. Verifier le groupe du socket /var/run/docker.sock."; ls -l /var/run/docker.sock; id; exit 1; }
+
+                    docker version --format 'Docker client/server OK: {{.Client.Version}}'
+                '''
+            }
+        }
+
         stage('Force Clean Workspace') {
             steps {
                 sh '''
@@ -60,6 +83,7 @@ pipeline {
                             find /ws -mindepth 1 -maxdepth 1 -exec rm -rf {} + || true
                             mkdir -p /ws/src
                             chown -R ${JENKINS_UID}:${JENKINS_GID} /ws
+                            chmod -R u+rwX /ws
                             ls -la /ws
                         "
                 '''
@@ -217,6 +241,12 @@ PY
                     docker network inspect "$NETWORK_NAME" >/dev/null 2>&1 \
                         || docker network create "$NETWORK_NAME"
 
+                    docker run --rm \
+                        -u 0:0 \
+                        -v "$TRIVY_CACHE:/cache" \
+                        alpine:3.19 \
+                        sh -c "chown -R ${JENKINS_UID}:${JENKINS_GID} /cache && chmod -R u+rwX /cache || true"
+
                     if [ -f generate_dashboard.py ]; then
                         chmod +x generate_dashboard.py || true
                     fi
@@ -261,6 +291,7 @@ PY
                                 rm -f reports/gitleaks/gitleaks-raw.json reports/gitleaks/gitleaks-report.json
 
                                 docker run --rm \
+                                    --user "${JENKINS_UID}:${JENKINS_GID}" \
                                     --volumes-from "$JENKINS_CONTAINER" \
                                     -w "$PROJECT_DIR" \
                                     zricethezav/gitleaks:latest detect \
@@ -271,6 +302,7 @@ PY
                                         --exit-code 0
 
                                 docker run --rm \
+                                    --user "${JENKINS_UID}:${JENKINS_GID}" \
                                     -e IGNORE_TEST_APP_FINDINGS="$IGNORE_TEST_APP_FINDINGS" \
                                     --volumes-from "$JENKINS_CONTAINER" \
                                     -w "$PROJECT_DIR" \
@@ -281,7 +313,7 @@ PY
                                     -u 0:0 \
                                     -v "$PROJECT_DIR/reports/gitleaks:/reports" \
                                     alpine:3.19 \
-                                    sh -c "chown -R ${JENKINS_UID}:${JENKINS_GID} /reports || true"
+                                    sh -c "chown -R ${JENKINS_UID}:${JENKINS_GID} /reports && chmod -R u+rwX /reports || true"
 
                                 test -f reports/gitleaks/gitleaks-report.json || echo "[]" > reports/gitleaks/gitleaks-report.json
                                 test -s reports/gitleaks/gitleaks-report.json || echo "[]" > reports/gitleaks/gitleaks-report.json
@@ -320,6 +352,13 @@ PY
 
                                 test -s reports/trivy/trivy-report.json \
                                     || { echo "[ERREUR] trivy-report.json vide"; exit 1; }
+
+                                docker run --rm \
+                                    -u 0:0 \
+                                    -v "$PROJECT_DIR/reports/trivy:/reports" \
+                                    -v "$TRIVY_CACHE:/cache" \
+                                    alpine:3.19 \
+                                    sh -c "chown -R ${JENKINS_UID}:${JENKINS_GID} /reports /cache && chmod -R u+rwX /reports /cache || true"
                             '''
                         }
                     }
@@ -514,6 +553,12 @@ PY
 
                         docker volume rm "$ZAP_VOL" >/dev/null 2>&1 || true
 
+                        docker run --rm \
+                            -u 0:0 \
+                            -v "$PROJECT_DIR/reports/zap:/reports" \
+                            alpine:3.19 \
+                            sh -c "chown -R ${JENKINS_UID}:${JENKINS_GID} /reports && chmod -R u+rwX /reports || true"
+
                         test -s reports/zap/zap-baseline.log \
                             || { echo "[ERREUR] zap-baseline.log absent ou vide"; exit 1; }
 
@@ -530,6 +575,7 @@ PY
 
                         # Run ZAP filter if IGNORE_TEST_APP_FINDINGS=true
                         docker run --rm \
+                            --user "${JENKINS_UID}:${JENKINS_GID}" \
                             -e IGNORE_TEST_APP_FINDINGS="$IGNORE_TEST_APP_FINDINGS" \
                             --volumes-from "$JENKINS_CONTAINER" \
                             -w "$PROJECT_DIR" \
@@ -546,6 +592,7 @@ PY
                     cd "$PROJECT_DIR"
 
                     docker run --rm \
+                        --user "${JENKINS_UID}:${JENKINS_GID}" \
                         -e ENFORCE_SECURITY_GATE="$ENFORCE_SECURITY_GATE" \
                         --volumes-from "$JENKINS_CONTAINER" \
                         -w "$PROJECT_DIR" \
@@ -597,6 +644,7 @@ PY
                                 cd "$PROJECT_DIR"
 
                                 docker run --rm -i \
+                                    --user "${JENKINS_UID}:${JENKINS_GID}" \
                                     --volumes-from "$JENKINS_CONTAINER" \
                                     -w "$PROJECT_DIR" \
                                     python:3.12-alpine \
@@ -667,7 +715,7 @@ PY
                     -u 0:0 \
                     -v "$WORKSPACE:/ws" \
                     alpine:3.19 \
-                    sh -c "chown -R ${JENKINS_UID}:${JENKINS_GID} /ws 2>/dev/null || true"
+                    sh -c "chown -R ${JENKINS_UID}:${JENKINS_GID} /ws 2>/dev/null && chmod -R u+rwX /ws 2>/dev/null || true" || true
             '''
 
             script {
@@ -681,6 +729,7 @@ PY
                                 || docker network create "$NETWORK_NAME" >/dev/null 2>&1 || true
 
                             docker run --rm \
+                                --user "${JENKINS_UID}:${JENKINS_GID}" \
                                 --network "$NETWORK_NAME" \
                                 --volumes-from "$JENKINS_CONTAINER" \
                                 --add-host=host.docker.internal:host-gateway \
@@ -706,6 +755,7 @@ PY
                         set +e
                         cd "$PROJECT_DIR"
                         docker run --rm \
+                            --user "${JENKINS_UID}:${JENKINS_GID}" \
                             --volumes-from "$JENKINS_CONTAINER" \
                             -w "$PROJECT_DIR" \
                             python:3.12-alpine \
