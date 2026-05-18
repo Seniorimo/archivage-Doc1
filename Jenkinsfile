@@ -10,6 +10,19 @@ pipeline {
         buildDiscarder(logRotator(numToKeepStr: '10', artifactNumToKeepStr: '10'))
     }
 
+    parameters {
+        booleanParam(
+            name: 'ENFORCE_SECURITY_GATE',
+            defaultValue: false,
+            description: 'Strict mode: fail the build if the OPA security gate does not pass'
+        )
+        booleanParam(
+            name: 'IGNORE_TEST_APP_FINDINGS',
+            defaultValue: false,
+            description: 'Demo mode: ignore findings from /api/test/devsecops/* endpoints and demo assets'
+        )
+    }
+
     environment {
         APP_NAME                  = 'archivage-Doc'
         APP_CONTAINER             = 'app-archivage'
@@ -19,9 +32,6 @@ pipeline {
         MAVEN_REPO                = '/var/jenkins_home/.m2/repository'
         SONARQUBE_ENV             = 'sonar'
         JENKINS_CONTAINER         = 'jenkins'
-
-        ENFORCE_SECURITY_GATE     = 'false'
-        IGNORE_TEST_APP_FINDINGS  = 'true'
     }
 
     stages {
@@ -211,313 +221,11 @@ PY
                         chmod +x generate_dashboard.py || true
                     fi
 
-                    cat > policy/security-gate.rego <<'REGO'
-package security
-
-default allow := false
-
-strict_mode if {
-    input.settings.enforce_gate == true
-}
-
-scans_ok if {
-    input.scan_status.gitleaks == "ok"
-    input.scan_status.trivy == "ok"
-    input.scan_status.zap == "ok"
-}
-
-thresholds_ok if {
-    count(input.gitleaks) == 0
-    input.trivy.critical == 0
-    input.zap.high == 0
-}
-
-allow if {
-    scans_ok
-    not strict_mode
-}
-
-allow if {
-    scans_ok
-    strict_mode
-    thresholds_ok
-}
-REGO
-
-                    cat > reports/gitleaks/filter_gitleaks.py <<'PYEOF'
-import json
-import os
-from pathlib import Path
-
-raw = Path("reports/gitleaks/gitleaks-raw.json")
-out = Path("reports/gitleaks/gitleaks-report.json")
-
-ignore_test_app_findings = os.environ.get("IGNORE_TEST_APP_FINDINGS", "false").lower() == "true"
-
-# Test/demo paths to ignore
-IGNORED_PATHS = [
-    "src/main/resources/application.properties",
-    "Jenkinsfile",
-]
-
-# Test/demo rules to ignore (only when path matches)
-IGNORED_RULES = {
-    "Jenkinsfile": ["curl-auth-user"],
-}
-
-if not raw.exists() or raw.stat().st_size == 0:
-    out.write_text("[]", encoding="utf-8")
-    print("Aucun rapport brut Gitleaks, rapport final vide.")
-    raise SystemExit(0)
-
-data = json.loads(raw.read_text(encoding="utf-8"))
-filtered = []
-
-for item in data:
-    rule = item.get("RuleID")
-    path = item.get("File")
-
-    if ignore_test_app_findings:
-        # Ignore specific test/demo paths
-        if path in IGNORED_PATHS:
-            continue
-        # Ignore specific rules on specific paths
-        if path in IGNORED_RULES and rule in IGNORED_RULES[path]:
-            continue
-
-    filtered.append(item)
-
-ignored_count = len(data) - len(filtered)
-out.write_text(json.dumps(filtered, indent=2), encoding="utf-8")
-print(f"Gitleaks raw={len(data)} filtered={len(filtered)} ignored_test={ignored_count}")
-PYEOF
-
-                    cat > reports/zap/filter_zap.py <<'PYEOF'
-import json
-import os
-from pathlib import Path
-
-raw = Path("reports/zap/zap-report.json")
-out = Path("reports/zap/zap-report.filtered.json")
-
-ignore_test_app_findings = os.environ.get("IGNORE_TEST_APP_FINDINGS", "false").lower() == "true"
-
-# Test/demo endpoint prefixes to ignore
-IGNORED_ENDPOINT_PREFIXES = [
-    "/api/test/devsecops/",
-]
-
-# Test/demo specific paths to ignore
-IGNORED_PATHS = [
-    "/api/test/devsecops/zap-demo",
-    "/api/test/devsecops/cmd",
-    "/api/test/devsecops/crypto",
-    "/api/test/devsecops/path",
-    "/api/test/devsecops/sqli",
-    "/api/test/devsecops/assets/",
-]
-
-# Demo JS libraries to ignore (only when under test/demo paths)
-IGNORED_DEMO_ASSETS = [
-    "angular-1.2.19.min.js",
-    "bootstrap-3.3.7.min.js",
-    "jquery-1.8.3.min.js",
-]
-
-if not raw.exists() or raw.stat().st_size == 0:
-    out.write_text(json.dumps({"site": [{"@name": "baseline-scan", "alerts": []}]}, indent=2), encoding="utf-8")
-    print("Aucun rapport brut ZAP, rapport filtré vide.")
-    raise SystemExit(0)
-
-data = json.loads(raw.read_text(encoding="utf-8"))
-filtered_alerts = []
-total_alerts = 0
-
-for site in data.get("site", []):
-    site_name = site.get("@name", "")
-    alerts = site.get("alerts", [])
-    total_alerts += len(alerts)
-    
-    for alert in alerts:
-        alert_name = alert.get("name", "")
-        instances = alert.get("instances", [])
-        
-        # Filter instances based on test/demo paths
-        filtered_instances = []
-        for instance in instances:
-            uri = instance.get("uri", "")
-            method = instance.get("method", "")
-            
-            should_ignore = False
-            
-            if ignore_test_app_findings:
-                # Check if URI matches test/demo paths
-                for prefix in IGNORED_ENDPOINT_PREFIXES:
-                    if uri.startswith(prefix):
-                        should_ignore = True
-                        break
-                
-                for path in IGNORED_PATHS:
-                    if uri.startswith(path):
-                        should_ignore = True
-                        break
-                
-                # Check for demo assets under test/demo paths
-                for asset in IGNORED_DEMO_ASSETS:
-                    if asset in uri and any(prefix in uri for prefix in IGNORED_ENDPOINT_PREFIXES):
-                        should_ignore = True
-                        break
-            
-            if not should_ignore:
-                filtered_instances.append(instance)
-        
-        # Only keep alert if it has non-ignored instances
-        if filtered_instances:
-            alert_copy = alert.copy()
-            alert_copy["instances"] = filtered_instances
-            filtered_alerts.append(alert_copy)
-
-# Rebuild filtered report
-filtered_data = {"site": []}
-for site in data.get("site", []):
-    site_copy = site.copy()
-    site_copy["alerts"] = filtered_alerts
-    filtered_data["site"].append(site_copy)
-
-ignored_count = total_alerts - len(filtered_alerts)
-out.write_text(json.dumps(filtered_data, indent=2), encoding="utf-8")
-print(f"ZAP raw={total_alerts} filtered={len(filtered_alerts)} ignored_test={ignored_count}")
-PYEOF
-
-                    cat > reports/opa/build_input.py <<'PYEOF'
-import json
-import os
-from pathlib import Path
-
-def load_json(path_str, default):
-    p = Path(path_str)
-    if not p.exists() or p.stat().st_size == 0:
-        return default
-    try:
-        return json.loads(p.read_text(encoding="utf-8"))
-    except Exception:
-        return default
-
-ignore_test_app_findings = os.environ.get("IGNORE_TEST_APP_FINDINGS", "false").lower() == "true"
-
-scan_status = {
-    "gitleaks": "missing",
-    "trivy": "missing",
-    "zap": "missing"
-}
-
-# Use filtered reports if IGNORE_TEST_APP_FINDINGS=true
-gitleaks_path = "reports/gitleaks/gitleaks-report.json"
-zap_path = "reports/zap/zap-report.json"
-
-if ignore_test_app_findings:
-    # Try to use filtered reports, fall back to regular reports if filtered not available
-    gitleaks_filtered = load_json("reports/gitleaks/gitleaks-report.json", None)
-    zap_filtered = load_json("reports/zap/zap-report.filtered.json", None)
-    if zap_filtered is not None:
-        zap_path = "reports/zap/zap-report.filtered.json"
-
-gitleaks = load_json(gitleaks_path, None)
-if isinstance(gitleaks, list):
-    scan_status["gitleaks"] = "ok"
-else:
-    gitleaks = []
-
-trivy = load_json("reports/trivy/trivy-report.json", None)
-if isinstance(trivy, dict) and isinstance(trivy.get("Results", []), list):
-    scan_status["trivy"] = "ok"
-else:
-    trivy = {"Results": []}
-
-zap = load_json(zap_path, None)
-if isinstance(zap, dict) and isinstance(zap.get("site", []), list):
-    scan_status["zap"] = "ok"
-else:
-    zap = {"site": [{"alerts": []}]}
-
-sev = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
-for result in trivy.get("Results", []) or []:
-    for v in result.get("Vulnerabilities", []) or []:
-        s = (v.get("Severity") or "").upper()
-        if s in sev:
-            sev[s] += 1
-
-zap_counts = {"high": 0, "medium": 0, "low": 0, "info": 0}
-for site in zap.get("site", []) or []:
-    for alert in site.get("alerts", []) or []:
-        rc = str(alert.get("riskcode", "0"))
-        if rc == "3":
-            zap_counts["high"] += 1
-        elif rc == "2":
-            zap_counts["medium"] += 1
-        elif rc == "1":
-            zap_counts["low"] += 1
-        else:
-            zap_counts["info"] += 1
-
-payload = {
-    "settings": {
-        "enforce_gate": os.environ.get("ENFORCE_SECURITY_GATE", "false").lower() == "true"
-    },
-    "scan_status": scan_status,
-    "gitleaks": gitleaks,
-    "trivy": {
-        "critical": sev["CRITICAL"],
-        "high": sev["HIGH"],
-        "medium": sev["MEDIUM"],
-        "low": sev["LOW"]
-    },
-    "zap": zap_counts
-}
-
-Path("reports/opa").mkdir(parents=True, exist_ok=True)
-Path("reports/opa/input.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
-
-print("=== OPA INPUT SUMMARY ===")
-print("scan_status        :", scan_status)
-print("enforce_gate       :", payload["settings"]["enforce_gate"])
-print("gitleaks findings  :", len(gitleaks))
-print("trivy critical     :", sev["CRITICAL"])
-print("trivy high         :", sev["HIGH"])
-print("trivy medium       :", sev["MEDIUM"])
-print("trivy low          :", sev["LOW"])
-print("zap high           :", zap_counts["high"])
-print("zap medium         :", zap_counts["medium"])
-print("zap low            :", zap_counts["low"])
-print("zap info           :", zap_counts["info"])
-PYEOF
-
-                    cat > reports/dashboard/patch_csp.py <<'PYEOF'
-from pathlib import Path
-import sys
-
-META = """<meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob: https:; img-src 'self' data: blob: https:; style-src 'self' 'unsafe-inline' https:; font-src 'self' data: https:; script-src 'self' 'unsafe-inline' https:;">"""
-
-def patch(path_str: str):
-    p = Path(path_str)
-    if not p.exists():
-        print(f"[SKIP] Fichier absent : {p}")
-        return
-    html = p.read_text(encoding="utf-8", errors="ignore")
-    if 'http-equiv="Content-Security-Policy"' in html or "http-equiv='Content-Security-Policy'" in html:
-        print(f"[OK] CSP déjà présente : {p}")
-        return
-    nl = chr(10)
-    if "<head>" in html:
-        html = html.replace("<head>", "<head>" + nl + "  " + META, 1)
-    else:
-        html = META + nl + html
-    p.write_text(html, encoding="utf-8")
-    print(f"[OK] CSP ajoutée : {p}")
-
-for target in sys.argv[1:]:
-    patch(target)
-PYEOF
+                    test -f ci/scripts/filter_gitleaks.py || { echo "[ERROR] ci/scripts/filter_gitleaks.py missing"; exit 1; }
+                    test -f ci/scripts/filter_zap.py || { echo "[ERROR] ci/scripts/filter_zap.py missing"; exit 1; }
+                    test -f ci/scripts/build_input.py || { echo "[ERROR] ci/scripts/build_input.py missing"; exit 1; }
+                    test -f ci/scripts/patch_csp.py || { echo "[ERROR] ci/scripts/patch_csp.py missing"; exit 1; }
+                    test -f ci/policy/security-gate.rego || { echo "[ERROR] ci/policy/security-gate.rego missing"; exit 1; }
                 '''
             }
         }
@@ -567,7 +275,7 @@ PYEOF
                                     --volumes-from "$JENKINS_CONTAINER" \
                                     -w "$PROJECT_DIR" \
                                     python:3.12-alpine \
-                                    python reports/gitleaks/filter_gitleaks.py
+                                    python ci/scripts/filter_gitleaks.py
 
                                 docker run --rm \
                                     -u 0:0 \
@@ -775,6 +483,10 @@ PYEOF
                         ZAP_VOL="zap-reports-$$"
                         docker volume create "$ZAP_VOL" >/dev/null
 
+                        # Scan type: passive baseline scan (zap-baseline.py)
+                        # Scope: discovers and passively audits all endpoints reachable from TARGET_URL
+                        # Limitation: does not perform active attacks (no fuzzing, no form submission)
+                        # Improvement path: replace with zap-full-scan.py or zap-api-scan.py for active DAST
                         docker run --rm \
                             --user root \
                             --network "$NETWORK_NAME" \
@@ -822,7 +534,7 @@ PYEOF
                             --volumes-from "$JENKINS_CONTAINER" \
                             -w "$PROJECT_DIR" \
                             python:3.12-alpine \
-                            python reports/zap/filter_zap.py
+                            python ci/scripts/filter_zap.py
                     '''
             }
         }
@@ -838,7 +550,7 @@ PYEOF
                         --volumes-from "$JENKINS_CONTAINER" \
                         -w "$PROJECT_DIR" \
                         python:3.12-alpine \
-                        python reports/opa/build_input.py
+                        python ci/scripts/build_input.py
 
                     docker run --rm \
                         --volumes-from "$JENKINS_CONTAINER" \
@@ -846,7 +558,7 @@ PYEOF
                         openpolicyagent/opa:latest \
                         eval \
                             --format pretty \
-                            --data "$PROJECT_DIR/policy/security-gate.rego" \
+                            --data "$PROJECT_DIR/ci/policy/security-gate.rego" \
                             --input "$PROJECT_DIR/reports/opa/input.json" \
                             "data.security" \
                         | tee "$PROJECT_DIR/reports/opa/opa-debug.txt"
@@ -857,7 +569,7 @@ PYEOF
                         openpolicyagent/opa:latest \
                         eval \
                             --format raw \
-                            --data "$PROJECT_DIR/policy/security-gate.rego" \
+                            --data "$PROJECT_DIR/ci/policy/security-gate.rego" \
                             --input "$PROJECT_DIR/reports/opa/input.json" \
                             "data.security.allow" \
                         > "$PROJECT_DIR/reports/opa/opa-result.txt"
@@ -877,7 +589,7 @@ PYEOF
         stage('Security Verdict') {
             steps {
                 script {
-                    if (env.ENFORCE_SECURITY_GATE != 'true') {
+                    if (!params.ENFORCE_SECURITY_GATE) {
                         def securityVerdict = sh(
                             returnStdout: true,
                             script: '''
@@ -989,7 +701,7 @@ PY
             }
 
             script {
-                if (fileExists('src/reports/dashboard/patch_csp.py')) {
+                if (fileExists('src/ci/scripts/patch_csp.py')) {
                     sh '''
                         set +e
                         cd "$PROJECT_DIR"
@@ -997,7 +709,7 @@ PY
                             --volumes-from "$JENKINS_CONTAINER" \
                             -w "$PROJECT_DIR" \
                             python:3.12-alpine \
-                            python reports/dashboard/patch_csp.py \
+                            python ci/scripts/patch_csp.py \
                                 reports/dashboard/security-dashboard.html \
                                 reports/zap/zap-report.html || true
                     '''
