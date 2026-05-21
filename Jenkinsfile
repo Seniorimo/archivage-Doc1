@@ -438,78 +438,81 @@ PY
             }
         }
 
-        stage('Deploy MySQL') {
-            steps {
-                sh '''
-                    set -eu
-                    docker rm -f "$MYSQL_CONTAINER" >/dev/null 2>&1 || true
+        stage('Deploy Infrastructure') {
+            parallel {
+                stage('Deploy MySQL') {
+                    steps {
+                        sh '''
+                            set -eu
+                            docker rm -f "$MYSQL_CONTAINER" >/dev/null 2>&1 || true
 
-                    docker run -d \
-                        --name "$MYSQL_CONTAINER" \
-                        --network "$NETWORK_NAME" \
-                        -e MYSQL_ROOT_PASSWORD=root \
-                        -e MYSQL_DATABASE=archivage_doc \
-                        -e MYSQL_USER=archivage_user \
-                        -e MYSQL_PASSWORD=archivage_pass \
-                        mysql:8.0 >/dev/null
+                            docker run -d \
+                                --name "$MYSQL_CONTAINER" \
+                                --network "$NETWORK_NAME" \
+                                -e MYSQL_ROOT_PASSWORD=root \
+                                -e MYSQL_DATABASE=archivage_doc \
+                                -e MYSQL_USER=archivage_user \
+                                -e MYSQL_PASSWORD=archivage_pass \
+                                mysql:8.0 >/dev/null
 
-                    READY=0
-                    for i in $(seq 1 30); do
-                        if docker run --rm --network "$NETWORK_NAME" mysql:8.0 \
-                                mysqladmin ping -h"$MYSQL_CONTAINER" -uroot -proot --silent; then
-                            READY=1
-                            break
-                        fi
-                        sleep 5
-                    done
+                            READY=0
+                            for i in $(seq 1 30); do
+                                if docker run --rm --network "$NETWORK_NAME" mysql:8.0 \
+                                        mysqladmin ping -h"$MYSQL_CONTAINER" -uroot -proot --silent; then
+                                    READY=1
+                                    break
+                                fi
+                                sleep 5
+                            done
 
-                    test "$READY" -eq 1 || { echo "MySQL ne répond pas après 30 tentatives."; exit 1; }
-                    sleep 10
-                '''
-            }
-        }
+                            test "$READY" -eq 1 || { echo "MySQL ne répond pas après 30 tentatives."; exit 1; }
+                            sleep 10
+                        '''
+                    }
+                }
+                stage('Deploy App') {
+                    steps {
+                        sh '''
+                            set -eu
+                            docker rm -f "$APP_CONTAINER" >/dev/null 2>&1 || true
+                            mkdir -p "$PROJECT_DIR/uploads"
 
-        stage('Deploy App') {
-            steps {
-                sh '''
-                    set -eu
-                    docker rm -f "$APP_CONTAINER" >/dev/null 2>&1 || true
-                    mkdir -p "$PROJECT_DIR/uploads"
+                            _GITHUB_SECRET="${GITHUB_OAUTH_SECRET:-changeme-github}"
+                            _JWT_SECRET="${JWT_SECRET:-changeme-jwt-secret-32chars-min}"
 
-                    _GITHUB_SECRET="${GITHUB_OAUTH_SECRET:-changeme-github}"
-                    _JWT_SECRET="${JWT_SECRET:-changeme-jwt-secret-32chars-min}"
+                            docker run -d \
+                                --name "$APP_CONTAINER" \
+                                --network "$NETWORK_NAME" \
+                                --restart on-failure:5 \
+                                -v "$PROJECT_DIR/uploads:/app/uploads" \
+                                -e SPRING_PROFILES_ACTIVE=docker \
+                                -e SPRING_DATASOURCE_URL="jdbc:mysql://$MYSQL_CONTAINER:3306/archivage_doc?useUnicode=true&allowPublicKeyRetrieval=true&useSSL=false&serverTimezone=UTC" \
+                                -e SPRING_DATASOURCE_USERNAME="archivage_user" \
+                                -e SPRING_DATASOURCE_PASSWORD="archivage_pass" \
+                                -e GITHUB_OAUTH_SECRET="$_GITHUB_SECRET" \
+                                -e JWT_SECRET="$_JWT_SECRET" \
+                                "$DOCKER_IMAGE" >/dev/null
 
-                    docker run -d \
-                        --name "$APP_CONTAINER" \
-                        --network "$NETWORK_NAME" \
-                        --restart on-failure:5 \
-                        -v "$PROJECT_DIR/uploads:/app/uploads" \
-                        -e SPRING_PROFILES_ACTIVE=docker \
-                        -e SPRING_DATASOURCE_URL="jdbc:mysql://$MYSQL_CONTAINER:3306/archivage_doc?useUnicode=true&allowPublicKeyRetrieval=true&useSSL=false&serverTimezone=UTC" \
-                        -e SPRING_DATASOURCE_USERNAME="archivage_user" \
-                        -e SPRING_DATASOURCE_PASSWORD="archivage_pass" \
-                        -e GITHUB_OAUTH_SECRET="$_GITHUB_SECRET" \
-                        -e JWT_SECRET="$_JWT_SECRET" \
-                        "$DOCKER_IMAGE" >/dev/null
+                            READY=0
+                            for i in $(seq 1 30); do
+                                CODE=$(docker run --rm --network "$NETWORK_NAME" curlimages/curl:8.7.1 \
+                                       -s -o /dev/null -w "%{http_code}" \
+                                       "http://$APP_CONTAINER:$APP_PORT/actuator/health" || true)
+                                echo "HTTP=$CODE"
+                                if echo "$CODE" | grep -qE "^(200|301|302|401|403|404)$"; then
+                                    READY=1
+                                    break
+                                fi
+                                sleep 5
+                            done
 
-                    READY=0
-                    for i in $(seq 1 30); do
-                        CODE=$(docker run --rm --network "$NETWORK_NAME" curlimages/curl:8.7.1 \
-                               -s -o /dev/null -w "%{http_code}" \
-                               "http://$APP_CONTAINER:$APP_PORT/actuator/health" || true)
-                        echo "HTTP=$CODE"
-                        if echo "$CODE" | grep -qE "^(200|301|302|401|403|404)$"; then
-                            READY=1
-                            break
-                        fi
-                        sleep 5
-                    done
-
-                    if [ "$READY" -ne 1 ]; then
-                        docker logs "$APP_CONTAINER" --tail 200 || true
-                        exit 1
-                    fi
-                '''
+                            if [ "$READY" -ne 1 ]; then
+                                docker logs "$APP_CONTAINER" --tail 200 || true
+                                exit 1
+                            fi
+                        '''
+                    }
+                }
             }
         }
 
