@@ -53,6 +53,10 @@ pipeline {
                     set -eu
                     echo "=== DOCKER ACCESS PREFLIGHT ==="
 
+                    if [ "$JENKINS_UID" = "0" ]; then
+                        echo "[WARN] Jenkins tourne actuellement en root. Preferer un conteneur Jenkins non-root avec acces au groupe docker."
+                    fi
+
                     command -v docker >/dev/null 2>&1 \
                         || { echo "[ERREUR] Docker CLI absent dans le conteneur Jenkins."; exit 1; }
 
@@ -94,7 +98,14 @@ pipeline {
             steps {
                 dir('src') {
                     deleteDir()
-                    checkout scm
+                    checkout([
+                        $class: 'GitSCM',
+                        branches: [[name: '*/main']],
+                        userRemoteConfigs: [[url: 'https://github.com/Seniorimo/archivage-Doc1.git']],
+                        extensions: [
+                            [$class: 'CloneOption', shallow: true, depth: 1, noTags: true, timeout: 5]
+                        ]
+                    ])
                 }
                 script {
                     env.GIT_SHA = sh(
@@ -594,6 +605,11 @@ PY
                     docker run --rm \
                         --user "${JENKINS_UID}:${JENKINS_GID}" \
                         -e ENFORCE_SECURITY_GATE="$ENFORCE_SECURITY_GATE" \
+                        -e SONAR_HOST_URL="$SONAR_HOST_URL" \
+                        -e SONAR_AUTH_TOKEN="$SONAR_AUTH_TOKEN" \
+                        -e APP_NAME="$APP_NAME" \
+                        --network "$NETWORK_NAME" \
+                        --add-host=host.docker.internal:host-gateway \
                         --volumes-from "$JENKINS_CONTAINER" \
                         -w "$PROJECT_DIR" \
                         python:3.12-alpine \

@@ -1,6 +1,10 @@
 import json
 import os
+import time
+import base64
 from pathlib import Path
+from urllib.request import Request, urlopen
+from urllib.error import URLError
 
 
 def load_json(path_str, default):
@@ -67,23 +71,97 @@ for site in zap.get("site", []) or []:
         else:
             zap_counts["info"] += 1
 
-sonar_summary = load_json("reports/sonar/sonar-summary.json", None)
-if isinstance(sonar_summary, dict):
-    sonarqube = {
-        "status": "ok",
-        "quality_gate": sonar_summary.get("quality_gate", sonar_summary.get("qualityGate", "NONE")),
-        "bugs": int(sonar_summary.get("bugs", 0) or 0),
-        "vulnerabilities": int(sonar_summary.get("vulnerabilities", 0) or 0),
-        "code_smells": int(sonar_summary.get("code_smells", sonar_summary.get("codeSmells", 0)) or 0),
-    }
+def fetch_sonarqube_with_retry(sonar_url: str, sonar_token: str, project_key: str, max_attempts: int = 10, delay: int = 6) -> dict | None:
+    """Query SonarQube API with retry loop to wait for quality gate processing."""
+    if not sonar_url or not project_key:
+        return None
+
+    credentials = base64.b64encode(f"{sonar_token}:".encode()).decode()
+    headers = {"Authorization": f"Basic {credentials}"}
+
+    for attempt in range(max_attempts):
+        try:
+            # Check quality gate status
+            req = Request(
+                f"{sonar_url.rstrip('/')}/api/qualitygates/project_status?projectKey={project_key}",
+                headers=headers
+            )
+            with urlopen(req, timeout=10) as r:
+                gate_data = json.loads(r.read().decode())
+
+            project_status = gate_data.get("projectStatus", {})
+            if project_status.get("status"):
+                # Quality gate is ready, fetch metrics too
+                try:
+                    metrics_req = Request(
+                        f"{sonar_url.rstrip('/')}/api/measures/component?component={project_key}"
+                        "&metricKeys=bugs,vulnerabilities,code_smells",
+                        headers=headers
+                    )
+                    with urlopen(metrics_req, timeout=10) as r:
+                        metrics_data = json.loads(r.read().decode())
+
+                    metrics = {}
+                    for m in metrics_data.get("component", {}).get("measures", []):
+                        metrics[m["metric"]] = m.get("value", "0")
+
+                    return {
+                        "status": "ok",
+                        "quality_gate": project_status.get("status", "NONE"),
+                        "bugs": int(metrics.get("bugs", 0) or 0),
+                        "vulnerabilities": int(metrics.get("vulnerabilities", 0) or 0),
+                        "code_smells": int(metrics.get("code_smells", 0) or 0),
+                    }
+                except Exception:
+                    # If metrics fail, still return quality gate status
+                    return {
+                        "status": "ok",
+                        "quality_gate": project_status.get("status", "NONE"),
+                        "bugs": 0,
+                        "vulnerabilities": 0,
+                        "code_smells": 0,
+                    }
+        except URLError as e:
+            print(f"[INFO] SonarQube not ready (attempt {attempt + 1}/{max_attempts}): {e}")
+        except Exception as e:
+            print(f"[INFO] SonarQube check failed (attempt {attempt + 1}/{max_attempts}): {e}")
+
+        if attempt < max_attempts - 1:
+            time.sleep(delay)
+
+    return None
+
+
+# Try to get SonarQube data from API with retry (handles timing issue)
+sonar_url = os.environ.get("SONAR_HOST_URL", "")
+sonar_token = os.environ.get("SONAR_AUTH_TOKEN", "")
+project_key = os.environ.get("APP_NAME", "archivage-Doc")
+
+sonarqube_data = fetch_sonarqube_with_retry(sonar_url, sonar_token, project_key)
+
+if sonarqube_data:
+    sonarqube = sonarqube_data
+    scan_status["sonar"] = "ok"
 else:
-    sonarqube = {
-        "status": "missing",
-        "quality_gate": "NONE",
-        "bugs": 0,
-        "vulnerabilities": 0,
-        "code_smells": 0,
-    }
+    # Fallback to file-based check if API is unavailable
+    sonar_summary = load_json("reports/sonar/sonar-summary.json", None)
+    if isinstance(sonar_summary, dict):
+        sonarqube = {
+            "status": "ok",
+            "quality_gate": sonar_summary.get("quality_gate", sonar_summary.get("qualityGate", "NONE")),
+            "bugs": int(sonar_summary.get("bugs", 0) or 0),
+            "vulnerabilities": int(sonar_summary.get("vulnerabilities", 0) or 0),
+            "code_smells": int(sonar_summary.get("code_smells", sonar_summary.get("codeSmells", 0)) or 0),
+        }
+        scan_status["sonar"] = "ok"
+    else:
+        sonarqube = {
+            "status": "missing",
+            "quality_gate": "NONE",
+            "bugs": 0,
+            "vulnerabilities": 0,
+            "code_smells": 0,
+        }
 
 payload = {
     "settings": {
