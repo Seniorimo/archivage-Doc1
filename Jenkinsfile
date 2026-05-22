@@ -385,6 +385,9 @@ PY
                                         cd "$PROJECT_DIR"
                                         test -d "$PROJECT_DIR/target/classes"
 
+                                        : "${SONAR_HOST_URL:?SONAR_HOST_URL absent}"
+                                        : "${SONAR_AUTH_TOKEN:?SONAR_AUTH_TOKEN absent}"
+
                                         docker run --rm \
                                             --user "${JENKINS_UID}:${JENKINS_GID}" \
                                             -e HOME=/tmp \
@@ -518,137 +521,146 @@ PY
 
         stage('DAST - OWASP ZAP') {
             steps {
-                    sh '''
-                        set -eu
-                        cd "$PROJECT_DIR"
+                sh '''
+                    set -eu
+                    cd "$PROJECT_DIR"
 
-                        mkdir -p reports/zap
-                        rm -f reports/zap/zap-baseline.log \
-                              reports/zap/zap-exit-code.txt \
-                              reports/zap/zap-report.json \
-                              reports/zap/zap-report.html
+                    mkdir -p reports/zap
+                    rm -f reports/zap/zap-baseline.log \
+                          reports/zap/zap-exit-code.txt \
+                          reports/zap/zap-report.json \
+                          reports/zap/zap-report.html
 
-                        TARGET_URL="http://$APP_CONTAINER:$APP_PORT/"
+                    TARGET_URL="http://$APP_CONTAINER:$APP_PORT/"
 
-                        # Créer un volume Docker nommé et y copier rien (juste init)
-                        # Puis lancer ZAP qui écrit dans ce volume
-                        # Enfin copier les résultats depuis le volume vers reports/zap
-                        ZAP_VOL="zap-reports-$$"
-                        docker volume create "$ZAP_VOL" >/dev/null
+                    ZAP_VOL="zap-reports-$$"
+                    docker volume create "$ZAP_VOL" >/dev/null
 
-                        # Scan type: passive baseline scan (zap-baseline.py)
-                        # Scope: discovers and passively audits all endpoints reachable from TARGET_URL
-                        # Limitation: does not perform active attacks (no fuzzing, no form submission)
-                        # Improvement path: replace with zap-full-scan.py or zap-api-scan.py for active DAST
-                        docker run --rm \
-                            --user root \
-                            --network "$NETWORK_NAME" \
-                            -v "${ZAP_VOL}:/zap/wrk:rw" \
-                            -e HOME=/zap \
-                            ghcr.io/zaproxy/zaproxy:stable \
-                            bash -c '
-                                status=0
-                                zap-baseline.py \
-                                    -t "'"$TARGET_URL"'" \
-                                    -a -I \
-                                    -J zap-report.json \
-                                    -r zap-report.html \
-                                    2>&1 | tee /zap/wrk/zap-baseline.log
-                                echo "$?" > /zap/wrk/zap-exit-code.txt
-                                exit 0
-                            ' || true
+                    docker run --rm \
+                        --user root \
+                        --network "$NETWORK_NAME" \
+                        -v "${ZAP_VOL}:/zap/wrk:rw" \
+                        -e HOME=/zap \
+                        ghcr.io/zaproxy/zaproxy:stable \
+                        bash -c '
+                            status=0
+                            zap-baseline.py \
+                                -t "'"$TARGET_URL"'" \
+                                -a -I \
+                                -J zap-report.json \
+                                -r zap-report.html \
+                                2>&1 | tee /zap/wrk/zap-baseline.log
+                            echo "$?" > /zap/wrk/zap-exit-code.txt
+                            exit 0
+                        ' || true
 
-                        # Copier les fichiers du volume vers le workspace Jenkins
-                        docker run --rm \
-                            --volumes-from "$JENKINS_CONTAINER" \
-                            -v "${ZAP_VOL}:/zap/wrk:ro" \
-                            alpine:3.19 \
-                            sh -c "cp -f /zap/wrk/* $PROJECT_DIR/reports/zap/ 2>/dev/null || true"
+                    docker run --rm \
+                        --volumes-from "$JENKINS_CONTAINER" \
+                        -v "${ZAP_VOL}:/zap/wrk:ro" \
+                        alpine:3.19 \
+                        sh -c "cp -f /zap/wrk/* $PROJECT_DIR/reports/zap/ 2>/dev/null || true"
 
-                        docker volume rm "$ZAP_VOL" >/dev/null 2>&1 || true
+                    docker volume rm "$ZAP_VOL" >/dev/null 2>&1 || true
 
-                        docker run --rm \
-                            -u 0:0 \
-                            -v "$PROJECT_DIR/reports/zap:/reports" \
-                            alpine:3.19 \
-                            sh -c "chown -R ${JENKINS_UID}:${JENKINS_GID} /reports && chmod -R u+rwX /reports || true"
+                    docker run --rm \
+                        -u 0:0 \
+                        -v "$PROJECT_DIR/reports/zap:/reports" \
+                        alpine:3.19 \
+                        sh -c "chown -R ${JENKINS_UID}:${JENKINS_GID} /reports && chmod -R u+rwX /reports || true"
 
-                        test -s reports/zap/zap-baseline.log \
-                            || { echo "[ERREUR] zap-baseline.log absent ou vide"; exit 1; }
+                    test -s reports/zap/zap-baseline.log \
+                        || { echo "[ERREUR] zap-baseline.log absent ou vide"; exit 1; }
 
-                        echo "ZAP exit code : $(cat reports/zap/zap-exit-code.txt)"
+                    echo "ZAP exit code : $(cat reports/zap/zap-exit-code.txt)"
 
-                        test -s reports/zap/zap-report.json \
-                            || echo '{"site":[{"@name":"baseline-scan","alerts":[]}]}' \
-                               > reports/zap/zap-report.json
+                    test -s reports/zap/zap-report.json \
+                        || echo '{"site":[{"@name":"baseline-scan","alerts":[]}]}' \
+                           > reports/zap/zap-report.json
 
-                        if [ ! -s reports/zap/zap-report.html ]; then
-                            echo "<html><body><p>Aucune alerte ZAP détectée.</p></body></html>" \
-                                > reports/zap/zap-report.html
-                        fi
+                    if [ ! -s reports/zap/zap-report.html ]; then
+                        echo "<html><body><p>Aucune alerte ZAP détectée.</p></body></html>" \
+                            > reports/zap/zap-report.html
+                    fi
 
-                        # Run ZAP filter if IGNORE_TEST_APP_FINDINGS=true
-                        docker run --rm \
-                            --user "${JENKINS_UID}:${JENKINS_GID}" \
-                            -e IGNORE_TEST_APP_FINDINGS="$IGNORE_TEST_APP_FINDINGS" \
-                            --volumes-from "$JENKINS_CONTAINER" \
-                            -w "$PROJECT_DIR" \
-                            python:3.12-alpine \
-                            python ci/scripts/filter_zap.py
-                    '''
+                    docker run --rm \
+                        --user "${JENKINS_UID}:${JENKINS_GID}" \
+                        -e IGNORE_TEST_APP_FINDINGS="$IGNORE_TEST_APP_FINDINGS" \
+                        --volumes-from "$JENKINS_CONTAINER" \
+                        -w "$PROJECT_DIR" \
+                        python:3.12-alpine \
+                        python ci/scripts/filter_zap.py
+
+                    docker run --rm \
+                        -u 0:0 \
+                        -v "$PROJECT_DIR/reports/zap:/reports" \
+                        alpine:3.19 \
+                        sh -c "chown -R ${JENKINS_UID}:${JENKINS_GID} /reports && chmod -R u+rwX /reports || true"
+                '''
             }
         }
 
         stage('Policy - OPA Gate') {
             steps {
-                sh '''
-                    set -eu
-                    cd "$PROJECT_DIR"
+                script {
+                    withSonarQubeEnv("${SONARQUBE_ENV}") {
+                        sh '''
+                            set -eu
+                            cd "$PROJECT_DIR"
 
-                    docker run --rm \
-                        --user "${JENKINS_UID}:${JENKINS_GID}" \
-                        -e ENFORCE_SECURITY_GATE="$ENFORCE_SECURITY_GATE" \
-                        -e SONAR_HOST_URL="$SONAR_HOST_URL" \
-                        -e SONAR_AUTH_TOKEN="$SONAR_AUTH_TOKEN" \
-                        -e APP_NAME="$APP_NAME" \
-                        --network "$NETWORK_NAME" \
-                        --add-host=host.docker.internal:host-gateway \
-                        --volumes-from "$JENKINS_CONTAINER" \
-                        -w "$PROJECT_DIR" \
-                        python:3.12-alpine \
-                        python ci/scripts/build_input.py
+                            : "${SONAR_HOST_URL:?SONAR_HOST_URL absent}"
+                            : "${SONAR_AUTH_TOKEN:?SONAR_AUTH_TOKEN absent}"
 
-                    docker run --rm \
-                        --volumes-from "$JENKINS_CONTAINER" \
-                        -w "$PROJECT_DIR" \
-                        openpolicyagent/opa:latest \
-                        eval \
-                            --format pretty \
-                            --data "$PROJECT_DIR/ci/policy/security-gate.rego" \
-                            --input "$PROJECT_DIR/reports/opa/input.json" \
-                            "data.security" \
-                        | tee "$PROJECT_DIR/reports/opa/opa-debug.txt"
+                            mkdir -p reports/opa
 
-                    docker run --rm \
-                        --volumes-from "$JENKINS_CONTAINER" \
-                        -w "$PROJECT_DIR" \
-                        openpolicyagent/opa:latest \
-                        eval \
-                            --format raw \
-                            --data "$PROJECT_DIR/ci/policy/security-gate.rego" \
-                            --input "$PROJECT_DIR/reports/opa/input.json" \
-                            "data.security.allow" \
-                        > "$PROJECT_DIR/reports/opa/opa-result.txt"
+                            docker run --rm \
+                                --user "${JENKINS_UID}:${JENKINS_GID}" \
+                                -e ENFORCE_SECURITY_GATE="$ENFORCE_SECURITY_GATE" \
+                                -e SONAR_HOST_URL="$SONAR_HOST_URL" \
+                                -e SONAR_AUTH_TOKEN="$SONAR_AUTH_TOKEN" \
+                                -e APP_NAME="$APP_NAME" \
+                                --network "$NETWORK_NAME" \
+                                --add-host=host.docker.internal:host-gateway \
+                                --volumes-from "$JENKINS_CONTAINER" \
+                                -w "$PROJECT_DIR" \
+                                python:3.12-alpine \
+                                python ci/scripts/build_input.py
 
-                    cat "$PROJECT_DIR/reports/opa/opa-result.txt"
+                            test -s "$PROJECT_DIR/reports/opa/input.json" \
+                                || { echo "[ERREUR] reports/opa/input.json absent ou vide"; exit 1; }
 
-                    if ! grep -qx "true" "$PROJECT_DIR/reports/opa/opa-result.txt"; then
-                        echo "[WARN] Security gate non passé"
-                        if [ "$ENFORCE_SECURITY_GATE" = "true" ]; then
-                            exit 1
-                        fi
-                    fi
-                '''
+                            docker run --rm \
+                                --volumes-from "$JENKINS_CONTAINER" \
+                                -w "$PROJECT_DIR" \
+                                openpolicyagent/opa:latest \
+                                eval \
+                                    --format pretty \
+                                    --data "$PROJECT_DIR/ci/policy/security-gate.rego" \
+                                    --input "$PROJECT_DIR/reports/opa/input.json" \
+                                    "data.security" \
+                                | tee "$PROJECT_DIR/reports/opa/opa-debug.txt"
+
+                            docker run --rm \
+                                --volumes-from "$JENKINS_CONTAINER" \
+                                -w "$PROJECT_DIR" \
+                                openpolicyagent/opa:latest \
+                                eval \
+                                    --format raw \
+                                    --data "$PROJECT_DIR/ci/policy/security-gate.rego" \
+                                    --input "$PROJECT_DIR/reports/opa/input.json" \
+                                    "data.security.allow" \
+                                > "$PROJECT_DIR/reports/opa/opa-result.txt"
+
+                            cat "$PROJECT_DIR/reports/opa/opa-result.txt"
+
+                            if ! grep -qx "true" "$PROJECT_DIR/reports/opa/opa-result.txt"; then
+                                echo "[WARN] Security gate non passé"
+                                if [ "$ENFORCE_SECURITY_GATE" = "true" ]; then
+                                    exit 1
+                                fi
+                            fi
+                        '''
+                    }
+                }
             }
         }
 
@@ -773,6 +785,14 @@ PY
                     sh '''
                         set +e
                         cd "$PROJECT_DIR"
+
+                        docker run --rm \
+                            -u 0:0 \
+                            -v "$PROJECT_DIR/reports/dashboard:/dashboard" \
+                            -v "$PROJECT_DIR/reports/zap:/zap" \
+                            alpine:3.19 \
+                            sh -c "chown -R ${JENKINS_UID}:${JENKINS_GID} /dashboard /zap 2>/dev/null && chmod -R u+rwX /dashboard /zap 2>/dev/null || true"
+
                         docker run --rm \
                             --user "${JENKINS_UID}:${JENKINS_GID}" \
                             --volumes-from "$JENKINS_CONTAINER" \
