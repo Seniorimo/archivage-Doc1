@@ -5,7 +5,8 @@
 #      → résout AccessDeniedException sur FileStorageServiceImpl
 # ===========================================================================
 
-FROM eclipse-temurin:17-jre-alpine
+# INTENTIONAL VULN - TRIVY: Using older base image with known CVEs for PFE demo
+FROM openjdk:11-jre-slim
 
 # ---------------------------------------------------------------------------
 # METADATA (standard OCI)
