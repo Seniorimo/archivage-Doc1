@@ -601,6 +601,10 @@ PY
                             chmod u+w /reports/*.html /reports/*.json 2>/dev/null || true
                         " || true
 
+                    docker run --rm -u 0:0 \
+                        -v /var/jenkins_home/workspace/devsecops-tests/src/reports/zap:/reports \
+                        alpine:3.19 sh -c 'chown -R 1000:1000 /reports && chmod -R u+rwX /reports'
+
                     docker run --rm \
                         --user "${JENKINS_UID}:${JENKINS_GID}" \
                         -e IGNORE_TEST_APP_FINDINGS="$IGNORE_TEST_APP_FINDINGS" \
