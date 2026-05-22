@@ -37,18 +37,13 @@ public class FileStorageServiceImpl implements FileStorageService {
     
     @Override
     public String storeFile(MultipartFile file) throws IOException {
-        // VULNÉRABILITÉ: Path Traversal - La vérification ".." est contournable
         // Normaliser le nom de fichier
         String originalFilename = StringUtils.cleanPath(file.getOriginalFilename());
         
-        // VULNÉRABILITÉ: Vérification insuffisante du path traversal
-        // Peut être contourné avec des encodages ou des variations
+        // Vérifier si le nom de fichier contient des caractères invalides
         if (originalFilename.contains("..")) {
             throw new FileStorageException("Le nom de fichier contient un chemin invalide: " + originalFilename);
         }
-        
-        // VULNÉRABILITÉ: Pas de validation du type de fichier
-        // Permet l'upload de fichiers malveillants (ex: .php, .jsp, .exe)
         
         // Générer un nom de fichier unique pour éviter les conflits
         String uniqueFilename = UUID.randomUUID().toString() + "_" + originalFilename;

