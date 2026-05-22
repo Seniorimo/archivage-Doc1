@@ -178,32 +178,36 @@
 
 		<!-- VULNÉRABLE DEPENDENCIES FOR SCA TESTING -->
 		<!-- CVE-2021-44228 - Log4Shell -->
+		<!-- CONFLICT WITH SPRING BOOT 3.X - COMMENTED FOR BUILD COMPATIBILITY -->
+		<!--
 		<dependency>
 			<groupId>org.apache.logging.log4j</groupId>
 			<artifactId>log4j-api</artifactId>
 			<version>2.14.1</version>
 		</dependency>
+		-->
 
 		<!-- CVE-2022-22965 - Spring4Shell (Spring Framework 5.3.x < 5.3.18) -->
+		<!-- CONFLICT WITH SPRING BOOT 3.X - COMMENTED FOR BUILD COMPATIBILITY -->
+		<!--
 		<dependency>
 			<groupId>org.springframework</groupId>
 			<artifactId>spring-core</artifactId>
 			<version>5.3.16</version>
 		</dependency>
 
-		<!-- CVE-2022-22965 related -->
 		<dependency>
 			<groupId>org.springframework</groupId>
 			<artifactId>spring-beans</artifactId>
 			<version>5.3.16</version>
 		</dependency>
 
-		<!-- CVE-2018-1270 - Spring Messaging RCE -->
 		<dependency>
 			<groupId>org.springframework</groupId>
 			<artifactId>spring-messaging</artifactId>
 			<version>5.0.5.RELEASE</version>
 		</dependency>
+		-->
 
 		<!-- CVE-2021-29425 - ZipSlip in Commons Compress -->
 		<dependency>
@@ -220,18 +224,24 @@
 		</dependency>
 
 		<!-- CVE-2021-37533 - Log4j2 SocketServer deserialization -->
+		<!-- CONFLICT WITH SPRING BOOT 3.X -COMMENTED FOR BUILD COMPATIBILITY -->
+		<!--
 		<dependency>
 			<groupId>org.apache.logging.log4j</groupId>
 			<artifactId>log4j</artifactId>
 			<version>2.14.1</version>
 		</dependency>
+		-->
 
 		<!-- CVE-2022-22978 - Spring Security Regex bypass -->
+		<!-- CONFLICT WITH SPRING BOOT 3.X - COMMENTED FOR BUILD COMPATIBILITY -->
+		<!--
 		<dependency>
 			<groupId>org.springframework.security</groupId>
 			<artifactId>spring-security-core</artifactId>
 			<version>5.6.3</version>
 		</dependency>
+		-->
 
 		<!-- CVE-2021-26084 - Confluence OGNL injection (related to Struts) -->
 		<dependency>
@@ -269,11 +279,14 @@
 		</dependency>
 
 		<!-- CVE-2022-2048 - Spring Cloud Function SpEL injection -->
+		<!-- CONFLICT WITH SPRING BOOT 3.X - COMMENTED FOR BUILD COMPATIBILITY -->
+		<!--
 		<dependency>
 			<groupId>org.springframework.cloud</groupId>
 			<artifactId>spring-cloud-function-core</artifactId>
 			<version>3.1.6</version>
 		</dependency>
+		-->
 
 		<!-- CVE-2021-44228 related - JNDI lookup -->
 		<dependency>
