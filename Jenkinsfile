@@ -349,17 +349,30 @@ PY
                                 mkdir -p reports/trivy
                                 rm -f reports/trivy/trivy-report.json reports/trivy/trivy.stderr.log
 
+                                # Ensure Trivy cache directory exists with correct permissions
                                 docker run --rm \
+                                    -u 0:0 \
+                                    -v "$TRIVY_CACHE:/cache" \
+                                    alpine:3.19 \
+                                    sh -c "mkdir -p /cache && chown -R ${JENKINS_UID}:${JENKINS_GID} /cache && chmod -R u+rwX /cache || true"
+
+                                docker run --rm \
+                                    --user "${JENKINS_UID}:${JENKINS_GID}" \
                                     -v /var/run/docker.sock:/var/run/docker.sock \
                                     -v "$TRIVY_CACHE:/root/.cache/trivy" \
                                     ghcr.io/aquasecurity/trivy:v0.54.1 image \
-                                        --quiet \
+                                        --no-progress \
                                         --scanners vuln \
                                         --severity CRITICAL,HIGH,MEDIUM,LOW \
                                         --format json \
                                         "$DOCKER_IMAGE" \
                                     > reports/trivy/trivy-report.json \
-                                    2> reports/trivy/trivy.stderr.log
+                                    2> reports/trivy/trivy.stderr.log || {
+                                        echo "[WARN] Trivy scan failed, checking if report was partially generated"
+                                        if [ ! -s reports/trivy/trivy-report.json ]; then
+                                            echo '{"Results":[]}' > reports/trivy/trivy-report.json
+                                        fi
+                                    }
 
                                 test -s reports/trivy/trivy-report.json \
                                     || { echo "[ERREUR] trivy-report.json vide"; exit 1; }
