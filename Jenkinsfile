@@ -599,11 +599,8 @@ PY
                             chown -R ${JENKINS_UID}:${JENKINS_GID} /reports || true
                             chmod -R u+rwX /reports || true
                             chmod u+w /reports/*.html /reports/*.json 2>/dev/null || true
+                            chmod 664 /reports/zap-report.html 2>/dev/null || true
                         " || true
-
-                    docker run --rm -u 0:0 \
-                        -v /var/jenkins_home/workspace/devsecops-tests/src/reports/zap:/reports \
-                        alpine:3.19 sh -c 'chown -R 1000:1000 /reports && chmod -R u+rwX /reports'
 
                     docker run --rm \
                         --user "${JENKINS_UID}:${JENKINS_GID}" \
@@ -823,6 +820,7 @@ PY
                                 chmod -R u+rwX /dashboard /zap 2>/dev/null || true
                                 find /dashboard -type f -exec chmod u+w {} + 2>/dev/null || true
                                 find /zap -type f -exec chmod u+w {} + 2>/dev/null || true
+                                chmod 664 /zap/zap-report.html 2>/dev/null || true
                             "
 
                         docker run --rm \
