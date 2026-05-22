@@ -529,7 +529,8 @@ PY
                     rm -f reports/zap/zap-baseline.log \
                           reports/zap/zap-exit-code.txt \
                           reports/zap/zap-report.json \
-                          reports/zap/zap-report.html
+                          reports/zap/zap-report.html \
+                          reports/zap/zap-report.filtered.json
 
                     TARGET_URL="http://$APP_CONTAINER:$APP_PORT/"
 
@@ -543,7 +544,7 @@ PY
                         -e HOME=/zap \
                         ghcr.io/zaproxy/zaproxy:stable \
                         bash -c '
-                            status=0
+                            umask 0002
                             zap-baseline.py \
                                 -t "'"$TARGET_URL"'" \
                                 -a -I \
@@ -551,6 +552,9 @@ PY
                                 -r zap-report.html \
                                 2>&1 | tee /zap/wrk/zap-baseline.log
                             echo "$?" > /zap/wrk/zap-exit-code.txt
+                            chown -R '"${JENKINS_UID}:${JENKINS_GID}"' /zap/wrk || true
+                            chmod -R u+rwX /zap/wrk || true
+                            find /zap/wrk -type f -exec chmod u+w {} + || true
                             exit 0
                         ' || true
 
@@ -566,7 +570,12 @@ PY
                         -u 0:0 \
                         -v "$PROJECT_DIR/reports/zap:/reports" \
                         alpine:3.19 \
-                        sh -c "chown -R ${JENKINS_UID}:${JENKINS_GID} /reports && chmod -R u+rwX /reports || true"
+                        sh -c "
+                            chown -R ${JENKINS_UID}:${JENKINS_GID} /reports || true
+                            chmod -R u+rwX /reports || true
+                            find /reports -type f -exec chmod u+w {} + || true
+                            find /reports -type d -exec chmod u+rwx {} + || true
+                        " || true
 
                     test -s reports/zap/zap-baseline.log \
                         || { echo "[ERREUR] zap-baseline.log absent ou vide"; exit 1; }
@@ -583,6 +592,16 @@ PY
                     fi
 
                     docker run --rm \
+                        -u 0:0 \
+                        -v "$PROJECT_DIR/reports/zap:/reports" \
+                        alpine:3.19 \
+                        sh -c "
+                            chown -R ${JENKINS_UID}:${JENKINS_GID} /reports || true
+                            chmod -R u+rwX /reports || true
+                            chmod u+w /reports/*.html /reports/*.json 2>/dev/null || true
+                        " || true
+
+                    docker run --rm \
                         --user "${JENKINS_UID}:${JENKINS_GID}" \
                         -e IGNORE_TEST_APP_FINDINGS="$IGNORE_TEST_APP_FINDINGS" \
                         --volumes-from "$JENKINS_CONTAINER" \
@@ -594,7 +613,11 @@ PY
                         -u 0:0 \
                         -v "$PROJECT_DIR/reports/zap:/reports" \
                         alpine:3.19 \
-                        sh -c "chown -R ${JENKINS_UID}:${JENKINS_GID} /reports && chmod -R u+rwX /reports || true"
+                        sh -c "
+                            chown -R ${JENKINS_UID}:${JENKINS_GID} /reports || true
+                            chmod -R u+rwX /reports || true
+                            chmod u+w /reports/*.* 2>/dev/null || true
+                        " || true
                 '''
             }
         }
@@ -791,7 +814,12 @@ PY
                             -v "$PROJECT_DIR/reports/dashboard:/dashboard" \
                             -v "$PROJECT_DIR/reports/zap:/zap" \
                             alpine:3.19 \
-                            sh -c "chown -R ${JENKINS_UID}:${JENKINS_GID} /dashboard /zap 2>/dev/null && chmod -R u+rwX /dashboard /zap 2>/dev/null || true"
+                            sh -c "
+                                chown -R ${JENKINS_UID}:${JENKINS_GID} /dashboard /zap 2>/dev/null || true
+                                chmod -R u+rwX /dashboard /zap 2>/dev/null || true
+                                find /dashboard -type f -exec chmod u+w {} + 2>/dev/null || true
+                                find /zap -type f -exec chmod u+w {} + 2>/dev/null || true
+                            "
 
                         docker run --rm \
                             --user "${JENKINS_UID}:${JENKINS_GID}" \
