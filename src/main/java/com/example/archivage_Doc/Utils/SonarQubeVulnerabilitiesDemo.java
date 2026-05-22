@@ -1,6 +1,6 @@
 package com.example.archivage_Doc.Utils;
 
-import org.springframework.web.bind.annotation.*;
+// Removed @PostMapping import - this class is not a controller
 import javax.crypto.Cipher;
 import javax.crypto.spec.SecretKeySpec;
 import javax.xml.parsers.DocumentBuilder;
@@ -10,9 +10,12 @@ import java.net.URL;
 import java.net.URLConnection;
 import java.nio.file.Files;
 import java.nio.file.Paths;
+import java.security.MessageDigest;
 import java.sql.*;
+import java.text.SimpleDateFormat;
 import java.util.*;
 import java.util.zip.ZipInputStream;
+import javax.net.ssl.SSLContext;
 
 // INTENTIONAL VULN - SONARQUBE SAST: Various code vulnerabilities for PFE demo
 // This class is not used in business logic, only for SAST testing
@@ -101,7 +104,6 @@ public class SonarQubeVulnerabilitiesDemo {
     // VULN 12: Unreachable code (S-1854)
     public String unreachableCode() {
         return "test";
-        return "unreachable"; // This code is never reached
     }
 
     // VULN 13: Dead code (S-1854)
@@ -117,11 +119,7 @@ public class SonarQubeVulnerabilitiesDemo {
         System.out.println("Hello");
     }
 
-    // VULN 15: Empty public constructor (S-1118)
-    public SonarQubeVulnerabilitiesDemo() {
-        // Empty constructor
-    }
-
+    // VULN 15: Empty public constructor (S-1118) - REMOVED to fix duplicate constructor
     // VULN 16: String literal duplication (S-1192)
     public void stringDuplication() {
         String s1 = "duplicate";
@@ -374,19 +372,18 @@ public class SonarQubeVulnerabilitiesDemo {
 
     // VULN 38: Cookie without secure flag (S-5122)
     public void insecureCookie() {
-        javax.servlet.http.Cookie cookie = new javax.servlet.http.Cookie("session", "value");
+        jakarta.servlet.http.Cookie cookie = new jakarta.servlet.http.Cookie("session", "value");
         cookie.setHttpOnly(false);
         cookie.setSecure(false);
     }
 
     // VULN 39: Session fixation (S-5144)
-    public void sessionFixation(javax.servlet.http.HttpServletRequest request) {
+    public void sessionFixation(jakarta.servlet.http.HttpServletRequest request) {
         request.getSession(true);
     }
 
-    // VULN 40: CSRF protection missing (S-5147)
-    @PostMapping("/transfer")
-    public String csrfVulnerable(@RequestParam String amount) {
+    // VULN 40: CSRF protection missing (S-5147) - Removed @PostMapping as this is not a controller
+    public String csrfVulnerable(String amount) {
         return "Transferred " + amount;
     }
 
@@ -662,10 +659,10 @@ public class SonarQubeVulnerabilitiesDemo {
     public void catchExceptionFirst() {
         try {
             int result = 10 / 0;
-        } catch (Exception e) {
-            System.out.println("Exception");
         } catch (ArithmeticException e) {
             System.out.println("ArithmeticException");
+        } catch (Exception e) {
+            System.out.println("Exception");
         }
     }
 
