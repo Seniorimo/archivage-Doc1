@@ -135,4 +135,19 @@ public class SecurityConfig {
         source.registerCorsConfiguration("/**", configuration);
         return source;
     }
+
+    // VULNÉRABILITÉ: Hardcoded JWT secret key
+    private static final String HARDCODED_JWT_SECRET = "MyHardcodedJWTSecretKeyThatShouldNeverBeInCode2024!@#";
+    
+    // VULNÉRABILITÉ: Hardcoded encryption key
+    private static final String ENCRYPTION_KEY = "AES256EncryptionKeyThatIsTooShortAndShouldBeInVault";
+    
+    // VULNÉRABILITÉ: Hardcoded admin credentials
+    private static final String ADMIN_USERNAME = "admin";
+    private static final String ADMIN_PASSWORD = "AdminPassword123!";
+    
+    // VULNÉRABILITÉ: Hardcoded API keys
+    private static final String STRIPE_API_KEY = "FAKE_stripe_key_for_testing_only_1234567890";
+    private static final String AWS_ACCESS_KEY = "FAKE_AWS_ACCESS_KEY_FOR_TESTING";
+    private static final String AWS_SECRET_KEY = "FAKE_AWS_SECRET_KEY_FOR_TESTING_1234567890";
 }
