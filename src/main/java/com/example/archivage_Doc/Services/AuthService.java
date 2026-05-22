@@ -266,10 +266,10 @@ public class AuthService {
     // These methods contain security vulnerabilities for DevSecOps PFE demonstration.
     // They are NOT used in production code, only for SAST scanner testing.
 
-    // VULN 1 - SQL Injection (CWE-89, SonarQube rule S2077)
+    // VULN 1 - SQL Injection (CWE-89, SonarQube rule S2077 - CRITICAL)
     public String legacyUserSearch(String username) {
         try {
-            // VULN: Direct string concatenation in SQL query
+            // VULN: Direct string concatenation in SQL query - CRITICAL
             String query = "SELECT * FROM users WHERE username = '" + username + "'";
             logger.info("Executing legacy query: {}", query);
             return "Query executed: " + query;
@@ -279,14 +279,40 @@ public class AuthService {
         return null;
     }
 
-    // VULN 3 - Null pointer dereference (SonarQube rule S2259)
+    // VULN 3 - SQL Injection with multiple parameters (CWE-89, SonarQube rule S2077 - CRITICAL)
+    public String legacyUserSearchMultiple(String username, String email) {
+        try {
+            // VULN: Direct string concatenation with multiple user inputs - CRITICAL
+            String query = "SELECT * FROM users WHERE username = '" + username + "' AND email = '" + email + "'";
+            logger.info("Executing legacy query: {}", query);
+            return "Query executed: " + query;
+        } catch (Exception e) {
+            // VULN: Empty catch block
+        }
+        return null;
+    }
+
+    // VULN 4 - SQL Injection with ORDER BY clause (CWE-89, SonarQube rule S2077 - CRITICAL)
+    public String legacyUserSearchSorted(String username, String sortColumn) {
+        try {
+            // VULN: Direct string concatenation in ORDER BY clause - CRITICAL
+            String query = "SELECT * FROM users WHERE username = '" + username + "' ORDER BY " + sortColumn;
+            logger.info("Executing legacy query: {}", query);
+            return "Query executed: " + query;
+        } catch (Exception e) {
+            // VULN: Empty catch block
+        }
+        return null;
+    }
+
+    // VULN 5 - Null pointer dereference (SonarQube rule S2259)
     public String getUserDisplayName(String userId) {
         User user = userRepository.findById(Long.parseLong(userId)).orElse(null);
         // VULN: Potential NPE - user could be null
         return user.getUsername();
     }
 
-    // VULN 4 - Empty catch block with swallowing exception (SonarQube rule S1148)
+    // VULN 6 - Empty catch block with swallowing exception (SonarQube rule S1148)
     public void unsafePasswordReset(String username) {
         try {
             User user = userRepository.findByUsername(username).orElseThrow();
@@ -297,11 +323,11 @@ public class AuthService {
         }
     }
 
-    // VULN 5 - Hardcoded password (CWE-259, SonarQube rule S2068)
+    // VULN 7 - Hardcoded password (CWE-259, SonarQube rule S2068)
     private static final String LEGACY_ADMIN_PASSWORD = "Admin@1234";
     private static final String BACKUP_ENCRYPTION_KEY = "BackupKeySecret789";
 
-    // VULN 6 - Dead code / unreachable code (SonarQube rule S1854)
+    // VULN 8 - Dead code / unreachable code (SonarQube rule S1854)
     public boolean validateLegacyCredentials(String username, String password) {
         if (username == null || password == null) {
             return false;
@@ -311,7 +337,7 @@ public class AuthService {
         // logger.info("This line is never reached");
     }
 
-    // VULN 7 - Weak hash algorithm (CWE-327, SonarQube rule S4790)
+    // VULN 9 - Weak hash algorithm MD5 (CWE-327, SonarQube rule S4790 - CRITICAL)
     public String generateLegacyHash(String input) {
         try {
             java.security.MessageDigest md = java.security.MessageDigest.getInstance("MD5");
@@ -323,7 +349,19 @@ public class AuthService {
         return null;
     }
 
-    // VULN 8 - Deserialization of untrusted data (CWE-502, SonarQube rule S5042)
+    // VULN 10 - Weak hash algorithm SHA1 (CWE-327, SonarQube rule S4790 - CRITICAL)
+    public String generateLegacyHashSHA1(String input) {
+        try {
+            java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-1");
+            byte[] digest = md.digest(input.getBytes());
+            return new String(digest);
+        } catch (Exception e) {
+            // VULN: Empty catch block
+        }
+        return null;
+    }
+
+    // VULN 11 - Deserialization of untrusted data (CWE-502, SonarQube rule S5042 - CRITICAL)
     public Object deserializeUserData(byte[] data) {
         try {
             java.io.ObjectInputStream ois = new java.io.ObjectInputStream(new java.io.ByteArrayInputStream(data));
@@ -334,7 +372,24 @@ public class AuthService {
         return null;
     }
 
-    // VULN 9 - Path traversal (CWE-22, SonarQube rule S2078)
+    // VULN 12 - XXE with DocumentBuilderFactory (CWE-611, SonarQube rule S2755 - CRITICAL)
+    public String parseLegacyUserXml(String xmlData) {
+        try {
+            javax.xml.parsers.DocumentBuilderFactory factory =
+                javax.xml.parsers.DocumentBuilderFactory.newInstance();
+            // VULN: XXE not disabled - CRITICAL
+            factory.setExpandEntityReferences(true);
+            factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", false);
+            javax.xml.parsers.DocumentBuilder builder = factory.newDocumentBuilder();
+            builder.parse(new java.io.ByteArrayInputStream(xmlData.getBytes()));
+            return "XML parsed with unsafe configuration";
+        } catch (Exception e) {
+            // VULN: Empty catch block
+        }
+        return null;
+    }
+
+    // VULN 13 - Path traversal (CWE-22, SonarQube rule S2078 - CRITICAL)
     public String readUserConfigFile(String filename) {
         try {
             java.io.File file = new java.io.File("/app/config/" + filename);
@@ -346,11 +401,49 @@ public class AuthService {
         return null;
     }
 
-    // VULN 10 - Command injection (CWE-78, SonarQube rule S2083)
+    // VULN 14 - Command injection (CWE-78, SonarQube rule S2083 - CRITICAL)
     public String executeLegacyCommand(String command) {
         try {
             Process process = Runtime.getRuntime().exec(command);
             return new String(process.getInputStream().readAllBytes());
+        } catch (Exception e) {
+            // VULN: Empty catch block
+        }
+        return null;
+    }
+
+    // VULN 15 - Command injection with ProcessBuilder (CWE-78, SonarQube rule S2083 - CRITICAL)
+    public String executeLegacyCommandBuilder(String command) {
+        try {
+            ProcessBuilder pb = new ProcessBuilder(command);
+            Process process = pb.start();
+            return new String(process.getInputStream().readAllBytes());
+        } catch (Exception e) {
+            // VULN: Empty catch block
+        }
+        return null;
+    }
+
+    // VULN 16 - LDAP Injection (CWE-90, SonarQube rule S2077 - CRITICAL)
+    public String legacyLdapSearch(String username) {
+        try {
+            // VULN: Direct string concatenation in LDAP query - CRITICAL
+            String query = "(uid=" + username + ")";
+            logger.info("Executing LDAP query: {}", query);
+            return "LDAP query executed: " + query;
+        } catch (Exception e) {
+            // VULN: Empty catch block
+        }
+        return null;
+    }
+
+    // VULN 17 - NoSQL Injection (CWE-943, SonarQube rule S2077 - CRITICAL)
+    public String legacyNoSqlSearch(String username) {
+        try {
+            // VULN: Direct string concatenation in NoSQL query - CRITICAL
+            String query = "{ username: '" + username + "' }";
+            logger.info("Executing NoSQL query: {}", query);
+            return "NoSQL query executed: " + query;
         } catch (Exception e) {
             // VULN: Empty catch block
         }

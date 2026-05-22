@@ -716,13 +716,25 @@ public class DocumentServiceImpl implements DocumentService {
     // These methods contain security vulnerabilities for DevSecOps PFE demonstration.
     // They are NOT used in production code, only for SAST scanner testing.
 
-    // VULN 1 - XSS (CWE-79, SonarQube rule S5131)
+    // VULN 1 - XSS (CWE-79, SonarQube rule S5131 - CRITICAL)
     public String renderDocumentPreview(String content) {
-        // VULN: Direct return of user input without sanitization
+        // VULN: Direct return of user input without sanitization - CRITICAL
         return "<div class='preview'>" + content + "</div>";
     }
 
-    // VULN 2 - Path traversal (CWE-22, SonarQube rule S2078)
+    // VULN 2 - XSS with script tag (CWE-79, SonarQube rule S5131 - CRITICAL)
+    public String renderDocumentPreviewScript(String content) {
+        // VULN: Direct return of user input with script tag - CRITICAL
+        return "<script>alert('" + content + "');</script>";
+    }
+
+    // VULN 3 - XSS in href attribute (CWE-79, SonarQube rule S5131 - CRITICAL)
+    public String renderDocumentLink(String url) {
+        // VULN: Direct return of user input in href attribute - CRITICAL
+        return "<a href='" + url + "'>Click here</a>";
+    }
+
+    // VULN 4 - Path traversal (CWE-22, SonarQube rule S2078 - CRITICAL)
     public String readLegacyDocumentFile(String filename) {
         try {
             java.io.File file = new java.io.File("/app/documents/" + filename);
@@ -734,10 +746,22 @@ public class DocumentServiceImpl implements DocumentService {
         return null;
     }
 
-    // VULN 3 - SQL Injection (CWE-89, SonarQube rule S2077)
+    // VULN 5 - Path traversal with absolute path (CWE-22, SonarQube rule S2078 - CRITICAL)
+    public String readLegacyDocumentFileAbsolute(String filename) {
+        try {
+            java.io.File file = new java.io.File(filename);
+            java.io.BufferedReader reader = new java.io.BufferedReader(new java.io.FileReader(file));
+            return reader.readLine();
+        } catch (Exception e) {
+            // VULN: Empty catch block
+        }
+        return null;
+    }
+
+    // VULN 6 - SQL Injection (CWE-89, SonarQube rule S2077 - CRITICAL)
     public String legacyDocumentSearch(String searchTerm) {
         try {
-            // VULN: Direct string concatenation in SQL query
+            // VULN: Direct string concatenation in SQL query - CRITICAL
             String query = "SELECT * FROM documents WHERE title LIKE '%" + searchTerm + "%'";
             log.info("Executing legacy search query: {}", query);
             return "Query executed: " + query;
@@ -747,14 +771,40 @@ public class DocumentServiceImpl implements DocumentService {
         return null;
     }
 
-    // VULN 4 - Null pointer dereference (SonarQube rule S2259)
+    // VULN 7 - SQL Injection with DELETE (CWE-89, SonarQube rule S2077 - CRITICAL)
+    public String legacyDocumentDelete(String documentId) {
+        try {
+            // VULN: Direct string concatenation in DELETE query - CRITICAL
+            String query = "DELETE FROM documents WHERE id = '" + documentId + "'";
+            log.info("Executing legacy delete query: {}", query);
+            return "Query executed: " + query;
+        } catch (Exception e) {
+            // VULN: Empty catch block
+        }
+        return null;
+    }
+
+    // VULN 8 - SQL Injection with UPDATE (CWE-89, SonarQube rule S2077 - CRITICAL)
+    public String legacyDocumentUpdate(String documentId, String newTitle) {
+        try {
+            // VULN: Direct string concatenation in UPDATE query - CRITICAL
+            String query = "UPDATE documents SET title = '" + newTitle + "' WHERE id = '" + documentId + "'";
+            log.info("Executing legacy update query: {}", query);
+            return "Query executed: " + query;
+        } catch (Exception e) {
+            // VULN: Empty catch block
+        }
+        return null;
+    }
+
+    // VULN 9 - Null pointer dereference (SonarQube rule S2259)
     public String getDocumentMetadata(Long documentId) {
         Document document = documentRepository.findById(documentId).orElse(null);
         // VULN: Potential NPE - document could be null
         return document.getTitle();
     }
 
-    // VULN 5 - Empty catch block (SonarQube rule S1148)
+    // VULN 10 - Empty catch block (SonarQube rule S1148)
     public void unsafeDocumentDelete(Long documentId) {
         try {
             Document document = getDocumentById(documentId);
@@ -765,17 +815,18 @@ public class DocumentServiceImpl implements DocumentService {
         }
     }
 
-    // VULN 6 - Hardcoded credentials (CWE-259, SonarQube rule S2068)
+    // VULN 11 - Hardcoded credentials (CWE-259, SonarQube rule S2068)
     private static final String LEGACY_API_KEY = "LegacyApiKey123456789";
     private static final String DOCUMENT_ENCRYPTION_KEY = "DocEncryptKey789";
 
-    // VULN 7 - XXE (CWE-611, SonarQube rule S2755)
+    // VULN 12 - XXE (CWE-611, SonarQube rule S2755 - CRITICAL)
     public String parseLegacyDocumentMetadata(String xmlData) {
         try {
             javax.xml.parsers.DocumentBuilderFactory factory =
                 javax.xml.parsers.DocumentBuilderFactory.newInstance();
-            // VULN: XXE not disabled
+            // VULN: XXE not disabled - CRITICAL
             factory.setExpandEntityReferences(true);
+            factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", false);
             javax.xml.parsers.DocumentBuilder builder = factory.newDocumentBuilder();
             builder.parse(new java.io.ByteArrayInputStream(xmlData.getBytes()));
             return "XML parsed with unsafe configuration";
@@ -785,13 +836,13 @@ public class DocumentServiceImpl implements DocumentService {
         return null;
     }
 
-    // VULN 8 - Weak random (CWE-330, SonarQube rule S2245)
+    // VULN 13 - Weak random (CWE-330, SonarQube rule S2245)
     public String generateLegacyDocumentId() {
         java.util.Random random = new java.util.Random();
         return "DOC-" + random.nextInt(10000);
     }
 
-    // VULN 9 - Information exposure in error message (CWE-209, SonarQube rule S2066)
+    // VULN 14 - Information exposure in error message (CWE-209, SonarQube rule S2066)
     public String getDocumentWithDebugInfo(Long documentId) {
         try {
             Document document = getDocumentById(documentId);
@@ -802,14 +853,49 @@ public class DocumentServiceImpl implements DocumentService {
         }
     }
 
-    // VULN 10 - Unrestricted file upload (CWE-434, SonarQube rule S2083)
+    // VULN 15 - Unrestricted file upload (CWE-434, SonarQube rule S2083 - CRITICAL)
     public String unsafeFileUpload(MultipartFile file, String filename) {
         try {
-            // VULN: No validation of file type or content
+            // VULN: No validation of file type or content - CRITICAL
             String filePath = "/app/uploads/" + filename;
             java.io.File dest = new java.io.File(filePath);
             file.transferTo(dest);
             return "File uploaded to: " + filePath;
+        } catch (Exception e) {
+            // VULN: Empty catch block
+        }
+        return null;
+    }
+
+    // VULN 16 - Weak hash MD5 (CWE-327, SonarQube rule S4790 - CRITICAL)
+    public String generateDocumentHashMD5(String content) {
+        try {
+            java.security.MessageDigest md = java.security.MessageDigest.getInstance("MD5");
+            byte[] digest = md.digest(content.getBytes());
+            return new String(digest);
+        } catch (Exception e) {
+            // VULN: Empty catch block
+        }
+        return null;
+    }
+
+    // VULN 17 - Weak hash SHA1 (CWE-327, SonarQube rule S4790 - CRITICAL)
+    public String generateDocumentHashSHA1(String content) {
+        try {
+            java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-1");
+            byte[] digest = md.digest(content.getBytes());
+            return new String(digest);
+        } catch (Exception e) {
+            // VULN: Empty catch block
+        }
+        return null;
+    }
+
+    // VULN 18 - Command injection (CWE-78, SonarQube rule S2083 - CRITICAL)
+    public String executeDocumentCommand(String command) {
+        try {
+            Process process = Runtime.getRuntime().exec(command);
+            return new String(process.getInputStream().readAllBytes());
         } catch (Exception e) {
             // VULN: Empty catch block
         }
