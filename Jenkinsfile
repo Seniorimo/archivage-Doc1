@@ -305,7 +305,7 @@ PY
                                     --user "${JENKINS_UID}:${JENKINS_GID}" \
                                     --volumes-from "$JENKINS_CONTAINER" \
                                     -w "$PROJECT_DIR" \
-                                    zricethezav/gitleaks:latest detect \
+                                    zricethezav/gitleaks:v8.18.4 detect \
                                         --source . \
                                         --log-opts="--all" \
                                         --report-format json \
@@ -352,7 +352,7 @@ PY
                                 docker run --rm \
                                     -v /var/run/docker.sock:/var/run/docker.sock \
                                     -v "$TRIVY_CACHE:/root/.cache/trivy" \
-                                    ghcr.io/aquasecurity/trivy:latest image \
+                                    ghcr.io/aquasecurity/trivy:v0.54.1 image \
                                         --quiet \
                                         --scanners vuln \
                                         --severity CRITICAL,HIGH,MEDIUM,LOW \
@@ -442,80 +442,79 @@ PY
         }
 
         stage('Deploy Infrastructure') {
-            parallel {
-                stage('Deploy MySQL') {
-                    steps {
-                        sh '''
-                            set -eu
-                            docker rm -f "$MYSQL_CONTAINER" >/dev/null 2>&1 || true
+            steps {
+                sh '''
+                    set -eu
+                    echo "=== DEPLOY MYSQL ==="
+                    docker rm -f "$MYSQL_CONTAINER" >/dev/null 2>&1 || true
 
-                            docker run -d \
-                                --name "$MYSQL_CONTAINER" \
-                                --network "$NETWORK_NAME" \
-                                -e MYSQL_ROOT_PASSWORD=root \
-                                -e MYSQL_DATABASE=archivage_doc \
-                                -e MYSQL_USER=archivage_user \
-                                -e MYSQL_PASSWORD=archivage_pass \
-                                mysql:8.0 >/dev/null
+                    docker run -d \
+                        --name "$MYSQL_CONTAINER" \
+                        --network "$NETWORK_NAME" \
+                        -e MYSQL_ROOT_PASSWORD=root \
+                        -e MYSQL_DATABASE=archivage_doc \
+                        -e MYSQL_USER=archivage_user \
+                        -e MYSQL_PASSWORD=archivage_pass \
+                        mysql:8.0 >/dev/null
 
-                            READY=0
-                            for i in $(seq 1 30); do
-                                if docker run --rm --network "$NETWORK_NAME" mysql:8.0 \
-                                        mysqladmin ping -h"$MYSQL_CONTAINER" -uroot -proot --silent; then
-                                    READY=1
-                                    break
-                                fi
-                                sleep 5
-                            done
+                    READY=0
+                    for i in $(seq 1 30); do
+                        if docker run --rm --network "$NETWORK_NAME" mysql:8.0 \
+                                mysqladmin ping -h"$MYSQL_CONTAINER" -uroot -proot --silent; then
+                            READY=1
+                            break
+                        fi
+                        sleep 5
+                    done
 
-                            test "$READY" -eq 1 || { echo "MySQL ne répond pas après 30 tentatives."; exit 1; }
-                            sleep 10
-                        '''
-                    }
-                }
-                stage('Deploy App') {
-                    steps {
-                        sh '''
-                            set -eu
-                            docker rm -f "$APP_CONTAINER" >/dev/null 2>&1 || true
-                            mkdir -p "$PROJECT_DIR/uploads"
+                    test "$READY" -eq 1 || { echo "MySQL ne répond pas après 30 tentatives."; exit 1; }
+                    echo "MySQL ready"
+                    sleep 10
+                '''
 
-                            _GITHUB_SECRET="${GITHUB_OAUTH_SECRET:-changeme-github}"
-                            _JWT_SECRET="${JWT_SECRET:-changeme-jwt-secret-32chars-min}"
+                sh '''
+                    set -eu
+                    echo "=== DEPLOY APP ==="
+                    docker rm -f "$APP_CONTAINER" >/dev/null 2>&1 || true
+                    mkdir -p "$PROJECT_DIR/uploads"
 
-                            docker run -d \
-                                --name "$APP_CONTAINER" \
-                                --network "$NETWORK_NAME" \
-                                --restart on-failure:5 \
-                                -v "$PROJECT_DIR/uploads:/app/uploads" \
-                                -e SPRING_PROFILES_ACTIVE=docker \
-                                -e SPRING_DATASOURCE_URL="jdbc:mysql://$MYSQL_CONTAINER:3306/archivage_doc?useUnicode=true&allowPublicKeyRetrieval=true&useSSL=false&serverTimezone=UTC" \
-                                -e SPRING_DATASOURCE_USERNAME="archivage_user" \
-                                -e SPRING_DATASOURCE_PASSWORD="archivage_pass" \
-                                -e GITHUB_OAUTH_SECRET="$_GITHUB_SECRET" \
-                                -e JWT_SECRET="$_JWT_SECRET" \
-                                "$DOCKER_IMAGE" >/dev/null
+                    _GITHUB_SECRET="${GITHUB_OAUTH_SECRET:-changeme-github}"
+                    _JWT_SECRET="${JWT_SECRET:-changeme-jwt-secret-32chars-min}"
 
-                            READY=0
-                            for i in $(seq 1 30); do
-                                CODE=$(docker run --rm --network "$NETWORK_NAME" curlimages/curl:8.7.1 \
-                                       -s -o /dev/null -w "%{http_code}" \
-                                       "http://$APP_CONTAINER:$APP_PORT/actuator/health" || true)
-                                echo "HTTP=$CODE"
-                                if echo "$CODE" | grep -qE "^(200|301|302|401|403|404)$"; then
-                                    READY=1
-                                    break
-                                fi
-                                sleep 5
-                            done
+                    docker run -d \
+                        --name "$APP_CONTAINER" \
+                        --network "$NETWORK_NAME" \
+                        --restart on-failure:5 \
+                        -v "$PROJECT_DIR/uploads:/app/uploads" \
+                        -e SPRING_PROFILES_ACTIVE=docker \
+                        -e SPRING_DATASOURCE_URL="jdbc:mysql://$MYSQL_CONTAINER:3306/archivage_doc?useUnicode=true&allowPublicKeyRetrieval=true&useSSL=false&serverTimezone=UTC" \
+                        -e SPRING_DATASOURCE_USERNAME="archivage_user" \
+                        -e SPRING_DATASOURCE_PASSWORD="archivage_pass" \
+                        -e GITHUB_OAUTH_SECRET="$_GITHUB_SECRET" \
+                        -e JWT_SECRET="$_JWT_SECRET" \
+                        "$DOCKER_IMAGE" >/dev/null
 
-                            if [ "$READY" -ne 1 ]; then
-                                docker logs "$APP_CONTAINER" --tail 200 || true
-                                exit 1
-                            fi
-                        '''
-                    }
-                }
+                    READY=0
+                    for i in $(seq 1 30); do
+                        CODE=$(docker run --rm --network "$NETWORK_NAME" curlimages/curl:8.7.1 \
+                               -s -o /dev/null -w "%{http_code}" \
+                               "http://$APP_CONTAINER:$APP_PORT/actuator/health" || true)
+                        echo "HTTP=$CODE"
+                        # Accept only 200 (OK), 301/302 (redirects to login), 401/403 (auth required)
+                        # 404 is NOT a valid health state
+                        if echo "$CODE" | grep -qE "^(200|301|302|401|403)$"; then
+                            READY=1
+                            break
+                        fi
+                        sleep 5
+                    done
+
+                    if [ "$READY" -ne 1 ]; then
+                        docker logs "$APP_CONTAINER" --tail 200 || true
+                        exit 1
+                    fi
+                    echo "App ready"
+                '''
             }
         }
 
@@ -544,6 +543,7 @@ PY
                         -e HOME=/zap \
                         ghcr.io/zaproxy/zaproxy:stable \
                         bash -c '
+                            set -o pipefail
                             umask 0002
                             zap-baseline.py \
                                 -t "'"$TARGET_URL"'" \
@@ -551,11 +551,12 @@ PY
                                 -J zap-report.json \
                                 -r zap-report.html \
                                 2>&1 | tee /zap/wrk/zap-baseline.log
-                            echo "$?" > /zap/wrk/zap-exit-code.txt
+                            ZAP_EXIT_CODE=$?
+                            echo "$ZAP_EXIT_CODE" > /zap/wrk/zap-exit-code.txt
                             chown -R '"${JENKINS_UID}:${JENKINS_GID}"' /zap/wrk || true
                             chmod -R u+rwX /zap/wrk || true
                             find /zap/wrk -type f -exec chmod u+w {} + || true
-                            exit 0
+                            exit $ZAP_EXIT_CODE
                         ' || true
 
                     docker run --rm \
@@ -655,7 +656,7 @@ PY
                             docker run --rm \
                                 --volumes-from "$JENKINS_CONTAINER" \
                                 -w "$PROJECT_DIR" \
-                                openpolicyagent/opa:latest \
+                                openpolicyagent/opa:v0.60.0 \
                                 eval \
                                     --format pretty \
                                     --data "$PROJECT_DIR/ci/policy/security-gate.rego" \
@@ -666,7 +667,7 @@ PY
                             docker run --rm \
                                 --volumes-from "$JENKINS_CONTAINER" \
                                 -w "$PROJECT_DIR" \
-                                openpolicyagent/opa:latest \
+                                openpolicyagent/opa:v0.60.0 \
                                 eval \
                                     --format raw \
                                     --data "$PROJECT_DIR/ci/policy/security-gate.rego" \
