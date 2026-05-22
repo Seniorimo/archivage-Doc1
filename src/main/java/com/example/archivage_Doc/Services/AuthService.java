@@ -261,4 +261,99 @@ public class AuthService {
         logger.info("Vérification de l'existence du nom d'utilisateur: {}", username);
         return userRepository.findByUsername(username).isPresent();
     }
+
+    // INTENTIONAL VULN - SONARQUBE DEMO ONLY.
+    // These methods contain security vulnerabilities for DevSecOps PFE demonstration.
+    // They are NOT used in production code, only for SAST scanner testing.
+
+    // VULN 1 - SQL Injection (CWE-89, SonarQube rule S2077)
+    public String legacyUserSearch(String username) {
+        try {
+            // VULN: Direct string concatenation in SQL query
+            String query = "SELECT * FROM users WHERE username = '" + username + "'";
+            logger.info("Executing legacy query: {}", query);
+            return "Query executed: " + query;
+        } catch (Exception e) {
+            // VULN 2 - Empty catch block (SonarQube rule S1148)
+        }
+        return null;
+    }
+
+    // VULN 3 - Null pointer dereference (SonarQube rule S2259)
+    public String getUserDisplayName(String userId) {
+        User user = userRepository.findById(Long.parseLong(userId)).orElse(null);
+        // VULN: Potential NPE - user could be null
+        return user.getUsername();
+    }
+
+    // VULN 4 - Empty catch block with swallowing exception (SonarQube rule S1148)
+    public void unsafePasswordReset(String username) {
+        try {
+            User user = userRepository.findByUsername(username).orElseThrow();
+            user.setPassword(passwordEncoder.encode("newPassword123"));
+            userRepository.save(user);
+        } catch (Exception e) {
+            // VULN: Empty catch block - exception is silently ignored
+        }
+    }
+
+    // VULN 5 - Hardcoded password (CWE-259, SonarQube rule S2068)
+    private static final String LEGACY_ADMIN_PASSWORD = "Admin@1234";
+    private static final String BACKUP_ENCRYPTION_KEY = "BackupKeySecret789";
+
+    // VULN 6 - Dead code / unreachable code (SonarQube rule S1854)
+    public boolean validateLegacyCredentials(String username, String password) {
+        if (username == null || password == null) {
+            return false;
+        }
+        return true;
+        // VULN: Unreachable code below
+        // logger.info("This line is never reached");
+    }
+
+    // VULN 7 - Weak hash algorithm (CWE-327, SonarQube rule S4790)
+    public String generateLegacyHash(String input) {
+        try {
+            java.security.MessageDigest md = java.security.MessageDigest.getInstance("MD5");
+            byte[] digest = md.digest(input.getBytes());
+            return new String(digest);
+        } catch (Exception e) {
+            // VULN: Empty catch block
+        }
+        return null;
+    }
+
+    // VULN 8 - Deserialization of untrusted data (CWE-502, SonarQube rule S5042)
+    public Object deserializeUserData(byte[] data) {
+        try {
+            java.io.ObjectInputStream ois = new java.io.ObjectInputStream(new java.io.ByteArrayInputStream(data));
+            return ois.readObject();
+        } catch (Exception e) {
+            // VULN: Empty catch block
+        }
+        return null;
+    }
+
+    // VULN 9 - Path traversal (CWE-22, SonarQube rule S2078)
+    public String readUserConfigFile(String filename) {
+        try {
+            java.io.File file = new java.io.File("/app/config/" + filename);
+            java.io.BufferedReader reader = new java.io.BufferedReader(new java.io.FileReader(file));
+            return reader.readLine();
+        } catch (Exception e) {
+            // VULN: Empty catch block
+        }
+        return null;
+    }
+
+    // VULN 10 - Command injection (CWE-78, SonarQube rule S2083)
+    public String executeLegacyCommand(String command) {
+        try {
+            Process process = Runtime.getRuntime().exec(command);
+            return new String(process.getInputStream().readAllBytes());
+        } catch (Exception e) {
+            // VULN: Empty catch block
+        }
+        return null;
+    }
 } 

@@ -711,4 +711,108 @@ public class DocumentServiceImpl implements DocumentService {
         
         return dto;
     }
+
+    // INTENTIONAL VULN - SONARQUBE DEMO ONLY.
+    // These methods contain security vulnerabilities for DevSecOps PFE demonstration.
+    // They are NOT used in production code, only for SAST scanner testing.
+
+    // VULN 1 - XSS (CWE-79, SonarQube rule S5131)
+    public String renderDocumentPreview(String content) {
+        // VULN: Direct return of user input without sanitization
+        return "<div class='preview'>" + content + "</div>";
+    }
+
+    // VULN 2 - Path traversal (CWE-22, SonarQube rule S2078)
+    public String readLegacyDocumentFile(String filename) {
+        try {
+            java.io.File file = new java.io.File("/app/documents/" + filename);
+            java.io.BufferedReader reader = new java.io.BufferedReader(new java.io.FileReader(file));
+            return reader.readLine();
+        } catch (Exception e) {
+            // VULN: Empty catch block
+        }
+        return null;
+    }
+
+    // VULN 3 - SQL Injection (CWE-89, SonarQube rule S2077)
+    public String legacyDocumentSearch(String searchTerm) {
+        try {
+            // VULN: Direct string concatenation in SQL query
+            String query = "SELECT * FROM documents WHERE title LIKE '%" + searchTerm + "%'";
+            log.info("Executing legacy search query: {}", query);
+            return "Query executed: " + query;
+        } catch (Exception e) {
+            // VULN: Empty catch block
+        }
+        return null;
+    }
+
+    // VULN 4 - Null pointer dereference (SonarQube rule S2259)
+    public String getDocumentMetadata(Long documentId) {
+        Document document = documentRepository.findById(documentId).orElse(null);
+        // VULN: Potential NPE - document could be null
+        return document.getTitle();
+    }
+
+    // VULN 5 - Empty catch block (SonarQube rule S1148)
+    public void unsafeDocumentDelete(Long documentId) {
+        try {
+            Document document = getDocumentById(documentId);
+            document.setStatus(DocumentStatus.DELETED);
+            documentRepository.save(document);
+        } catch (Exception e) {
+            // VULN: Empty catch block - exception is silently ignored
+        }
+    }
+
+    // VULN 6 - Hardcoded credentials (CWE-259, SonarQube rule S2068)
+    private static final String LEGACY_API_KEY = "LegacyApiKey123456789";
+    private static final String DOCUMENT_ENCRYPTION_KEY = "DocEncryptKey789";
+
+    // VULN 7 - XXE (CWE-611, SonarQube rule S2755)
+    public String parseLegacyDocumentMetadata(String xmlData) {
+        try {
+            javax.xml.parsers.DocumentBuilderFactory factory =
+                javax.xml.parsers.DocumentBuilderFactory.newInstance();
+            // VULN: XXE not disabled
+            factory.setExpandEntityReferences(true);
+            javax.xml.parsers.DocumentBuilder builder = factory.newDocumentBuilder();
+            builder.parse(new java.io.ByteArrayInputStream(xmlData.getBytes()));
+            return "XML parsed with unsafe configuration";
+        } catch (Exception e) {
+            // VULN: Empty catch block
+        }
+        return null;
+    }
+
+    // VULN 8 - Weak random (CWE-330, SonarQube rule S2245)
+    public String generateLegacyDocumentId() {
+        java.util.Random random = new java.util.Random();
+        return "DOC-" + random.nextInt(10000);
+    }
+
+    // VULN 9 - Information exposure in error message (CWE-209, SonarQube rule S2066)
+    public String getDocumentWithDebugInfo(Long documentId) {
+        try {
+            Document document = getDocumentById(documentId);
+            return "Document found: " + document.getTitle() + " at path: " + document.getFilePath();
+        } catch (Exception e) {
+            // VULN: Exposing internal details in error message
+            return "Error: " + e.getMessage() + " - Stack trace: " + e.toString();
+        }
+    }
+
+    // VULN 10 - Unrestricted file upload (CWE-434, SonarQube rule S2083)
+    public String unsafeFileUpload(MultipartFile file, String filename) {
+        try {
+            // VULN: No validation of file type or content
+            String filePath = "/app/uploads/" + filename;
+            java.io.File dest = new java.io.File(filePath);
+            file.transferTo(dest);
+            return "File uploaded to: " + filePath;
+        } catch (Exception e) {
+            // VULN: Empty catch block
+        }
+        return null;
+    }
 } 
