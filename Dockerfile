@@ -19,7 +19,7 @@ LABEL maintainer="devops@company.com" \
 # ---------------------------------------------------------------------------
 # UTILISATEUR NON-ROOT
 # ---------------------------------------------------------------------------
-RUN addgroup -S spring && adduser -S spring -G spring
+RUN groupadd --system spring && useradd --system --gid spring --no-create-home --shell /usr/sbin/nologin spring
 
 WORKDIR /app
 
