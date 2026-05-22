@@ -357,7 +357,6 @@ PY
                                     sh -c "mkdir -p /cache && chown -R ${JENKINS_UID}:${JENKINS_GID} /cache && chmod -R u+rwX /cache || true"
 
                                 docker run --rm \
-                                    --user "${JENKINS_UID}:${JENKINS_GID}" \
                                     -v /var/run/docker.sock:/var/run/docker.sock \
                                     -v "$TRIVY_CACHE:/root/.cache/trivy" \
                                     ghcr.io/aquasecurity/trivy:v0.54.1 image \
@@ -367,12 +366,7 @@ PY
                                         --format json \
                                         "$DOCKER_IMAGE" \
                                     > reports/trivy/trivy-report.json \
-                                    2> reports/trivy/trivy.stderr.log || {
-                                        echo "[WARN] Trivy scan failed, checking if report was partially generated"
-                                        if [ ! -s reports/trivy/trivy-report.json ]; then
-                                            echo '{"Results":[]}' > reports/trivy/trivy-report.json
-                                        fi
-                                    }
+                                    2> reports/trivy/trivy.stderr.log
 
                                 test -s reports/trivy/trivy-report.json \
                                     || { echo "[ERREUR] trivy-report.json vide"; exit 1; }
@@ -669,7 +663,7 @@ PY
                             docker run --rm \
                                 --volumes-from "$JENKINS_CONTAINER" \
                                 -w "$PROJECT_DIR" \
-                                openpolicyagent/opa:v0.60.0 \
+                                openpolicyagent/opa:latest \
                                 eval \
                                     --format pretty \
                                     --data "$PROJECT_DIR/ci/policy/security-gate.rego" \
@@ -680,7 +674,7 @@ PY
                             docker run --rm \
                                 --volumes-from "$JENKINS_CONTAINER" \
                                 -w "$PROJECT_DIR" \
-                                openpolicyagent/opa:v0.60.0 \
+                                openpolicyagent/opa:latest \
                                 eval \
                                     --format raw \
                                     --data "$PROJECT_DIR/ci/policy/security-gate.rego" \
