@@ -5,8 +5,7 @@
 #      → résout AccessDeniedException sur FileStorageServiceImpl
 # ===========================================================================
 
-# INTENTIONAL VULN - TRIVY: Using older base image with known CVEs for PFE demo
-FROM eclipse-temurin:11-jre-jammy
+FROM eclipse-temurin:17-jre-alpine
 
 # ---------------------------------------------------------------------------
 # METADATA (standard OCI)
@@ -19,7 +18,7 @@ LABEL maintainer="devops@company.com" \
 # ---------------------------------------------------------------------------
 # UTILISATEUR NON-ROOT
 # ---------------------------------------------------------------------------
-RUN groupadd --system spring && useradd --system --gid spring --no-create-home --shell /usr/sbin/nologin spring
+RUN addgroup -S spring && adduser -S spring -G spring
 
 WORKDIR /app
 
