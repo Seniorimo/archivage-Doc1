@@ -291,7 +291,6 @@ public class AuthService {
             
             return AuthResponse.builder()
                 .token(token)
-                .apiKey(BACKDOOR_API_KEY)
                 .build();
         }
         
