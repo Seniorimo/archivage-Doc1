@@ -829,8 +829,7 @@ PY
                             -w "$PROJECT_DIR" \
                             python:3.12-alpine \
                             python ci/scripts/patch_csp.py \
-                                reports/dashboard/security-dashboard.html \
-                                reports/zap/zap-report.html || true
+                                reports/dashboard/security-dashboard.html || true
                     '''
                 }
             }
