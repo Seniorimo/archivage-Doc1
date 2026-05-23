@@ -349,6 +349,10 @@ PY
                                 mkdir -p reports/trivy
                                 rm -f reports/trivy/trivy-report.json reports/trivy/trivy.stderr.log
 
+                                # Pull Trivy image only if not present locally
+                                docker image inspect ghcr.io/aquasecurity/trivy:v0.54.1 >/dev/null 2>&1 \
+                                    || docker pull ghcr.io/aquasecurity/trivy:v0.54.1
+
                                 # Ensure Trivy cache directory exists
                                 docker run --rm \
                                     -u 0:0 \
