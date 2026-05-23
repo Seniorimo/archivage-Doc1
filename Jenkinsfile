@@ -349,18 +349,17 @@ PY
                                 mkdir -p reports/trivy
                                 rm -f reports/trivy/trivy-report.json reports/trivy/trivy.stderr.log
 
-                                # Ensure Trivy cache directory exists with correct permissions for non-root user
+                                # Ensure Trivy cache directory exists
                                 docker run --rm \
                                     -u 0:0 \
                                     -v "$TRIVY_CACHE:/cache" \
                                     alpine:3.19 \
-                                    sh -c "mkdir -p /cache && chown -R ${JENKINS_UID}:${JENKINS_GID} /cache && chmod -R u+rwX /cache || true"
+                                    sh -c "mkdir -p /cache && chmod -R u+rwX /cache || true"
 
+                                # Trivy runs as root to access Docker socket, cache is persistent on host
                                 docker run --rm \
-                                    --user "${JENKINS_UID}:${JENKINS_GID}" \
                                     -v /var/run/docker.sock:/var/run/docker.sock \
-                                    -v "$TRIVY_CACHE:/tmp/trivy-cache" \
-                                    -e TRIVY_CACHE_DIR=/tmp/trivy-cache \
+                                    -v "$TRIVY_CACHE:/root/.cache/trivy" \
                                     ghcr.io/aquasecurity/trivy:v0.54.1 image \
                                         --no-progress \
                                         --scanners vuln \
@@ -373,6 +372,7 @@ PY
                                 test -s reports/trivy/trivy-report.json \
                                     || { echo "[ERREUR] trivy-report.json vide"; exit 1; }
 
+                                # Fix permissions for Jenkins user
                                 docker run --rm \
                                     -u 0:0 \
                                     -v "$PROJECT_DIR/reports/trivy:/reports" \
