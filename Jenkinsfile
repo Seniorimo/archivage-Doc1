@@ -350,8 +350,8 @@ PY
                                 rm -f reports/trivy/trivy-report.json reports/trivy/trivy.stderr.log
 
                                 # Pull Trivy image only if not present locally
-                                docker image inspect ghcr.io/aquasecurity/trivy:v0.54.1 >/dev/null 2>&1 \
-                                    || docker pull ghcr.io/aquasecurity/trivy:v0.54.1
+                                docker image inspect ghcr.io/aquasecurity/trivy:v0.70.0 >/dev/null 2>&1 \
+                                    || docker pull ghcr.io/aquasecurity/trivy:v0.70.0
 
                                 # Ensure Trivy cache directory exists
                                 docker run --rm \
@@ -364,7 +364,7 @@ PY
                                 docker run --rm \
                                     -v /var/run/docker.sock:/var/run/docker.sock \
                                     -v "$TRIVY_CACHE:/root/.cache/trivy" \
-                                    ghcr.io/aquasecurity/trivy:v0.54.1 image \
+                                    ghcr.io/aquasecurity/trivy:v0.70.0 image \
                                         --no-progress \
                                         --scanners vuln \
                                         --severity CRITICAL,HIGH,MEDIUM,LOW \
