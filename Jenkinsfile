@@ -103,7 +103,7 @@ pipeline {
                         branches: [[name: '*/main']],
                         userRemoteConfigs: [[url: 'https://github.com/Seniorimo/archivage-Doc1.git']],
                         extensions: [
-                            [$class: 'CloneOption', shallow: true, depth: 1, noTags: true, timeout: 5]
+                            [$class: 'CloneOption', shallow: false, noTags: true, timeout: 5]
                         ]
                     ])
                 }
