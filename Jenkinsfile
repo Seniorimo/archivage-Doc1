@@ -32,6 +32,15 @@ pipeline {
         MAVEN_REPO                = '/var/jenkins_home/.m2/repository'
         SONARQUBE_ENV             = 'sonar'
         JENKINS_CONTAINER         = 'jenkins'
+        ALPINE_IMAGE              = 'alpine:3.19'
+        PYTHON_IMAGE              = 'python:3.12-alpine'
+        MAVEN_IMAGE               = 'maven:3.9.9-eclipse-temurin-17'
+        TRIVY_IMAGE               = 'ghcr.io/aquasecurity/trivy:0.70.0'
+        GITLEAKS_IMAGE            = 'zricethezav/gitleaks:v8.18.4'
+        CURL_IMAGE                = 'curlimages/curl:8.7.1'
+        ZAP_IMAGE                 = 'ghcr.io/zaproxy/zaproxy:stable'
+        MYSQL_IMAGE               = 'mysql:8.0'
+        OPA_IMAGE                 = 'openpolicyagent/opa:latest'
     }
 
     stages {
@@ -82,7 +91,7 @@ pipeline {
                     docker run --rm \
                         -u 0:0 \
                         -v "$WORKSPACE:/ws" \
-                        alpine:3.19 \
+                        "$ALPINE_IMAGE" \
                         sh -euxc "
                             find /ws -mindepth 1 -maxdepth 1 -exec rm -rf {} + || true
                             mkdir -p /ws/src
@@ -139,7 +148,7 @@ pipeline {
                                   -e DOCKER_HUB_USERNAME="$DOCKER_HUB_USERNAME" \
                                   -e DOCKER_HUB_PASSWORD="$DOCKER_HUB_PASSWORD" \
                                   -e GIT_SHA="$GIT_SHA" \
-                                  python:3.12-alpine \
+                                  "$PYTHON_IMAGE" \
                                   python - <<'PY'
 import json
 import os
@@ -255,7 +264,7 @@ PY
                     docker run --rm \
                         -u 0:0 \
                         -v "$TRIVY_CACHE:/cache" \
-                        alpine:3.19 \
+                        "$ALPINE_IMAGE" \
                         sh -c "chown -R ${JENKINS_UID}:${JENKINS_GID} /cache && chmod -R u+rwX /cache || true"
 
                     if [ -f generate_dashboard.py ]; then
@@ -281,7 +290,7 @@ PY
                         -e HOME=/tmp \
                         --volumes-from "$JENKINS_CONTAINER" \
                         -w "$PROJECT_DIR" \
-                        maven:3.9.9-eclipse-temurin-17 \
+                        "$MAVEN_IMAGE" \
                         sh -lc "mvn -B -f '$PROJECT_DIR/pom.xml' \
                                     -Dmaven.repo.local='$MAVEN_REPO' \
                                     clean compile -DskipTests"
@@ -305,7 +314,7 @@ PY
                                     --user "${JENKINS_UID}:${JENKINS_GID}" \
                                     --volumes-from "$JENKINS_CONTAINER" \
                                     -w "$PROJECT_DIR" \
-                                    zricethezav/gitleaks:v8.18.4 detect \
+                                    "$GITLEAKS_IMAGE" detect \
                                         --source . \
                                         --log-opts="HEAD~1..HEAD" \
                                         --report-format json \
@@ -317,13 +326,13 @@ PY
                                     -e IGNORE_TEST_APP_FINDINGS="$IGNORE_TEST_APP_FINDINGS" \
                                     --volumes-from "$JENKINS_CONTAINER" \
                                     -w "$PROJECT_DIR" \
-                                    python:3.12-alpine \
+                                    "$PYTHON_IMAGE" \
                                     python ci/scripts/filter_gitleaks.py
 
                                 docker run --rm \
                                     -u 0:0 \
                                     -v "$PROJECT_DIR/reports/gitleaks:/reports" \
-                                    alpine:3.19 \
+                                    "$ALPINE_IMAGE" \
                                     sh -c "chown -R ${JENKINS_UID}:${JENKINS_GID} /reports && chmod -R u+rwX /reports || true"
 
                                 test -f reports/gitleaks/gitleaks-report.json || echo "[]" > reports/gitleaks/gitleaks-report.json
@@ -341,15 +350,15 @@ PY
                                 cd "$PROJECT_DIR"
 
                                 pull_trivy_image() {
-                                    docker image inspect ghcr.io/aquasecurity/trivy:0.70.0 >/dev/null 2>&1 \
-                                        || docker pull ghcr.io/aquasecurity/trivy:0.70.0
+                                    docker image inspect "$TRIVY_IMAGE" >/dev/null 2>&1 \
+                                        || docker pull "$TRIVY_IMAGE"
                                 }
 
                                 ensure_trivy_cache() {
                                     docker run --rm \
                                         -u 0:0 \
                                         -v "$TRIVY_CACHE:/cache" \
-                                        alpine:3.19 \
+                                        "$ALPINE_IMAGE" \
                                         sh -c "mkdir -p /cache && chmod -R u+rwX /cache || true"
                                 }
 
@@ -358,7 +367,7 @@ PY
                                         -u 0:0 \
                                         -v "$PROJECT_DIR/reports/trivy:/reports" \
                                         -v "$TRIVY_CACHE:/cache" \
-                                        alpine:3.19 \
+                                        "$ALPINE_IMAGE" \
                                         sh -c "chown -R ${JENKINS_UID}:${JENKINS_GID} /reports /cache && chmod -R u+rwX /reports /cache || true"
                                 }
 
@@ -382,7 +391,7 @@ PY
                                 docker run --rm \
                                     -v /var/run/docker.sock:/var/run/docker.sock \
                                     -v "$TRIVY_CACHE:/root/.cache/trivy" \
-                                    ghcr.io/aquasecurity/trivy:0.70.0 image \
+                                    "$TRIVY_IMAGE" image \
                                         --no-progress \
                                         --scanners vuln \
                                         --severity CRITICAL,HIGH,MEDIUM,LOW \
@@ -399,7 +408,7 @@ PY
                                     --volumes-from "$JENKINS_CONTAINER" \
                                     -w "$PROJECT_DIR" \
                                     -v "$TRIVY_CACHE:/root/.cache/trivy" \
-                                    ghcr.io/aquasecurity/trivy:0.70.0 fs \
+                                    "$TRIVY_IMAGE" fs \
                                         --no-progress \
                                         --scanners vuln \
                                         --severity CRITICAL,HIGH,MEDIUM,LOW \
@@ -439,7 +448,7 @@ PY
                                             -e SONAR_HOST_URL="$SONAR_HOST_URL" \
                                             -e SONAR_AUTH_TOKEN="$SONAR_AUTH_TOKEN" \
                                             -w "$PROJECT_DIR" \
-                                            maven:3.9.9-eclipse-temurin-17 \
+                                            "$MAVEN_IMAGE" \
                                             sh -lc "mvn -B -f '$PROJECT_DIR/pom.xml' \
                                                         -Dmaven.repo.local='$MAVEN_REPO' \
                                                         org.sonarsource.scanner.maven:sonar-maven-plugin:4.0.0.4121:sonar \
@@ -466,7 +475,7 @@ PY
                                     -e HOME=/tmp \
                                     --volumes-from "$JENKINS_CONTAINER" \
                                     -w "$PROJECT_DIR" \
-                                    maven:3.9.9-eclipse-temurin-17 \
+                                    "$MAVEN_IMAGE" \
                                     sh -lc "mvn -B -f '$PROJECT_DIR/pom.xml' \
                                                 -Dmaven.repo.local='$MAVEN_REPO' \
                                                 org.cyclonedx:cyclonedx-maven-plugin:2.7.11:makeAggregateBom \
@@ -497,11 +506,11 @@ PY
                         -e MYSQL_DATABASE=archivage_doc \
                         -e MYSQL_USER=archivage_user \
                         -e MYSQL_PASSWORD=archivage_pass \
-                        mysql:8.0 >/dev/null
+                        "$MYSQL_IMAGE" >/dev/null
 
                     READY=0
                     for i in $(seq 1 30); do
-                        if docker run --rm --network "$NETWORK_NAME" mysql:8.0 \
+                        if docker run --rm --network "$NETWORK_NAME" "$MYSQL_IMAGE" \
                                 mysqladmin ping -h"$MYSQL_CONTAINER" -uroot -proot --silent; then
                             READY=1
                             break
@@ -538,7 +547,7 @@ PY
 
                     READY=0
                     for i in $(seq 1 30); do
-                        CODE=$(docker run --rm --network "$NETWORK_NAME" curlimages/curl:8.7.1 \
+                        CODE=$(docker run --rm --network "$NETWORK_NAME" "$CURL_IMAGE" \
                                -s -o /dev/null -w "%{http_code}" \
                                "http://$APP_CONTAINER:$APP_PORT/actuator/health" || true)
                         echo "HTTP=$CODE"
@@ -583,7 +592,7 @@ PY
                         --network "$NETWORK_NAME" \
                         -v "${ZAP_VOL}:/zap/wrk:rw" \
                         -e HOME=/zap \
-                        ghcr.io/zaproxy/zaproxy:stable \
+                        "$ZAP_IMAGE" \
                         bash -c '
                             set -o pipefail
                             umask 0002
@@ -604,7 +613,7 @@ PY
                     docker run --rm \
                         --volumes-from "$JENKINS_CONTAINER" \
                         -v "${ZAP_VOL}:/zap/wrk:ro" \
-                        alpine:3.19 \
+                        "$ALPINE_IMAGE" \
                         sh -c "cp -f /zap/wrk/* $PROJECT_DIR/reports/zap/ 2>/dev/null || true"
 
                     docker volume rm "$ZAP_VOL" >/dev/null 2>&1 || true
@@ -612,7 +621,7 @@ PY
                     docker run --rm \
                         -u 0:0 \
                         -v "$PROJECT_DIR/reports/zap:/reports" \
-                        alpine:3.19 \
+                        "$ALPINE_IMAGE" \
                         sh -c "
                             chown -R ${JENKINS_UID}:${JENKINS_GID} /reports || true
                             chmod -R u+rwX /reports || true
@@ -637,7 +646,7 @@ PY
                     docker run --rm \
                         -u 0:0 \
                         -v "$PROJECT_DIR/reports/zap:/reports" \
-                        alpine:3.19 \
+                        "$ALPINE_IMAGE" \
                         sh -c "
                             chown -R ${JENKINS_UID}:${JENKINS_GID} /reports || true
                             chmod -R u+rwX /reports || true
@@ -650,13 +659,13 @@ PY
                         -e IGNORE_TEST_APP_FINDINGS="$IGNORE_TEST_APP_FINDINGS" \
                         --volumes-from "$JENKINS_CONTAINER" \
                         -w "$PROJECT_DIR" \
-                        python:3.12-alpine \
+                        "$PYTHON_IMAGE" \
                         python ci/scripts/filter_zap.py
 
                     docker run --rm \
                         -u 0:0 \
                         -v "$PROJECT_DIR/reports/zap:/reports" \
-                        alpine:3.19 \
+                        "$ALPINE_IMAGE" \
                         sh -c "
                             chown -R ${JENKINS_UID}:${JENKINS_GID} /reports || true
                             chmod -R u+rwX /reports || true
@@ -689,7 +698,7 @@ PY
                                 --add-host=host.docker.internal:host-gateway \
                                 --volumes-from "$JENKINS_CONTAINER" \
                                 -w "$PROJECT_DIR" \
-                                python:3.12-alpine \
+                                "$PYTHON_IMAGE" \
                                 python ci/scripts/build_input.py
 
                             test -s "$PROJECT_DIR/reports/opa/input.json" \
@@ -698,7 +707,7 @@ PY
                             docker run --rm \
                                 --volumes-from "$JENKINS_CONTAINER" \
                                 -w "$PROJECT_DIR" \
-                                openpolicyagent/opa:latest \
+                                "$OPA_IMAGE" \
                                 eval \
                                     --format pretty \
                                     --data "$PROJECT_DIR/ci/policy/security-gate.rego" \
@@ -709,7 +718,7 @@ PY
                             docker run --rm \
                                 --volumes-from "$JENKINS_CONTAINER" \
                                 -w "$PROJECT_DIR" \
-                                openpolicyagent/opa:latest \
+                                "$OPA_IMAGE" \
                                 eval \
                                     --format raw \
                                     --data "$PROJECT_DIR/ci/policy/security-gate.rego" \
@@ -745,7 +754,7 @@ PY
                                     --user "${JENKINS_UID}:${JENKINS_GID}" \
                                     --volumes-from "$JENKINS_CONTAINER" \
                                     -w "$PROJECT_DIR" \
-                                    python:3.12-alpine \
+                                    "$PYTHON_IMAGE" \
                                     python - <<'PY'
 import json
 from pathlib import Path
@@ -812,7 +821,7 @@ PY
                 docker run --rm \
                     -u 0:0 \
                     -v "$WORKSPACE:/ws" \
-                    alpine:3.19 \
+                    "$ALPINE_IMAGE" \
                     sh -c "chown -R ${JENKINS_UID}:${JENKINS_GID} /ws 2>/dev/null && chmod -R u+rwX /ws 2>/dev/null || true" || true
             '''
 
@@ -834,7 +843,7 @@ PY
                                 -e SONAR_HOST_URL="$SONAR_HOST_URL" \
                                 -e SONAR_AUTH_TOKEN="$SONAR_AUTH_TOKEN" \
                                 -w "$PROJECT_DIR" \
-                                python:3.12-alpine \
+                                "$PYTHON_IMAGE" \
                                 python generate_dashboard.py \
                                     --reports reports \
                                     --output reports/dashboard/security-dashboard.html \
@@ -857,7 +866,7 @@ PY
                             -u 0:0 \
                             -v "$PROJECT_DIR/reports/dashboard:/dashboard" \
                             -v "$PROJECT_DIR/reports/zap:/zap" \
-                            alpine:3.19 \
+                            "$ALPINE_IMAGE" \
                             sh -c "
                                 chown -R ${JENKINS_UID}:${JENKINS_GID} /dashboard /zap 2>/dev/null || true
                                 chmod -R u+rwX /dashboard /zap 2>/dev/null || true
@@ -870,7 +879,7 @@ PY
                             --user "${JENKINS_UID}:${JENKINS_GID}" \
                             --volumes-from "$JENKINS_CONTAINER" \
                             -w "$PROJECT_DIR" \
-                            python:3.12-alpine \
+                            "$PYTHON_IMAGE" \
                             python ci/scripts/patch_csp.py \
                                 reports/dashboard/security-dashboard.html || true
                     '''
