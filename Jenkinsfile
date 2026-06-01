@@ -340,6 +340,28 @@ PY
                                 set -eu
                                 cd "$PROJECT_DIR"
 
+                                pull_trivy_image() {
+                                    docker image inspect ghcr.io/aquasecurity/trivy:0.70.0 >/dev/null 2>&1 \
+                                        || docker pull ghcr.io/aquasecurity/trivy:0.70.0
+                                }
+
+                                ensure_trivy_cache() {
+                                    docker run --rm \
+                                        -u 0:0 \
+                                        -v "$TRIVY_CACHE:/cache" \
+                                        alpine:3.19 \
+                                        sh -c "mkdir -p /cache && chmod -R u+rwX /cache || true"
+                                }
+
+                                fix_trivy_permissions() {
+                                    docker run --rm \
+                                        -u 0:0 \
+                                        -v "$PROJECT_DIR/reports/trivy:/reports" \
+                                        -v "$TRIVY_CACHE:/cache" \
+                                        alpine:3.19 \
+                                        sh -c "chown -R ${JENKINS_UID}:${JENKINS_GID} /reports /cache && chmod -R u+rwX /reports /cache || true"
+                                }
+
                                 test -S /var/run/docker.sock \
                                     || { echo "[ERREUR] /var/run/docker.sock absent"; exit 1; }
 
@@ -347,18 +369,14 @@ PY
                                     || { echo "[ERREUR] Image absente localement : $DOCKER_IMAGE"; exit 1; }
 
                                 mkdir -p reports/trivy
-                                rm -f reports/trivy/trivy-report.json reports/trivy/trivy.stderr.log
+                                rm -f \
+                                    reports/trivy/trivy-report.json \
+                                    reports/trivy/trivy.stderr.log \
+                                    reports/trivy/trivy-fs-report.json \
+                                    reports/trivy/trivy-fs.stderr.log
 
-                                # Pull Trivy image only if not present locally
-                                docker image inspect ghcr.io/aquasecurity/trivy:0.70.0 >/dev/null 2>&1 \
-                                    || docker pull ghcr.io/aquasecurity/trivy:0.70.0
-
-                                # Ensure Trivy cache directory exists
-                                docker run --rm \
-                                    -u 0:0 \
-                                    -v "$TRIVY_CACHE:/cache" \
-                                    alpine:3.19 \
-                                    sh -c "mkdir -p /cache && chmod -R u+rwX /cache || true"
+                                pull_trivy_image
+                                ensure_trivy_cache
 
                                 # Trivy runs as root to access Docker socket, cache is persistent on host
                                 docker run --rm \
@@ -376,13 +394,24 @@ PY
                                 test -s reports/trivy/trivy-report.json \
                                     || { echo "[ERREUR] trivy-report.json vide"; exit 1; }
 
-                                # Fix permissions for Jenkins user
+                                # Additional filesystem scan on the workspace
                                 docker run --rm \
-                                    -u 0:0 \
-                                    -v "$PROJECT_DIR/reports/trivy:/reports" \
-                                    -v "$TRIVY_CACHE:/cache" \
-                                    alpine:3.19 \
-                                    sh -c "chown -R ${JENKINS_UID}:${JENKINS_GID} /reports /cache && chmod -R u+rwX /reports /cache || true"
+                                    --volumes-from "$JENKINS_CONTAINER" \
+                                    -w "$PROJECT_DIR" \
+                                    -v "$TRIVY_CACHE:/root/.cache/trivy" \
+                                    ghcr.io/aquasecurity/trivy:0.70.0 fs \
+                                        --no-progress \
+                                        --scanners vuln \
+                                        --severity CRITICAL,HIGH,MEDIUM,LOW \
+                                        --format json \
+                                        . \
+                                    > reports/trivy/trivy-fs-report.json \
+                                    2> reports/trivy/trivy-fs.stderr.log
+
+                                test -s reports/trivy/trivy-fs-report.json \
+                                    || { echo "[ERREUR] trivy-fs-report.json vide"; exit 1; }
+
+                                fix_trivy_permissions
                             '''
                         }
                     }
