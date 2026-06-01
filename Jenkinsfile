@@ -248,15 +248,14 @@ PY
                     cd "$PROJECT_DIR"
                     echo "=== PREPARE WORKSPACE ==="
 
-                    rm -rf reports policy
+                    rm -rf reports
                     mkdir -p \
                         reports/gitleaks \
                         reports/trivy \
                         reports/sbom \
                         reports/zap \
                         reports/opa \
-                        reports/dashboard \
-                        policy
+                        reports/dashboard
 
                     docker network inspect "$NETWORK_NAME" >/dev/null 2>&1 \
                         || docker network create "$NETWORK_NAME"
@@ -342,7 +341,7 @@ PY
                     }
                 }
 
-                stage('SCA - Trivy Image') {
+                stage('SCA - Trivy Image & FS') {
                     steps {
                         catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
                             sh '''
@@ -922,6 +921,8 @@ PY
                             'src/reports/gitleaks/gitleaks-report.json',
                             'src/reports/trivy/trivy-report.json',
                             'src/reports/trivy/trivy.stderr.log',
+                            'src/reports/trivy/trivy-fs-report.json',
+                            'src/reports/trivy/trivy-fs.stderr.log',
                             'src/reports/zap/zap-baseline.log',
                             'src/reports/zap/zap-exit-code.txt',
                             'src/reports/zap/zap-report.html',

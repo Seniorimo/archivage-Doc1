@@ -1,24 +1,3 @@
-# ===========================================================================
-# GITHUB ACTIONS — Java Application CI (VERSION FINALE)
-# Rôle : UNIQUEMENT CI — Build, Tests, Sanity Check Docker, Push to Registry
-#
-# ⚠️  TOUTES les briques sécurité restent sur JENKINS.
-#
-# Fixes appliqués :
-#   ✅ Service MySQL pour mvn verify (tests unitaires avec BDD)
-#   ✅ Profil "docker" activé pour le sanity check → MySQL + port 8090
-#   ✅ Health check sur port 8090 (aligné avec application-docker.properties)
-#   ✅ Volume /tmp/archivage-uploads monté → fix AccessDeniedException uploads
-#   ✅ Secrets GitHub utilisés uniquement là où ils sont supportés
-#   ✅ Push de l'image sur Docker Hub pour récupération par Jenkins
-#
-# SECRETS GITHUB À CONFIGURER (Settings > Secrets > Actions) :
-#   GITHUB_OAUTH_SECRET  → client-secret GitHub OAuth
-#   JWT_SECRET           → secret JWT de l'application
-#   DOCKER_USERNAME      → Nom d'utilisateur Docker Hub
-#   DOCKER_PASSWORD      → Jeton d'accès personnel (PAT) Docker Hub
-# ===========================================================================
-
 name: Java Application CI
 
 on:
@@ -27,14 +6,23 @@ on:
   pull_request:
     branches: ["main"]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: java-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE_NAME: archivage-app
+  APP_CONTAINER: archivage-app
+  UPLOADS_DIR: /tmp/archivage-uploads
+
 jobs:
   build-and-test:
     name: Build & Test Spring Boot App
     runs-on: ubuntu-latest
 
-    # ── Service MySQL (utilisé par mvn verify ET sanity check) ───────────
-    # Note: on garde un mot de passe fixe ici, car secrets n'est pas supporté
-    # dans jobs.<job_id>.services
     services:
       mysql:
         image: mysql:8.0
@@ -52,20 +40,17 @@ jobs:
           --health-retries=12
 
     steps:
-      # ── Checkout ──────────────────────────────────────────────────────
-      - name: 📥 Checkout Code
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      # ── JDK ───────────────────────────────────────────────────────────
-      - name: ☕ Set up JDK 17
+      - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           java-version: "17"
           distribution: "temurin"
           cache: maven
 
-      # ── Tests unitaires + JaCoCo ──────────────────────────────────────
-      - name: 🧪 Tests unitaires + Couverture JaCoCo
+      - name: Run tests with JaCoCo
         run: mvn -B verify
         env:
           SPRING_DATASOURCE_URL: jdbc:mysql://127.0.0.1:3306/archivage_doc?serverTimezone=UTC&allowPublicKeyRetrieval=true&useSSL=false
@@ -75,8 +60,7 @@ jobs:
           GITHUB_OAUTH_SECRET: ${{ secrets.GITHUB_OAUTH_SECRET }}
           JWT_SECRET: ${{ secrets.JWT_SECRET }}
 
-      # ── Publication des résultats ─────────────────────────────────────
-      - name: 📊 Publication des résultats de tests
+      - name: Upload test and coverage results
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -85,35 +69,33 @@ jobs:
             target/surefire-reports/*.xml
             target/site/jacoco/
 
-      # ── Build JAR ─────────────────────────────────────────────────────
-      - name: 🔨 Build JAR (Maven package)
+      - name: Build JAR
         run: mvn -B clean package -DskipTests
 
-      # ── Build Image Docker ────────────────────────────────────────────
-      - name: 🐳 Build image Docker
-        run: docker build -t archivage-app:${{ github.sha }} .
+      - name: Build Docker image
+        run: docker build -t "${IMAGE_NAME}:${GITHUB_SHA}" .
 
-      # ── Sanity Check ──────────────────────────────────────────────────
-      # Profil "docker" → MySQL 127.0.0.1 (service GitHub Actions) + port 8090
-      # Volume uploads → fix AccessDeniedException FileStorageServiceImpl
-      - name: 🚀 Sanity Check — démarrage de l'application
+      - name: Sanity check application container
         run: |
           set -eu
 
-          mkdir -p /tmp/archivage-uploads
+          mkdir -p "${UPLOADS_DIR}"
+          chmod 777 "${UPLOADS_DIR}"
 
-          docker run -d --name archivage-app \
+          docker run -d --name "${APP_CONTAINER}" \
             --network host \
-            -v /tmp/archivage-uploads:/app/uploads \
+            --security-opt no-new-privileges:true \
+            --memory 768m \
+            --cpus 1.0 \
+            -v "${UPLOADS_DIR}:/app/uploads" \
             -e SPRING_PROFILES_ACTIVE=docker \
             -e SPRING_DATASOURCE_URL="jdbc:mysql://127.0.0.1:3306/archivage_doc?useUnicode=true&allowPublicKeyRetrieval=true&useSSL=false&serverTimezone=UTC" \
             -e SPRING_DATASOURCE_USERNAME="archivage_user" \
             -e SPRING_DATASOURCE_PASSWORD="archivage_pass" \
-            -e GITHUB_OAUTH_SECRET="${{ secrets.GITHUB_OAUTH_SECRET }}" \
-            -e JWT_SECRET="${{ secrets.JWT_SECRET }}" \
-            archivage-app:${{ github.sha }}
+            -e GITHUB_OAUTH_SECRET="${GITHUB_OAUTH_SECRET}" \
+            -e JWT_SECRET="${JWT_SECRET}" \
+            "${IMAGE_NAME}:${GITHUB_SHA}"
 
-          echo "⏳ Attente du démarrage de Spring Boot..."
           READY=0
 
           for i in $(seq 1 24); do
@@ -121,47 +103,53 @@ jobs:
               http://localhost:8090/actuator/health 2>/dev/null || echo "000")
 
             if echo "${STATUS}" | grep -qE "^(200|302|401|403)$"; then
-              echo "✅ Application disponible (HTTP ${STATUS})"
+              echo "Application available (HTTP ${STATUS})"
               READY=1
               break
             fi
 
-            echo "⏳ Tentative ${i}/24 — HTTP ${STATUS}"
+            echo "Attempt ${i}/24 - HTTP ${STATUS}"
 
             if [ $((i % 5)) -eq 0 ]; then
-              echo "--- Docker logs (tentative ${i}) ---"
-              docker logs archivage-app --tail 20 2>&1 || true
-              echo "---"
+              docker logs "${APP_CONTAINER}" --tail 20 2>&1 || true
             fi
 
             sleep 5
           done
 
           if [ "${READY}" -ne 1 ]; then
-            echo "❌ Timeout — logs complets :"
-            docker logs archivage-app 2>&1 || true
+            docker logs "${APP_CONTAINER}" 2>&1 || true
             exit 1
           fi
+        env:
+          GITHUB_OAUTH_SECRET: ${{ secrets.GITHUB_OAUTH_SECRET }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
 
-      # ── Login & Push vers Docker Hub ──────────────────────────────────
-      - name: 🔐 Login to Docker Hub
+      - name: Login to Docker Hub
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
-      - name: 📤 Push Image Docker
+      - name: Push Docker image
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
-          # 1. On renomme l'image avec votre nom d'utilisateur Docker Hub
-          docker tag archivage-app:${{ github.sha }} ${{ secrets.DOCKER_USERNAME }}/archivage-app:${{ github.sha }}
-          
-          # 2. On l'envoie sur le registre
-          docker push ${{ secrets.DOCKER_USERNAME }}/archivage-app:${{ github.sha }}
+          set -eu
 
-      # ── Nettoyage ─────────────────────────────────────────────────────
-      - name: 🧹 Nettoyage
+          docker tag "${IMAGE_NAME}:${GITHUB_SHA}" "${DOCKER_USERNAME}/archivage-app:${GITHUB_SHA}"
+          docker push "${DOCKER_USERNAME}/archivage-app:${GITHUB_SHA}"
+        env:
+          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+
+      - name: Cleanup
         if: always()
         run: |
-          docker rm -f archivage-app 2>/dev/null || true
-          docker rmi archivage-app:${{ github.sha }} 2>/dev/null || true
-          docker rmi ${{ secrets.DOCKER_USERNAME }}/archivage-app:${{ github.sha }} 2>/dev/null || true
+          docker rm -f "${APP_CONTAINER}" 2>/dev/null || true
+          docker rmi "${IMAGE_NAME}:${GITHUB_SHA}" 2>/dev/null || true
+
+          if [ -n "${DOCKER_USERNAME:-}" ]; then
+            docker rmi "${DOCKER_USERNAME}/archivage-app:${GITHUB_SHA}" 2>/dev/null || true
+          fi
+        env:
+          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}

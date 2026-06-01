@@ -3,36 +3,55 @@ services:
     image: mysql:8.0
     container_name: mysql-archivage
     environment:
-      MYSQL_ROOT_PASSWORD: root
-      MYSQL_DATABASE: archivage_doc
-      MYSQL_USER: archivage_user
-      MYSQL_PASSWORD: archivage_pass
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD is required}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-archivage_doc}
+      MYSQL_USER: ${MYSQL_USER:-archivage_user}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?MYSQL_PASSWORD is required}
     ports:
-      - "3306:3306"
+      - "${MYSQL_BIND_ADDRESS:-127.0.0.1}:${MYSQL_PORT:-3306}:3306"
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -u$${MYSQL_USER} -p$${MYSQL_PASSWORD} --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
     networks:
       - archivage-net
 
   app:
     build:
       context: .
+      dockerfile: Dockerfile
     image: archivage-app:compose
     container_name: app-archivage
     depends_on:
-      - mysql
+      mysql:
+        condition: service_healthy
     environment:
       SPRING_PROFILES_ACTIVE: docker
-      SPRING_DATASOURCE_URL: "jdbc:mysql://mysql-archivage:3306/archivage_doc?useUnicode=true&allowPublicKeyRetrieval=true&useSSL=false&serverTimezone=UTC"
-      SPRING_DATASOURCE_USERNAME: archivage_user
-      SPRING_DATASOURCE_PASSWORD: archivage_pass
-      GITHUB_OAUTH_SECRET: "${GITHUB_OAUTH_SECRET:-ci-dummy-client-secret}"
-      JWT_SECRET: "${JWT_SECRET:-***REMOVED***}"
+      SPRING_DATASOURCE_URL: "jdbc:mysql://mysql-archivage:3306/${MYSQL_DATABASE:-archivage_doc}?useUnicode=true&allowPublicKeyRetrieval=true&useSSL=false&serverTimezone=UTC"
+      SPRING_DATASOURCE_USERNAME: ${MYSQL_USER:-archivage_user}
+      SPRING_DATASOURCE_PASSWORD: ${MYSQL_PASSWORD:?MYSQL_PASSWORD is required}
+      GITHUB_OAUTH_SECRET: ${GITHUB_OAUTH_SECRET:?GITHUB_OAUTH_SECRET is required}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
     ports:
-      - "8090:8090"
+      - "${APP_BIND_ADDRESS:-127.0.0.1}:${APP_PORT:-8090}:8090"
     volumes:
-      - ./uploads:/app/uploads
+      - uploads-data:/app/uploads
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:8090/actuator/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    security_opt:
+      - no-new-privileges:true
     networks:
       - archivage-net
 
 networks:
   archivage-net:
     name: archivage-net
+
+volumes:
+  uploads-data:

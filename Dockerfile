@@ -1,57 +1,34 @@
-# ===========================================================================
-# DOCKERFILE — archivage-doc (Spring Boot 17)
-# Fix appliqué :
-#   ✅ mkdir /app/uploads + chown -R spring:spring /app
-#      → résout AccessDeniedException sur FileStorageServiceImpl
-# ===========================================================================
+# Runtime image for the Spring Boot application.
+# The JAR is built by Maven before docker build.
 
 FROM eclipse-temurin:17-jre-alpine
 
-# ---------------------------------------------------------------------------
-# METADATA (standard OCI)
-# ---------------------------------------------------------------------------
-LABEL maintainer="devops@company.com" \
-      org.opencontainers.image.title="archivage-doc" \
-      org.opencontainers.image.description="Application Spring Boot d'archivage documentaire" \
+LABEL org.opencontainers.image.title="archivage-doc" \
+      org.opencontainers.image.description="Spring Boot document archiving API" \
       org.opencontainers.image.base.name="eclipse-temurin:17-jre-alpine"
 
-# ---------------------------------------------------------------------------
-# UTILISATEUR NON-ROOT
-# ---------------------------------------------------------------------------
-RUN addgroup -S spring && adduser -S spring -G spring
+ARG APP_USER=spring
+ARG APP_GROUP=spring
+ARG JAR_FILE=target/*.jar
 
 WORKDIR /app
 
-# ---------------------------------------------------------------------------
-# FIX AccessDeniedException — créer uploads et donner les droits à spring
-# Ce RUN s'exécute en ROOT (avant USER spring) → chown fonctionne
-# ---------------------------------------------------------------------------
-RUN mkdir -p /app/uploads && \
-    chown -R spring:spring /app
+RUN apk add --no-cache wget
 
-# ---------------------------------------------------------------------------
-# COPIE DU JAR
-# ---------------------------------------------------------------------------
-ARG JAR_FILE=target/*.jar
-COPY --chown=spring:spring ${JAR_FILE} app.jar
+RUN addgroup -S "${APP_GROUP}" \
+    && adduser -S "${APP_USER}" -G "${APP_GROUP}" \
+    && mkdir -p /app/uploads \
+    && chown -R "${APP_USER}:${APP_GROUP}" /app
 
-USER spring:spring
+COPY --chown=${APP_USER}:${APP_GROUP} ${JAR_FILE} app.jar
+
+USER ${APP_USER}:${APP_GROUP}
 
 EXPOSE 8090
 
-# ---------------------------------------------------------------------------
-# HEALTHCHECK — Spring Boot Actuator (/actuator/health)
-# ---------------------------------------------------------------------------
-HEALTHCHECK --interval=30s \
-            --timeout=5s \
-            --start-period=60s \
-            --retries=3 \
-  CMD wget --no-verbose --tries=1 --spider \
-      http://localhost:8090/actuator/health || exit 1
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+  CMD wget --no-verbose --tries=1 --spider http://localhost:8090/actuator/health || exit 1
 
-# ---------------------------------------------------------------------------
-# ENTRYPOINT — flags JVM container-aware
-# ---------------------------------------------------------------------------
 ENTRYPOINT ["java", \
   "-XX:+UseContainerSupport", \
   "-XX:MaxRAMPercentage=75.0", \

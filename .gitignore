@@ -1,0 +1,11 @@
+target/
+reports/
+uploads/
+.trivycache/
+
+.env
+.env.*
+!.env.example
+
+*.log
+*.tmp
