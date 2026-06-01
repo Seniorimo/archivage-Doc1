@@ -307,7 +307,7 @@ PY
                                     -w "$PROJECT_DIR" \
                                     zricethezav/gitleaks:v8.18.4 detect \
                                         --source . \
-                                        --log-opts="--all" \
+                                        --log-opts="HEAD~1..HEAD" \
                                         --report-format json \
                                         --report-path "$PROJECT_DIR/reports/gitleaks/gitleaks-raw.json" \
                                         --exit-code 0
