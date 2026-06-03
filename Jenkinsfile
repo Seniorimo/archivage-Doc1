@@ -62,7 +62,7 @@ pipeline {
             }
         }
 
-        stage('Build & Package') {
+        stage('Compile (Maven)') {
             agent {
                 docker {
                     image 'maven:3.9.9-eclipse-temurin-17'
@@ -74,12 +74,21 @@ pipeline {
                 sh '''
                     set -eu
                     cd "$PROJECT_DIR"
-                    echo "=== BUILD & PACKAGE ==="
+                    echo "=== COMPILATION MAVEN ==="
                     mvn -B -f "$PROJECT_DIR/pom.xml" -Dmaven.repo.local="$MAVEN_REPO" clean package -DskipTests
                     
                     JARPATH=$(find "$PROJECT_DIR/target" -maxdepth 1 -type f -name "*.jar" ! -name "*.original" | head -n 1)
                     echo "$JARPATH" > "$PROJECT_DIR/.jarpath"
-                    
+                '''
+            }
+        }
+
+        stage('Build Docker Image') {
+            steps {
+                sh '''
+                    set -eu
+                    cd "$PROJECT_DIR"
+                    echo "=== BUILD DOCKER IMAGE ==="
                     docker build -t "$DOCKER_IMAGE" "$PROJECT_DIR"
                 '''
             }
@@ -103,7 +112,8 @@ pipeline {
                                 gitleaks detect --source . --log-opts="--all" --report-format json --report-path reports/gitleaks/gitleaks-report.json --exit-code 0
                                 test -s reports/gitleaks/gitleaks-report.json || echo "[]" > reports/gitleaks/gitleaks-report.json
                             '''
-                            sh 'docker run --rm --volumes-from jenkins -w "$PROJECT_DIR" python:3.12-alpine python ci/scripts/print_gitleaks_summary.py reports/gitleaks/gitleaks-report.json'
+                            // Appel direct Python sans docker run
+                            sh 'python3 "$PROJECT_DIR/ci/scripts/print_gitleaks_summary.py" "$PROJECT_DIR/reports/gitleaks/gitleaks-report.json"'
                         }
                     }
                 }
@@ -123,7 +133,7 @@ pipeline {
                                 trivy fs --no-progress --quiet --scanners vuln --severity CRITICAL,HIGH --format json --output reports/trivy/trivy-report.json .
                                 test -s reports/trivy/trivy-report.json || echo '{"Results":[]}' > reports/trivy/trivy-report.json
                             '''
-                            sh 'docker run --rm --volumes-from jenkins -w "$PROJECT_DIR" python:3.12-alpine python ci/scripts/print_trivy_summary.py reports/trivy/trivy-report.json'
+                            sh 'python3 "$PROJECT_DIR/ci/scripts/print_trivy_summary.py" "$PROJECT_DIR/reports/trivy/trivy-report.json"'
                         }
                     }
                 }
@@ -153,7 +163,7 @@ pipeline {
                                 sh '''
                                     curl -sf -u "$SONAR_AUTH_TOKEN:" "$SONAR_DOCKER_URL/api/issues/search?componentKeys=$APP_NAME&types=VULNERABILITY&severities=BLOCKER,CRITICAL,MAJOR,MINOR,INFO&p=1&ps=100" -o "$PROJECT_DIR/reports/sonar/sonar-vulnerabilities.json" || echo '{"issues":[],"total":0}' > "$PROJECT_DIR/reports/sonar/sonar-vulnerabilities.json"
                                 '''
-                                sh 'docker run --rm --volumes-from jenkins -w "$PROJECT_DIR" python:3.12-alpine python ci/scripts/print_sonar_summary.py reports/sonar/sonar-vulnerabilities.json'
+                                sh 'python3 "$PROJECT_DIR/ci/scripts/print_sonar_summary.py" "$PROJECT_DIR/reports/sonar/sonar-vulnerabilities.json"'
                             }
                         }
                     }
@@ -223,8 +233,9 @@ pipeline {
                         
                         test -s "$PROJECT_DIR/reports/zap/zap-report.json" || echo '{"site":[{"alerts":[]}]}' > "$PROJECT_DIR/reports/zap/zap-report.json"
                     '''
-                    sh 'docker run --rm --volumes-from jenkins -w "$PROJECT_DIR/reports/zap" python:3.12-alpine python ../../ci/scripts/zap_to_html.py'
-                    sh 'docker run --rm --volumes-from jenkins -w "$PROJECT_DIR" python:3.12-alpine python ci/scripts/print_zap_summary.py reports/zap/zap-report.json'
+                    // Appel direct Python sans docker run
+                    sh 'python3 "$PROJECT_DIR/ci/scripts/zap_to_html.py"'
+                    sh 'python3 "$PROJECT_DIR/ci/scripts/print_zap_summary.py" "$PROJECT_DIR/reports/zap/zap-report.json"'
                 }
             }
         }
@@ -234,8 +245,8 @@ pipeline {
                 sh '''
                     cd "$PROJECT_DIR"
                     
-                    # Génération de l'input
-                    docker run --rm --volumes-from jenkins -w "$PROJECT_DIR" python:3.12-alpine python ci/scripts/build_input.py
+                    # Génération de l'input avec Python direct
+                    python3 "$PROJECT_DIR/ci/scripts/build_input.py"
                     
                     # Évaluation OPA
                     docker run --rm --volumes-from jenkins -w "$PROJECT_DIR" openpolicyagent/opa:latest eval --format raw --data "ci/policy/security-gate.rego" --input "reports/opa/input.json" "data.security.allow" | tee "reports/opa/opa-result.txt"
