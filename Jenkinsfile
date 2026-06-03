@@ -284,9 +284,8 @@ pipeline {
             '''
 
             script {
-                if (fileExists('src/reports/trivy/trivy-report.json')) {
-                    recordIssues enabledForFailure: true, aggregatingResults: true, tools: [trivy(pattern: 'src/reports/trivy/trivy-report.json', reportEncoding: 'UTF-8')]
-                }
+                // حيدنا البلوك ديال recordIssues اللي كيكراشي جينكينز
+                
                 if (fileExists('src/reports/zap/zap-report.html')) {
                     publishHTML(target: [allowMissing: true, alwaysLinkToLastBuild: true, keepAll: true, reportDir: 'src/reports/zap', reportFiles: 'zap-report.html', reportName: 'ZAP Web Report'])
                 }
@@ -294,7 +293,6 @@ pipeline {
                     publishHTML(target: [allowMissing: true, alwaysLinkToLastBuild: true, keepAll: true, reportDir: 'src/reports/dashboard', reportFiles: 'security-dashboard.html', reportName: 'Security Dashboard'])
                 }
                 
-                // هنا حطيت ليك الليستة ديال 17 ملف كيفما طلبتي بالحرف باش يبانو مزيان
                 if (fileExists('src/reports')) {
                     archiveArtifacts(
                         artifacts: [
