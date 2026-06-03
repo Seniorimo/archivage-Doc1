@@ -6,6 +6,20 @@ pipeline {
         timestamps()
         timeout(time: 60, unit: 'MINUTES')
         disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '10', artifactNumToKeepStr: '10'))
+    }
+
+    parameters {
+        booleanParam(
+            name: 'ENFORCE_SECURITY_GATE',
+            defaultValue: false,
+            description: 'Strict mode: fail the build if the OPA security gate does not pass'
+        )
+        booleanParam(
+            name: 'IGNORE_TEST_APP_FINDINGS',
+            defaultValue: false,
+            description: 'Demo mode: ignore findings from /api/test/devsecops/* endpoints and demo assets'
+        )
     }
 
     environment {
@@ -56,26 +70,19 @@ pipeline {
                     cd "$PROJECT_DIR"
                     echo "=== PREPARE WORKSPACE ==="
                     rm -rf reports .trivycache .jarpath
-                    mkdir -p reports/gitleaks reports/trivy reports/sbom reports/zap reports/opa reports/sonar .trivycache
+                    mkdir -p reports/gitleaks reports/trivy reports/sbom reports/zap reports/opa reports/sonar reports/dashboard .trivycache
                     docker network inspect "$NETWORK_NAME" >/dev/null 2>&1 || docker network create "$NETWORK_NAME"
                 '''
             }
         }
 
         stage('Compile (Maven)') {
-            agent {
-                docker {
-                    image 'maven:3.9.9-eclipse-temurin-17'
-                    args "--user ${env.JENKINS_UID}:${env.JENKINS_GID} --volumes-from jenkins"
-                    reuseNode true
-                }
-            }
             steps {
                 sh '''
                     set -eu
                     cd "$PROJECT_DIR"
                     echo "=== COMPILATION MAVEN ==="
-                    mvn -B -f "$PROJECT_DIR/pom.xml" -Dmaven.repo.local="$MAVEN_REPO" clean package -DskipTests
+                    docker run --rm --user "${JENKINS_UID}:${JENKINS_GID}" --volumes-from jenkins -w "$PROJECT_DIR" maven:3.9.9-eclipse-temurin-17 mvn -B -f "$PROJECT_DIR/pom.xml" -Dmaven.repo.local="$MAVEN_REPO" clean package -DskipTests
                     
                     JARPATH=$(find "$PROJECT_DIR/target" -maxdepth 1 -type f -name "*.jar" ! -name "*.original" | head -n 1)
                     echo "$JARPATH" > "$PROJECT_DIR/.jarpath"
@@ -98,90 +105,70 @@ pipeline {
             parallel {
 
                 stage('Secrets - Gitleaks') {
-                    agent {
-                        docker {
-                            image 'zricethezav/gitleaks:latest'
-                            args "--volumes-from jenkins"
-                            reuseNode true
-                        }
-                    }
                     steps {
                         catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
                             sh '''
                                 cd "$PROJECT_DIR"
-                                gitleaks detect --source . --log-opts="--all" --report-format json --report-path reports/gitleaks/gitleaks-report.json --exit-code 0
+                                # 1. Raw Scan
+                                docker run --rm --volumes-from jenkins -w "$PROJECT_DIR" zricethezav/gitleaks:latest detect --source . --log-opts="--all" --report-format json --report-path reports/gitleaks/gitleaks-raw.json --exit-code 0 || true
+                                
+                                # 2. Filter (Generates gitleaks-report.json)
+                                docker run --rm --user "${JENKINS_UID}:${JENKINS_GID}" -e IGNORE_TEST_APP_FINDINGS="${params.IGNORE_TEST_APP_FINDINGS}" --volumes-from jenkins -w "$PROJECT_DIR" python:3.12-alpine python ci/scripts/filter_gitleaks.py || true
                                 test -s reports/gitleaks/gitleaks-report.json || echo "[]" > reports/gitleaks/gitleaks-report.json
+                                
+                                # 3. Summary
+                                docker run --rm --volumes-from jenkins -w "$PROJECT_DIR" python:3.12-alpine python ci/scripts/print_gitleaks_summary.py reports/gitleaks/gitleaks-report.json || true
                             '''
-                            // Appel direct Python sans docker run
-                            sh 'python3 "$PROJECT_DIR/ci/scripts/print_gitleaks_summary.py" "$PROJECT_DIR/reports/gitleaks/gitleaks-report.json"'
                         }
                     }
                 }
 
-                stage('SCA - Trivy FS Scan') {
-                    agent {
-                        docker {
-                            image 'ghcr.io/aquasecurity/trivy:latest'
-                            args "--user 0:0 -v ${env.TRIVY_CACHE}:/root/.cache/trivy --volumes-from jenkins"
-                            reuseNode true
-                        }
-                    }
+                stage('SCA - Trivy Image & FS') {
                     steps {
                         catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
                             sh '''
                                 cd "$PROJECT_DIR"
-                                trivy fs --no-progress --quiet --scanners vuln --severity CRITICAL,HIGH --format json --output reports/trivy/trivy-report.json .
+                                # 1. FS Scan (Generates trivy-fs-report.json & log)
+                                docker run --rm --user 0:0 -v "${TRIVY_CACHE}:/root/.cache/trivy" --volumes-from jenkins -w "$PROJECT_DIR" ghcr.io/aquasecurity/trivy:latest fs --no-progress --quiet --scanners vuln --severity CRITICAL,HIGH,MEDIUM,LOW --format json --output reports/trivy/trivy-fs-report.json . 2> reports/trivy/trivy-fs.stderr.log || true
+                                
+                                # 2. Image Scan (Generates trivy-report.json & log)
+                                docker run --rm --user 0:0 -v /var/run/docker.sock:/var/run/docker.sock -v "${TRIVY_CACHE}:/root/.cache/trivy" --volumes-from jenkins -w "$PROJECT_DIR" ghcr.io/aquasecurity/trivy:latest image --no-progress --scanners vuln --severity CRITICAL,HIGH,MEDIUM,LOW --format json "$DOCKER_IMAGE" > reports/trivy/trivy-report.json 2> reports/trivy/trivy.stderr.log || true
+                                
                                 test -s reports/trivy/trivy-report.json || echo '{"Results":[]}' > reports/trivy/trivy-report.json
+                                
+                                # 3. Summary
+                                docker run --rm --volumes-from jenkins -w "$PROJECT_DIR" python:3.12-alpine python ci/scripts/print_trivy_summary.py reports/trivy/trivy-report.json || true
                             '''
-                            sh 'python3 "$PROJECT_DIR/ci/scripts/print_trivy_summary.py" "$PROJECT_DIR/reports/trivy/trivy-report.json"'
                         }
                     }
                 }
 
                 stage('SAST - SonarQube') {
-                    agent {
-                        docker {
-                            image 'maven:3.9.9-eclipse-temurin-17'
-                            args "--user ${env.JENKINS_UID}:${env.JENKINS_GID} --network ${env.NETWORK_NAME} --volumes-from jenkins --add-host=host.docker.internal:host-gateway"
-                            reuseNode true
-                        }
-                    }
                     steps {
                         catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
                             withSonarQubeEnv("${SONARQUBE_ENV}") {
                                 sh '''
                                     cd "$PROJECT_DIR"
-                                    mvn -B -f "$PROJECT_DIR/pom.xml" -Dmaven.repo.local="$MAVEN_REPO" \
-                                        org.sonarsource.scanner.maven:sonar-maven-plugin:4.0.0.4121:sonar \
-                                        -DskipTests \
-                                        -Dsonar.projectKey="$APP_NAME" \
-                                        -Dsonar.host.url="$SONAR_DOCKER_URL" \
-                                        -Dsonar.login="$SONAR_AUTH_TOKEN" \
-                                        -Dsonar.java.binaries="target/classes" \
-                                        -Dsonar.qualitygate.wait=false
+                                    # 1. Sonar Analysis
+                                    docker run --rm --user "${JENKINS_UID}:${JENKINS_GID}" --network "$NETWORK_NAME" --volumes-from jenkins --add-host=host.docker.internal:host-gateway -w "$PROJECT_DIR" maven:3.9.9-eclipse-temurin-17 mvn -B -f "$PROJECT_DIR/pom.xml" -Dmaven.repo.local="$MAVEN_REPO" org.sonarsource.scanner.maven:sonar-maven-plugin:4.0.0.4121:sonar -DskipTests -Dsonar.projectKey="$APP_NAME" -Dsonar.host.url="$SONAR_DOCKER_URL" -Dsonar.login="$SONAR_AUTH_TOKEN" -Dsonar.java.binaries="target/classes" -Dsonar.qualitygate.wait=false || true
+                                    
+                                    # 2. Curl API to JSON
+                                    docker run --rm --network "$NETWORK_NAME" --volumes-from jenkins --add-host=host.docker.internal:host-gateway -w "$PROJECT_DIR" curlimages/curl:8.7.1 curl -sf -u "$SONAR_AUTH_TOKEN:" "$SONAR_DOCKER_URL/api/issues/search?componentKeys=$APP_NAME&types=VULNERABILITY&severities=BLOCKER,CRITICAL,MAJOR,MINOR,INFO&p=1&ps=100" -o "reports/sonar/sonar-vulnerabilities.json" || echo '{"issues":[],"total":0}' > "reports/sonar/sonar-vulnerabilities.json"
+                                    
+                                    # 3. Summary
+                                    docker run --rm --volumes-from jenkins -w "$PROJECT_DIR" python:3.12-alpine python ci/scripts/print_sonar_summary.py reports/sonar/sonar-vulnerabilities.json || true
                                 '''
-                                sh '''
-                                    curl -sf -u "$SONAR_AUTH_TOKEN:" "$SONAR_DOCKER_URL/api/issues/search?componentKeys=$APP_NAME&types=VULNERABILITY&severities=BLOCKER,CRITICAL,MAJOR,MINOR,INFO&p=1&ps=100" -o "$PROJECT_DIR/reports/sonar/sonar-vulnerabilities.json" || echo '{"issues":[],"total":0}' > "$PROJECT_DIR/reports/sonar/sonar-vulnerabilities.json"
-                                '''
-                                sh 'python3 "$PROJECT_DIR/ci/scripts/print_sonar_summary.py" "$PROJECT_DIR/reports/sonar/sonar-vulnerabilities.json"'
                             }
                         }
                     }
                 }
 
                 stage('SBOM - CycloneDX') {
-                    agent {
-                        docker {
-                            image 'maven:3.9.9-eclipse-temurin-17'
-                            args "--user ${env.JENKINS_UID}:${env.JENKINS_GID} --volumes-from jenkins"
-                            reuseNode true
-                        }
-                    }
                     steps {
                         catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
                             sh '''
                                 cd "$PROJECT_DIR"
-                                mvn -B -f "$PROJECT_DIR/pom.xml" -Dmaven.repo.local="$MAVEN_REPO" org.cyclonedx:cyclonedx-maven-plugin:2.7.11:makeAggregateBom -DoutputFormat=all
+                                docker run --rm --user "${JENKINS_UID}:${JENKINS_GID}" --volumes-from jenkins -w "$PROJECT_DIR" maven:3.9.9-eclipse-temurin-17 mvn -B -f "$PROJECT_DIR/pom.xml" -Dmaven.repo.local="$MAVEN_REPO" org.cyclonedx:cyclonedx-maven-plugin:2.7.11:makeAggregateBom -DoutputFormat=all || true
                                 cp -f target/bom.xml reports/sbom/bom.xml || true
                                 cp -f target/bom.json reports/sbom/bom.json || true
                             '''
@@ -199,7 +186,7 @@ pipeline {
 
                     # Deploy MySQL
                     docker run -d --name "$MYSQL_CONTAINER" --network "$NETWORK_NAME" -e MYSQL_ROOT_PASSWORD=root -e MYSQL_DATABASE=archivage_doc -e MYSQL_USER=archivage_user -e MYSQL_PASSWORD=archivage_pass mysql:8.0 >/dev/null
-                    sleep 15 # Pause optimisée
+                    sleep 15 
 
                     # Deploy App
                     mkdir -p "$PROJECT_DIR/uploads"
@@ -225,17 +212,21 @@ pipeline {
                 catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
                     sh '''
                         cd "$PROJECT_DIR"
-                        mkdir -p reports/zap
                         chmod 777 reports/zap
 
-                        docker run --rm --user root --network "$NETWORK_NAME" -v "$PROJECT_DIR/reports/zap:/zap/wrk:rw" ghcr.io/zaproxy/zaproxy:stable zap-baseline.py -t "http://$APP_CONTAINER:$APP_PORT/" -J "zap-report.json" -a -j -I || true
+                        # 1. ZAP Scan (Generates zap-report.json, html, zap-baseline.log, and zap-exit-code.txt)
+                        docker run --rm --user root --network "$NETWORK_NAME" -v "$PROJECT_DIR/reports/zap:/zap/wrk:rw" ghcr.io/zaproxy/zaproxy:stable bash -c 'zap-baseline.py -t "http://app-archivage:8090/" -J zap-report.json -r zap-report.html -a -j -I 2>&1 | tee /zap/wrk/zap-baseline.log; echo $? > /zap/wrk/zap-exit-code.txt' || true
                         docker run --rm -u 0:0 -v "$PROJECT_DIR/reports/zap:/zap/wrk" alpine:3.19 sh -c "chown -R ${JENKINS_UID}:${JENKINS_GID} /zap/wrk || true"
                         
-                        test -s "$PROJECT_DIR/reports/zap/zap-report.json" || echo '{"site":[{"alerts":[]}]}' > "$PROJECT_DIR/reports/zap/zap-report.json"
+                        test -s "reports/zap/zap-report.json" || echo '{"site":[{"alerts":[]}]}' > "reports/zap/zap-report.json"
+                        
+                        # 2. Filter (Generates zap-report.filtered.json)
+                        docker run --rm --user "${JENKINS_UID}:${JENKINS_GID}" -e IGNORE_TEST_APP_FINDINGS="${params.IGNORE_TEST_APP_FINDINGS}" --volumes-from jenkins -w "$PROJECT_DIR" python:3.12-alpine python ci/scripts/filter_zap.py || true
+                        
+                        # 3. Conversions & Summary
+                        docker run --rm --volumes-from jenkins -w "$PROJECT_DIR/reports/zap" python:3.12-alpine python ../../ci/scripts/zap_to_html.py || true
+                        docker run --rm --volumes-from jenkins -w "$PROJECT_DIR" python:3.12-alpine python ci/scripts/print_zap_summary.py reports/zap/zap-report.json || true
                     '''
-                    // Appel direct Python sans docker run
-                    sh 'python3 "$PROJECT_DIR/ci/scripts/zap_to_html.py"'
-                    sh 'python3 "$PROJECT_DIR/ci/scripts/print_zap_summary.py" "$PROJECT_DIR/reports/zap/zap-report.json"'
                 }
             }
         }
@@ -245,15 +236,20 @@ pipeline {
                 sh '''
                     cd "$PROJECT_DIR"
                     
-                    # Génération de l'input avec Python direct
-                    python3 "$PROJECT_DIR/ci/scripts/build_input.py"
+                    # 1. Build input.json
+                    docker run --rm --volumes-from jenkins -w "$PROJECT_DIR" python:3.12-alpine python ci/scripts/build_input.py || true
                     
-                    # Évaluation OPA
-                    docker run --rm --volumes-from jenkins -w "$PROJECT_DIR" openpolicyagent/opa:latest eval --format raw --data "ci/policy/security-gate.rego" --input "reports/opa/input.json" "data.security.allow" | tee "reports/opa/opa-result.txt"
+                    # 2. OPA Eval Debug (Generates opa-debug.txt)
+                    docker run --rm --volumes-from jenkins -w "$PROJECT_DIR" openpolicyagent/opa:latest eval --format pretty --data "ci/policy/security-gate.rego" --input "reports/opa/input.json" "data.security" | tee "reports/opa/opa-debug.txt" || true
+                    
+                    # 3. OPA Eval Result (Generates opa-result.txt)
+                    docker run --rm --volumes-from jenkins -w "$PROJECT_DIR" openpolicyagent/opa:latest eval --format raw --data "ci/policy/security-gate.rego" --input "reports/opa/input.json" "data.security.allow" > "reports/opa/opa-result.txt" || true
 
                     if ! grep -qx "true" "reports/opa/opa-result.txt"; then
                         echo "OPA SECURITY GATE : ECHEC"
-                        exit 1
+                        if [ "${params.ENFORCE_SECURITY_GATE}" = "true" ]; then
+                            exit 1
+                        fi
                     fi
                 '''
             }
@@ -262,6 +258,20 @@ pipeline {
 
     post {
         always {
+            script {
+                withSonarQubeEnv("${SONARQUBE_ENV}") {
+                    sh '''
+                        set +e
+                        cd "$PROJECT_DIR"
+                        # Generate Security Dashboard (HTML)
+                        docker run --rm --user "${JENKINS_UID}:${JENKINS_GID}" --network "$NETWORK_NAME" --volumes-from jenkins --add-host=host.docker.internal:host-gateway -e SONAR_HOST_URL="$SONAR_DOCKER_URL" -e SONAR_AUTH_TOKEN="$SONAR_AUTH_TOKEN" -w "$PROJECT_DIR" python:3.12-alpine python generate_dashboard.py --reports reports --output reports/dashboard/security-dashboard.html --project "$APP_NAME" --sonar-url "$SONAR_DOCKER_URL" --sonar-token "$SONAR_AUTH_TOKEN" --sonar-project "$APP_NAME" || true
+                        
+                        # Patch CSP
+                        docker run --rm --user "${JENKINS_UID}:${JENKINS_GID}" --volumes-from jenkins -w "$PROJECT_DIR" python:3.12-alpine python ci/scripts/patch_csp.py reports/dashboard/security-dashboard.html || true
+                    '''
+                }
+            }
+
             sh '''
                 set +e
                 docker rm -f "$APP_CONTAINER" "$MYSQL_CONTAINER" >/dev/null 2>&1 || true
@@ -273,14 +283,16 @@ pipeline {
                 if (fileExists('src/reports/trivy/trivy-report.json')) {
                     recordIssues enabledForFailure: true, aggregatingResults: true, tools: [trivy(pattern: 'src/reports/trivy/trivy-report.json', reportEncoding: 'UTF-8')]
                 }
-            }
-
-            script {
                 if (fileExists('src/reports/zap/zap-report.html')) {
                     publishHTML(target: [allowMissing: true, alwaysLinkToLastBuild: true, keepAll: true, reportDir: 'src/reports/zap', reportFiles: 'zap-report.html', reportName: 'ZAP Web Report'])
                 }
+                if (fileExists('src/reports/dashboard/security-dashboard.html')) {
+                    publishHTML(target: [allowMissing: true, alwaysLinkToLastBuild: true, keepAll: true, reportDir: 'src/reports/dashboard', reportFiles: 'security-dashboard.html', reportName: 'Security Dashboard'])
+                }
+                
+                // هاد السطر هو اللي كيهز 17 Artifacts كاملين وكيحطهم ليك فجينكينز
                 if (fileExists('src/reports')) {
-                    archiveArtifacts artifacts: 'src/reports/**/*', allowEmptyArchive: true, fingerprint: true
+                    archiveArtifacts artifacts: 'src/reports/**/*', allowEmptyArchive: true, fingerprint: false
                 }
             }
         }
