@@ -258,12 +258,14 @@ pipeline {
                 }
             }
 
-            sh '''
-                set +e
-                docker rm -f "$APP_CONTAINER" "$MYSQL_CONTAINER" >/dev/null 2>&1 || true
-                docker network rm "$NETWORK_NAME" >/dev/null 2>&1 || true
-                docker run --rm -u 0:0 -v "$WORKSPACE:/ws" alpine:3.19 sh -c "chown -R ${JENKINS_UID}:${JENKINS_GID} /ws 2>/dev/null || true"
-            '''
+            script {
+                sh '''
+                    set +e
+                    docker rm -f "$APP_CONTAINER" "$MYSQL_CONTAINER" >/dev/null 2>&1 || true
+                    docker network rm "$NETWORK_NAME" >/dev/null 2>&1 || true
+                    docker run --rm -u 0:0 -v "$WORKSPACE:/ws" alpine:3.19 sh -c "chown -R ${JENKINS_UID}:${JENKINS_GID} /ws 2>/dev/null || true"
+                '''
+            }
 
             script {
                 // Publish HTML Reports
