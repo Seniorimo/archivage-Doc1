@@ -26,19 +26,24 @@ pipeline {
         TRIVY_CACHE      = "${WORKSPACE}/src/.trivycache"
         SONARQUBE_ENV    = 'sonar'
         SONAR_DOCKER_URL = 'http://host.docker.internal:9000'
-        JENKINS_UID      = sh(returnStdout: true, script: 'id -u').trim()
-        JENKINS_GID      = sh(returnStdout: true, script: 'id -g').trim()
         ENFORCE_GATE     = "${params.ENFORCE_SECURITY_GATE}"
         IGNORE_FINDINGS  = "${params.IGNORE_TEST_APP_FINDINGS}"
     }
 
     stages {
+        stage('Init Env') {
+            steps {
+                script {
+                    // تصحيح Claude الممتاز: تهيئة المتغيرات هنا باش ما يكراشيش جينكينز
+                    env.JENKINS_UID = sh(returnStdout: true, script: 'id -u').trim()
+                    env.JENKINS_GID = sh(returnStdout: true, script: 'id -g').trim()
+                }
+            }
+        }
+
         stage('Init & Clean Workspace') {
             steps {
-                sh '''
-                    set -eux
-                    docker run --rm -u 0:0 -v "$WORKSPACE:/ws" alpine:3.19 sh -c "find /ws -mindepth 1 -maxdepth 1 -exec rm -rf {} + || true; mkdir -p /ws/src; chown -R ${JENKINS_UID}:${JENKINS_GID} /ws"
-                '''
+                sh 'docker run --rm -u 0:0 -v "$WORKSPACE:/ws" alpine:3.19 sh -c "find /ws -mindepth 1 -maxdepth 1 -exec rm -rf {} + || true; mkdir -p /ws/src; chown -R ${JENKINS_UID}:${JENKINS_GID} /ws"'
                 dir('src') { checkout scm }
                 sh '''
                     cd "$PROJECT_DIR"
@@ -127,24 +132,18 @@ pipeline {
                     set -eu
                     docker rm -f "$MYSQL_CONTAINER" "$APP_CONTAINER" >/dev/null 2>&1 || true
                     docker run -d --name "$MYSQL_CONTAINER" --network "$NETWORK_NAME" -e MYSQL_ROOT_PASSWORD=root -e MYSQL_DATABASE=archivage_doc -e MYSQL_USER=archivage_user -e MYSQL_PASSWORD=archivage_pass mysql:8.0 >/dev/null
-                    
-                    # MySQL readiness
                     for i in $(seq 1 30); do
-                        if docker exec "$MYSQL_CONTAINER" mysqladmin ping -h 127.0.0.1 -uroot -proot --silent >/dev/null 2>&1; then break; fi
+                        if docker exec "$MYSQL_CONTAINER" mysqladmin ping -h 127.0.0.1 -uroot -proot --silent >/dev/null 2>&1; then echo "MySQL pret"; break; fi
                         sleep 3
                     done
-
                     mkdir -p "$PROJECT_DIR/uploads"
                     docker run -d --name "$APP_CONTAINER" --network "$NETWORK_NAME" --restart on-failure:5 -v "$PROJECT_DIR/uploads:/app/uploads" -e SPRING_PROFILES_ACTIVE=docker -e SPRING_DATASOURCE_URL="jdbc:mysql://$MYSQL_CONTAINER:3306/archivage_doc?useUnicode=true&allowPublicKeyRetrieval=true&useSSL=false&serverTimezone=UTC" -e SPRING_DATASOURCE_USERNAME="archivage_user" -e SPRING_DATASOURCE_PASSWORD="archivage_pass" -e GITHUB_OAUTH_SECRET="test-secret" -e JWT_SECRET="404E635266556A586E3272357538782F413F4428472B4B6250645367566B5970" "$DOCKER_IMAGE" >/dev/null
-
-                    # App healthcheck
                     for i in $(seq 1 30); do
                         CODE=$(docker run --rm --network "$NETWORK_NAME" curlimages/curl:8.7.1 -s -o /dev/null -w "%{http_code}" "http://$APP_CONTAINER:$APP_PORT/actuator/health" || true)
-                        if echo "$CODE" | grep -qE "200|301|302|401|403|404"; then exit 0; fi
+                        if echo "$CODE" | grep -qE "200|301|302|401|403|404"; then echo "Application prete !"; exit 0; fi
                         sleep 5
                     done
-                    docker logs "$APP_CONTAINER" --tail 50
-                    exit 1
+                    docker logs "$APP_CONTAINER" --tail 50; exit 1
                 '''
             }
         }
@@ -155,16 +154,10 @@ pipeline {
                     sh '''
                         cd "$PROJECT_DIR"
                         chmod 777 reports/zap
-                        # 1. ZAP Scan (كيخرج الريپورط الواعر نيشان)
                         docker run --rm --user root --network "$NETWORK_NAME" -v "$PROJECT_DIR/reports/zap:/zap/wrk:rw" ghcr.io/zaproxy/zaproxy:stable bash -c 'zap-baseline.py -t "http://app-archivage:8090/" -J zap-report.json -r zap-report.html -a -j -I 2>&1 | tee /zap/wrk/zap-baseline.log; echo ${PIPESTATUS[0]} > /zap/wrk/zap-exit-code.txt' || true
                         docker run --rm -u 0:0 -v "$PROJECT_DIR/reports/zap:/zap/wrk" alpine:3.19 sh -c "chown -R ${JENKINS_UID}:${JENKINS_GID} /zap/wrk || true"
-                        
                         test -s "reports/zap/zap-report.json" || echo '{"site":[{"alerts":[]}]}' > "reports/zap/zap-report.json"
-                        
-                        # 2. Filter ZAP 
                         docker run --rm --user "${JENKINS_UID}:${JENKINS_GID}" -e IGNORE_TEST_APP_FINDINGS="$IGNORE_FINDINGS" --volumes-from jenkins -w "$PROJECT_DIR" python:3.12-alpine python ci/scripts/filter_zap.py || true
-                        
-                        # 3. Print Summary
                         docker run --rm --volumes-from jenkins -w "$PROJECT_DIR" python:3.12-alpine python ci/scripts/print_zap_summary.py reports/zap/zap-report.filtered.json || true
                     '''
                 }
@@ -175,12 +168,13 @@ pipeline {
             steps {
                 sh '''
                     cd "$PROJECT_DIR"
-                    docker run --rm --volumes-from jenkins -w "$PROJECT_DIR" python:3.12-alpine python ci/scripts/build_input.py || true
+                    docker run --rm --volumes-from jenkins -w "$PROJECT_DIR" python:3.12-alpine python ci/scripts/build_input.py
                     docker run --rm --volumes-from jenkins -w "$PROJECT_DIR" openpolicyagent/opa:latest eval --format pretty --data "ci/policy/security-gate.rego" --input "reports/opa/input.json" "data.security" | tee "reports/opa/opa-debug.txt" || true
                     docker run --rm --volumes-from jenkins -w "$PROJECT_DIR" openpolicyagent/opa:latest eval --format raw --data "ci/policy/security-gate.rego" --input "reports/opa/input.json" "data.security.allow" > "reports/opa/opa-result.txt" || true
                     docker run --rm --volumes-from jenkins -w "$PROJECT_DIR" openpolicyagent/opa:latest eval --format raw --data "ci/policy/security-gate.rego" --input "reports/opa/input.json" "data.security.thresholds_ok" > "reports/opa/opa-thresholds.txt" || true
                 '''
                 script {
+                    // اللوجيك الحقيقي اللي كيرد البيلد UNSTABLE بلاصت داك الايكو الخاوي ديال Claude
                     def allowOk = sh(script: 'cat "$PROJECT_DIR/reports/opa/opa-result.txt" || echo "false"', returnStdout: true).trim()
                     def thresholdsOk = sh(script: 'cat "$PROJECT_DIR/reports/opa/opa-thresholds.txt" || echo "false"', returnStdout: true).trim()
                     
@@ -252,7 +246,7 @@ pipeline {
             }
         }
 
-        failure { echo 'Pipeline FAILED - consulter les logs.' }
+        failure { echo 'Pipeline FAILED - consulter les logs de scan.' }
         unstable { echo 'Pipeline UNSTABLE - problemes de securite detectes.' }
         success { echo 'Pipeline SUCCESS - tous les security gates sont passes.' }
     }
