@@ -213,31 +213,34 @@ pipeline {
                 sh '''
                     cd "$PROJECT_DIR"
                     
-                    # 1. Build consolidated input
-                    docker run --rm --volumes-from jenkins -w "$PROJECT_DIR" python:3.12-alpine python ci/scripts/build_input.py || true
+                    # 1. Build input.json (دابا دوزنا ليه الـ ENFORCE_GATE باش يقراه الكونطينير)
+                    docker run --rm --user "${JENKINS_UID}:${JENKINS_GID}" -e ENFORCE_GATE="$ENFORCE_GATE" --volumes-from jenkins -w "$PROJECT_DIR" python:3.12-alpine python ci/scripts/build_input.py || true
                     
-                    # 2. OPA Policy Evaluation
+                    # 2. OPA Eval Debug
                     docker run --rm --volumes-from jenkins -w "$PROJECT_DIR" openpolicyagent/opa:latest eval --format pretty --data "ci/policy/security-gate.rego" --input "reports/opa/input.json" "data.security" | tee "reports/opa/opa-debug.txt" || true
+                    
+                    # 3. OPA Eval Result
                     docker run --rm --volumes-from jenkins -w "$PROJECT_DIR" openpolicyagent/opa:latest eval --format raw --data "ci/policy/security-gate.rego" --input "reports/opa/input.json" "data.security.allow" > "reports/opa/opa-result.txt" || true
+                    
+                    # 4. OPA Thresholds Result
                     docker run --rm --volumes-from jenkins -w "$PROJECT_DIR" openpolicyagent/opa:latest eval --format raw --data "ci/policy/security-gate.rego" --input "reports/opa/input.json" "data.security.thresholds_ok" > "reports/opa/opa-thresholds.txt" || true
                 '''
                 
                 script {
-                    // Evaluate OPA results and enforce pipeline status
                     def allowOk = sh(script: 'cat "$PROJECT_DIR/reports/opa/opa-result.txt" || echo "false"', returnStdout: true).trim()
                     def thresholdsOk = sh(script: 'cat "$PROJECT_DIR/reports/opa/opa-thresholds.txt" || echo "false"', returnStdout: true).trim()
                     
+                    // دابا الكلمة الأولى والأخيرة لـ OPA
                     if (allowOk != "true") {
-                        error("OPA SECURITY GATE : FAILED (Strict Mode is ON and Vulnerabilities detected)")
+                        error("OPA SECURITY GATE : ECHEC (Strict Mode Activé et Vulnérabilités trouvées)")
                     } else if (thresholdsOk != "true") {
-                        unstable("SECURITY VULNERABILITIES DETECTED : Build marked as UNSTABLE (Strict Mode is OFF)")
+                        unstable("VULNÉRABILITÉS DÉTECTÉES : Build marqué UNSTABLE car les seuils sont dépassés (Strict mode OFF).")
                     } else {
-                        echo "OPA SECURITY GATE : PASSED (No critical vulnerabilities detected)"
+                        echo "OPA SECURITY GATE : PASS (Aucune vulnérabilité critique trouvée)."
                     }
                 }
             }
         }
-    }
 
     post {
         always {
