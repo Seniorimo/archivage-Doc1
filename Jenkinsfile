@@ -34,15 +34,20 @@ pipeline {
         TRIVY_CACHE      = "${WORKSPACE}/src/.trivycache"
         SONARQUBE_ENV    = 'sonar'
         SONAR_DOCKER_URL = 'http://host.docker.internal:9000'
-        JENKINS_UID      = sh(returnStdout: true, script: 'id -u').trim()
-        JENKINS_GID      = sh(returnStdout: true, script: 'id -g').trim()
-        
-        // ربطنا البارامترات باش يتقراو مزيان فـ أوامر الـ Shell
-        ENFORCE_GATE    = "${params.ENFORCE_SECURITY_GATE}"
-        IGNORE_FINDINGS = "${params.IGNORE_TEST_APP_FINDINGS}"
+        ENFORCE_GATE     = "${params.ENFORCE_SECURITY_GATE}"
+        IGNORE_FINDINGS  = "${params.IGNORE_TEST_APP_FINDINGS}"
     }
 
     stages {
+
+        stage('Init Env') {
+            steps {
+                script {
+                    env.JENKINS_UID = sh(returnStdout: true, script: 'id -u').trim()
+                    env.JENKINS_GID = sh(returnStdout: true, script: 'id -g').trim()
+                }
+            }
+        }
 
         stage('Force Clean Workspace') {
             steps {
@@ -113,10 +118,10 @@ pipeline {
                         catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
                             sh '''
                                 cd "$PROJECT_DIR"
-                                # 1. Raw Scan (يخرج gitleaks-raw.json)
+                                # 1. Raw Scan
                                 docker run --rm --volumes-from jenkins -w "$PROJECT_DIR" zricethezav/gitleaks:latest detect --source . --log-opts="--all" --report-format json --report-path reports/gitleaks/gitleaks-raw.json --exit-code 0 || true
                                 
-                                # 2. Filter (يخرج gitleaks-report.json بناء على البارامتر)
+                                # 2. Filter
                                 docker run --rm --user "${JENKINS_UID}:${JENKINS_GID}" -e IGNORE_TEST_APP_FINDINGS="$IGNORE_FINDINGS" --volumes-from jenkins -w "$PROJECT_DIR" python:3.12-alpine python ci/scripts/filter_gitleaks.py || true
                                 test -s reports/gitleaks/gitleaks-report.json || echo "[]" > reports/gitleaks/gitleaks-report.json
                                 
@@ -132,10 +137,10 @@ pipeline {
                         catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
                             sh '''
                                 cd "$PROJECT_DIR"
-                                # 1. FS Scan (يخرج trivy-fs-report.json)
+                                # 1. FS Scan
                                 docker run --rm --user 0:0 -v "${TRIVY_CACHE}:/root/.cache/trivy" --volumes-from jenkins -w "$PROJECT_DIR" ghcr.io/aquasecurity/trivy:latest fs --no-progress --quiet --scanners vuln --severity CRITICAL,HIGH,MEDIUM,LOW --format json --output reports/trivy/trivy-fs-report.json . 2> reports/trivy/trivy-fs.stderr.log || true
                                 
-                                # 2. Image Scan (يخرج trivy-report.json)
+                                # 2. Image Scan
                                 docker run --rm --user 0:0 -v /var/run/docker.sock:/var/run/docker.sock -v "${TRIVY_CACHE}:/root/.cache/trivy" --volumes-from jenkins -w "$PROJECT_DIR" ghcr.io/aquasecurity/trivy:latest image --no-progress --scanners vuln --severity CRITICAL,HIGH,MEDIUM,LOW --format json "$DOCKER_IMAGE" > reports/trivy/trivy-report.json 2> reports/trivy/trivy.stderr.log || true
                                 
                                 test -s reports/trivy/trivy-report.json || echo '{"Results":[]}' > reports/trivy/trivy-report.json
@@ -224,7 +229,7 @@ pipeline {
                         
                         test -s "reports/zap/zap-report.json" || echo '{"site":[{"alerts":[]}]}' > "reports/zap/zap-report.json"
                         
-                        # 2. Filter ZAP (يخرج zap-report.filtered.json)
+                        # 2. Filter ZAP
                         docker run --rm --user "${JENKINS_UID}:${JENKINS_GID}" -e IGNORE_TEST_APP_FINDINGS="$IGNORE_FINDINGS" --volumes-from jenkins -w "$PROJECT_DIR" python:3.12-alpine python ci/scripts/filter_zap.py || true
                         
                         # 3. Conversions & Summary
@@ -240,13 +245,13 @@ pipeline {
                 sh '''
                     cd "$PROJECT_DIR"
                     
-                    # 1. Build input.json (كيجمع التقارير كاملين)
+                    # 1. Build input.json
                     docker run --rm --volumes-from jenkins -w "$PROJECT_DIR" python:3.12-alpine python ci/scripts/build_input.py || true
                     
-                    # 2. OPA Eval Debug (يخرج opa-debug.txt)
+                    # 2. OPA Eval Debug
                     docker run --rm --volumes-from jenkins -w "$PROJECT_DIR" openpolicyagent/opa:latest eval --format pretty --data "ci/policy/security-gate.rego" --input "reports/opa/input.json" "data.security" | tee "reports/opa/opa-debug.txt" || true
                     
-                    # 3. OPA Eval Result (يخرج opa-result.txt)
+                    # 3. OPA Eval Result
                     docker run --rm --volumes-from jenkins -w "$PROJECT_DIR" openpolicyagent/opa:latest eval --format raw --data "ci/policy/security-gate.rego" --input "reports/opa/input.json" "data.security.allow" > "reports/opa/opa-result.txt" || true
 
                     if ! grep -qx "true" "reports/opa/opa-result.txt"; then
@@ -284,8 +289,6 @@ pipeline {
             '''
 
             script {
-                // حيدنا البلوك ديال recordIssues اللي كيكراشي جينكينز
-                
                 if (fileExists('src/reports/zap/zap-report.html')) {
                     publishHTML(target: [allowMissing: true, alwaysLinkToLastBuild: true, keepAll: true, reportDir: 'src/reports/zap', reportFiles: 'zap-report.html', reportName: 'ZAP Web Report'])
                 }
