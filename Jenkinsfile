@@ -10,16 +10,8 @@ pipeline {
     }
 
     parameters {
-        booleanParam(
-            name: 'ENFORCE_SECURITY_GATE',
-            defaultValue: false,
-            description: 'Strict mode: fail the build if the OPA security gate does not pass'
-        )
-        booleanParam(
-            name: 'IGNORE_TEST_APP_FINDINGS',
-            defaultValue: false,
-            description: 'Demo mode: ignore findings from /api/test/devsecops/* endpoints and demo assets'
-        )
+        booleanParam(name: 'ENFORCE_SECURITY_GATE', defaultValue: false, description: 'Strict mode: fail the build if the OPA security gate does not pass')
+        booleanParam(name: 'IGNORE_TEST_APP_FINDINGS', defaultValue: false, description: 'Demo mode: ignore findings from /api/test/devsecops/* endpoints')
     }
 
     environment {
@@ -34,50 +26,22 @@ pipeline {
         TRIVY_CACHE      = "${WORKSPACE}/src/.trivycache"
         SONARQUBE_ENV    = 'sonar'
         SONAR_DOCKER_URL = 'http://host.docker.internal:9000'
+        JENKINS_UID      = sh(returnStdout: true, script: 'id -u').trim()
+        JENKINS_GID      = sh(returnStdout: true, script: 'id -g').trim()
         ENFORCE_GATE     = "${params.ENFORCE_SECURITY_GATE}"
         IGNORE_FINDINGS  = "${params.IGNORE_TEST_APP_FINDINGS}"
     }
 
     stages {
-
-        stage('Init Env') {
-            steps {
-                script {
-                    env.JENKINS_UID = sh(returnStdout: true, script: 'id -u').trim()
-                    env.JENKINS_GID = sh(returnStdout: true, script: 'id -g').trim()
-                }
-            }
-        }
-
-        stage('Force Clean Workspace') {
+        stage('Init & Clean Workspace') {
             steps {
                 sh '''
                     set -eux
-                    echo "=== FORCE CLEAN WORKSPACE ==="
-                    docker run --rm -u 0:0 -v "$WORKSPACE:/ws" alpine:3.19 sh -c "
-                        find /ws -mindepth 1 -maxdepth 1 -exec rm -rf {} + || true
-                        mkdir -p /ws/src
-                        chown -R ${JENKINS_UID}:${JENKINS_GID} /ws
-                    "
+                    docker run --rm -u 0:0 -v "$WORKSPACE:/ws" alpine:3.19 sh -c "find /ws -mindepth 1 -maxdepth 1 -exec rm -rf {} + || true; mkdir -p /ws/src; chown -R ${JENKINS_UID}:${JENKINS_GID} /ws"
                 '''
-            }
-        }
-
-        stage('Checkout') {
-            steps {
-                dir('src') {
-                    deleteDir()
-                    checkout scm
-                }
-            }
-        }
-
-        stage('Prepare Workspace') {
-            steps {
+                dir('src') { checkout scm }
                 sh '''
-                    set -eu
                     cd "$PROJECT_DIR"
-                    echo "=== PREPARE WORKSPACE ==="
                     rm -rf reports .trivycache .jarpath
                     mkdir -p reports/gitleaks reports/trivy reports/sbom reports/zap reports/opa reports/sonar reports/dashboard .trivycache
                     docker network inspect "$NETWORK_NAME" >/dev/null 2>&1 || docker network create "$NETWORK_NAME"
@@ -85,47 +49,28 @@ pipeline {
             }
         }
 
-        stage('Compile (Maven)') {
+        stage('Compile & Build Docker Image') {
             steps {
                 sh '''
                     set -eu
                     cd "$PROJECT_DIR"
-                    echo "=== COMPILATION MAVEN ==="
-                    docker run --rm --user "${JENKINS_UID}:${JENKINS_GID}" --volumes-from jenkins -w "$PROJECT_DIR" maven:3.9.9-eclipse-temurin-17 mvn -B -f "$PROJECT_DIR/pom.xml" -Dmaven.repo.local="$MAVEN_REPO" clean package -DskipTests
-                    
-                    JARPATH=$(find "$PROJECT_DIR/target" -maxdepth 1 -type f -name "*.jar" ! -name "*.original" | head -n 1)
-                    echo "$JARPATH" > "$PROJECT_DIR/.jarpath"
-                '''
-            }
-        }
-
-        stage('Build Docker Image') {
-            steps {
-                sh '''
-                    set -eu
-                    cd "$PROJECT_DIR"
-                    echo "=== BUILD DOCKER IMAGE ==="
-                    docker build -t "$DOCKER_IMAGE" "$PROJECT_DIR"
+                    docker run --rm --user "${JENKINS_UID}:${JENKINS_GID}" --volumes-from jenkins -w "$PROJECT_DIR" maven:3.9.9-eclipse-temurin-17 mvn -B -f pom.xml -Dmaven.repo.local="$MAVEN_REPO" clean package -DskipTests
+                    find "$PROJECT_DIR/target" -maxdepth 1 -type f -name "*.jar" ! -name "*.original" | head -n 1 > "$PROJECT_DIR/.jarpath"
+                    docker build -t "$DOCKER_IMAGE" .
                 '''
             }
         }
 
         stage('Security Scans') {
             parallel {
-
                 stage('Secrets - Gitleaks') {
                     steps {
                         catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
                             sh '''
                                 cd "$PROJECT_DIR"
-                                # 1. Raw Scan
                                 docker run --rm --volumes-from jenkins -w "$PROJECT_DIR" zricethezav/gitleaks:latest detect --source . --log-opts="--all" --report-format json --report-path reports/gitleaks/gitleaks-raw.json --exit-code 0 || true
-                                
-                                # 2. Filter
                                 docker run --rm --user "${JENKINS_UID}:${JENKINS_GID}" -e IGNORE_TEST_APP_FINDINGS="$IGNORE_FINDINGS" --volumes-from jenkins -w "$PROJECT_DIR" python:3.12-alpine python ci/scripts/filter_gitleaks.py || true
                                 test -s reports/gitleaks/gitleaks-report.json || echo "[]" > reports/gitleaks/gitleaks-report.json
-                                
-                                # 3. Summary Console
                                 docker run --rm --volumes-from jenkins -w "$PROJECT_DIR" python:3.12-alpine python ci/scripts/print_gitleaks_summary.py reports/gitleaks/gitleaks-report.json || true
                             '''
                         }
@@ -137,15 +82,9 @@ pipeline {
                         catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
                             sh '''
                                 cd "$PROJECT_DIR"
-                                # 1. FS Scan
                                 docker run --rm --user 0:0 -v "${TRIVY_CACHE}:/root/.cache/trivy" --volumes-from jenkins -w "$PROJECT_DIR" ghcr.io/aquasecurity/trivy:latest fs --no-progress --quiet --scanners vuln --severity CRITICAL,HIGH,MEDIUM,LOW --format json --output reports/trivy/trivy-fs-report.json . 2> reports/trivy/trivy-fs.stderr.log || true
-                                
-                                # 2. Image Scan
                                 docker run --rm --user 0:0 -v /var/run/docker.sock:/var/run/docker.sock -v "${TRIVY_CACHE}:/root/.cache/trivy" --volumes-from jenkins -w "$PROJECT_DIR" ghcr.io/aquasecurity/trivy:latest image --no-progress --scanners vuln --severity CRITICAL,HIGH,MEDIUM,LOW --format json "$DOCKER_IMAGE" > reports/trivy/trivy-report.json 2> reports/trivy/trivy.stderr.log || true
-                                
                                 test -s reports/trivy/trivy-report.json || echo '{"Results":[]}' > reports/trivy/trivy-report.json
-                                
-                                # 3. Summary Console
                                 docker run --rm --volumes-from jenkins -w "$PROJECT_DIR" python:3.12-alpine python ci/scripts/print_trivy_summary.py reports/trivy/trivy-report.json || true
                             '''
                         }
@@ -158,13 +97,8 @@ pipeline {
                             withSonarQubeEnv("${SONARQUBE_ENV}") {
                                 sh '''
                                     cd "$PROJECT_DIR"
-                                    # 1. Maven Sonar Scan
-                                    docker run --rm --user "${JENKINS_UID}:${JENKINS_GID}" --network "$NETWORK_NAME" --volumes-from jenkins --add-host=host.docker.internal:host-gateway -w "$PROJECT_DIR" maven:3.9.9-eclipse-temurin-17 mvn -B -f "$PROJECT_DIR/pom.xml" -Dmaven.repo.local="$MAVEN_REPO" org.sonarsource.scanner.maven:sonar-maven-plugin:4.0.0.4121:sonar -DskipTests -Dsonar.projectKey="$APP_NAME" -Dsonar.host.url="$SONAR_DOCKER_URL" -Dsonar.login="$SONAR_AUTH_TOKEN" -Dsonar.java.binaries="target/classes" -Dsonar.qualitygate.wait=false || true
-                                    
-                                    # 2. Curl API to JSON
+                                    docker run --rm --user "${JENKINS_UID}:${JENKINS_GID}" --network "$NETWORK_NAME" --volumes-from jenkins --add-host=host.docker.internal:host-gateway -w "$PROJECT_DIR" maven:3.9.9-eclipse-temurin-17 mvn -B -f pom.xml -Dmaven.repo.local="$MAVEN_REPO" org.sonarsource.scanner.maven:sonar-maven-plugin:4.0.0.4121:sonar -DskipTests -Dsonar.projectKey="$APP_NAME" -Dsonar.host.url="$SONAR_DOCKER_URL" -Dsonar.login="$SONAR_AUTH_TOKEN" -Dsonar.java.binaries="target/classes" -Dsonar.qualitygate.wait=false || true
                                     docker run --rm --network "$NETWORK_NAME" --volumes-from jenkins --add-host=host.docker.internal:host-gateway -w "$PROJECT_DIR" curlimages/curl:8.7.1 curl -sf -u "$SONAR_AUTH_TOKEN:" "$SONAR_DOCKER_URL/api/issues/search?componentKeys=$APP_NAME&types=VULNERABILITY&severities=BLOCKER,CRITICAL,MAJOR,MINOR,INFO&p=1&ps=100" -o "reports/sonar/sonar-vulnerabilities.json" || echo '{"issues":[],"total":0}' > "reports/sonar/sonar-vulnerabilities.json"
-                                    
-                                    # 3. Summary Console
                                     docker run --rm --volumes-from jenkins -w "$PROJECT_DIR" python:3.12-alpine python ci/scripts/print_sonar_summary.py reports/sonar/sonar-vulnerabilities.json || true
                                 '''
                             }
@@ -177,7 +111,7 @@ pipeline {
                         catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
                             sh '''
                                 cd "$PROJECT_DIR"
-                                docker run --rm --user "${JENKINS_UID}:${JENKINS_GID}" --volumes-from jenkins -w "$PROJECT_DIR" maven:3.9.9-eclipse-temurin-17 mvn -B -f "$PROJECT_DIR/pom.xml" -Dmaven.repo.local="$MAVEN_REPO" org.cyclonedx:cyclonedx-maven-plugin:2.7.11:makeAggregateBom -DoutputFormat=all || true
+                                docker run --rm --user "${JENKINS_UID}:${JENKINS_GID}" --volumes-from jenkins -w "$PROJECT_DIR" maven:3.9.9-eclipse-temurin-17 mvn -B -f pom.xml -Dmaven.repo.local="$MAVEN_REPO" org.cyclonedx:cyclonedx-maven-plugin:2.7.11:makeAggregateBom -DoutputFormat=all || true
                                 cp -f target/bom.xml reports/sbom/bom.xml || true
                                 cp -f target/bom.json reports/sbom/bom.json || true
                             '''
@@ -192,22 +126,21 @@ pipeline {
                 sh '''
                     set -eu
                     docker rm -f "$MYSQL_CONTAINER" "$APP_CONTAINER" >/dev/null 2>&1 || true
-
-                    # Deploy MySQL
                     docker run -d --name "$MYSQL_CONTAINER" --network "$NETWORK_NAME" -e MYSQL_ROOT_PASSWORD=root -e MYSQL_DATABASE=archivage_doc -e MYSQL_USER=archivage_user -e MYSQL_PASSWORD=archivage_pass mysql:8.0 >/dev/null
-                    sleep 15 
+                    
+                    # MySQL readiness
+                    for i in $(seq 1 30); do
+                        if docker exec "$MYSQL_CONTAINER" mysqladmin ping -h 127.0.0.1 -uroot -proot --silent >/dev/null 2>&1; then break; fi
+                        sleep 3
+                    done
 
-                    # Deploy App
                     mkdir -p "$PROJECT_DIR/uploads"
                     docker run -d --name "$APP_CONTAINER" --network "$NETWORK_NAME" --restart on-failure:5 -v "$PROJECT_DIR/uploads:/app/uploads" -e SPRING_PROFILES_ACTIVE=docker -e SPRING_DATASOURCE_URL="jdbc:mysql://$MYSQL_CONTAINER:3306/archivage_doc?useUnicode=true&allowPublicKeyRetrieval=true&useSSL=false&serverTimezone=UTC" -e SPRING_DATASOURCE_USERNAME="archivage_user" -e SPRING_DATASOURCE_PASSWORD="archivage_pass" -e GITHUB_OAUTH_SECRET="test-secret" -e JWT_SECRET="404E635266556A586E3272357538782F413F4428472B4B6250645367566B5970" "$DOCKER_IMAGE" >/dev/null
 
-                    # Healthcheck
+                    # App healthcheck
                     for i in $(seq 1 30); do
                         CODE=$(docker run --rm --network "$NETWORK_NAME" curlimages/curl:8.7.1 -s -o /dev/null -w "%{http_code}" "http://$APP_CONTAINER:$APP_PORT/actuator/health" || true)
-                        if echo "$CODE" | grep -qE "200|301|302|401|403|404"; then
-                            echo "Application prete !"
-                            exit 0
-                        fi
+                        if echo "$CODE" | grep -qE "200|301|302|401|403|404"; then exit 0; fi
                         sleep 5
                     done
                     docker logs "$APP_CONTAINER" --tail 50
@@ -222,19 +155,17 @@ pipeline {
                     sh '''
                         cd "$PROJECT_DIR"
                         chmod 777 reports/zap
-
-                        # 1. ZAP Scan
-                        docker run --rm --user root --network "$NETWORK_NAME" -v "$PROJECT_DIR/reports/zap:/zap/wrk:rw" ghcr.io/zaproxy/zaproxy:stable bash -c 'zap-baseline.py -t "http://app-archivage:8090/" -J zap-report.json -r zap-report.html -a -j -I 2>&1 | tee /zap/wrk/zap-baseline.log; echo $? > /zap/wrk/zap-exit-code.txt' || true
+                        # 1. ZAP Scan (كيخرج الريپورط الواعر نيشان)
+                        docker run --rm --user root --network "$NETWORK_NAME" -v "$PROJECT_DIR/reports/zap:/zap/wrk:rw" ghcr.io/zaproxy/zaproxy:stable bash -c 'zap-baseline.py -t "http://app-archivage:8090/" -J zap-report.json -r zap-report.html -a -j -I 2>&1 | tee /zap/wrk/zap-baseline.log; echo ${PIPESTATUS[0]} > /zap/wrk/zap-exit-code.txt' || true
                         docker run --rm -u 0:0 -v "$PROJECT_DIR/reports/zap:/zap/wrk" alpine:3.19 sh -c "chown -R ${JENKINS_UID}:${JENKINS_GID} /zap/wrk || true"
                         
                         test -s "reports/zap/zap-report.json" || echo '{"site":[{"alerts":[]}]}' > "reports/zap/zap-report.json"
                         
-                        # 2. Filter ZAP
+                        # 2. Filter ZAP 
                         docker run --rm --user "${JENKINS_UID}:${JENKINS_GID}" -e IGNORE_TEST_APP_FINDINGS="$IGNORE_FINDINGS" --volumes-from jenkins -w "$PROJECT_DIR" python:3.12-alpine python ci/scripts/filter_zap.py || true
                         
-                        # 3. Conversions & Summary
-                        docker run --rm --volumes-from jenkins -w "$PROJECT_DIR/reports/zap" python:3.12-alpine python ../../ci/scripts/zap_to_html.py || true
-                        docker run --rm --volumes-from jenkins -w "$PROJECT_DIR" python:3.12-alpine python ci/scripts/print_zap_summary.py reports/zap/zap-report.json || true
+                        # 3. Print Summary
+                        docker run --rm --volumes-from jenkins -w "$PROJECT_DIR" python:3.12-alpine python ci/scripts/print_zap_summary.py reports/zap/zap-report.filtered.json || true
                     '''
                 }
             }
@@ -244,23 +175,23 @@ pipeline {
             steps {
                 sh '''
                     cd "$PROJECT_DIR"
-                    
-                    # 1. Build input.json
                     docker run --rm --volumes-from jenkins -w "$PROJECT_DIR" python:3.12-alpine python ci/scripts/build_input.py || true
-                    
-                    # 2. OPA Eval Debug
                     docker run --rm --volumes-from jenkins -w "$PROJECT_DIR" openpolicyagent/opa:latest eval --format pretty --data "ci/policy/security-gate.rego" --input "reports/opa/input.json" "data.security" | tee "reports/opa/opa-debug.txt" || true
-                    
-                    # 3. OPA Eval Result
                     docker run --rm --volumes-from jenkins -w "$PROJECT_DIR" openpolicyagent/opa:latest eval --format raw --data "ci/policy/security-gate.rego" --input "reports/opa/input.json" "data.security.allow" > "reports/opa/opa-result.txt" || true
-
-                    if ! grep -qx "true" "reports/opa/opa-result.txt"; then
-                        echo "OPA SECURITY GATE : ECHEC"
-                        if [ "$ENFORCE_GATE" = "true" ]; then
-                            exit 1
-                        fi
-                    fi
+                    docker run --rm --volumes-from jenkins -w "$PROJECT_DIR" openpolicyagent/opa:latest eval --format raw --data "ci/policy/security-gate.rego" --input "reports/opa/input.json" "data.security.thresholds_ok" > "reports/opa/opa-thresholds.txt" || true
                 '''
+                script {
+                    def allowOk = sh(script: 'cat "$PROJECT_DIR/reports/opa/opa-result.txt" || echo "false"', returnStdout: true).trim()
+                    def thresholdsOk = sh(script: 'cat "$PROJECT_DIR/reports/opa/opa-thresholds.txt" || echo "false"', returnStdout: true).trim()
+                    
+                    if (allowOk != "true" && params.ENFORCE_SECURITY_GATE) {
+                        error("OPA SECURITY GATE : ECHEC (Strict Mode Activé et Vulnérabilités trouvées)")
+                    } else if (thresholdsOk != "true") {
+                        unstable("VULNÉRABILITÉS DÉTECTÉES : Build marqué UNSTABLE car les seuils sont dépassés (Strict mode OFF).")
+                    } else {
+                        echo "OPA SECURITY GATE : PASS (Aucune vulnérabilité critique trouvée)."
+                    }
+                }
             }
         }
     }
@@ -272,10 +203,7 @@ pipeline {
                     sh '''
                         set +e
                         cd "$PROJECT_DIR"
-                        # Generate Security Dashboard (HTML)
                         docker run --rm --user "${JENKINS_UID}:${JENKINS_GID}" --network "$NETWORK_NAME" --volumes-from jenkins --add-host=host.docker.internal:host-gateway -e SONAR_HOST_URL="$SONAR_DOCKER_URL" -e SONAR_AUTH_TOKEN="$SONAR_AUTH_TOKEN" -w "$PROJECT_DIR" python:3.12-alpine python generate_dashboard.py --reports reports --output reports/dashboard/security-dashboard.html --project "$APP_NAME" --sonar-url "$SONAR_DOCKER_URL" --sonar-token "$SONAR_AUTH_TOKEN" --sonar-project "$APP_NAME" || true
-                        
-                        # Patch CSP
                         docker run --rm --user "${JENKINS_UID}:${JENKINS_GID}" --volumes-from jenkins -w "$PROJECT_DIR" python:3.12-alpine python ci/scripts/patch_csp.py reports/dashboard/security-dashboard.html || true
                     '''
                 }
@@ -295,7 +223,6 @@ pipeline {
                 if (fileExists('src/reports/dashboard/security-dashboard.html')) {
                     publishHTML(target: [allowMissing: true, alwaysLinkToLastBuild: true, keepAll: true, reportDir: 'src/reports/dashboard', reportFiles: 'security-dashboard.html', reportName: 'Security Dashboard'])
                 }
-                
                 if (fileExists('src/reports')) {
                     archiveArtifacts(
                         artifacts: [
@@ -312,6 +239,7 @@ pipeline {
                             'src/reports/zap/zap-report.filtered.json',
                             'src/reports/opa/opa-result.txt',
                             'src/reports/opa/opa-debug.txt',
+                            'src/reports/opa/opa-thresholds.txt',
                             'src/reports/opa/input.json',
                             'src/reports/sbom/bom.json',
                             'src/reports/sbom/bom.xml',
@@ -324,7 +252,7 @@ pipeline {
             }
         }
 
-        failure { echo 'Pipeline FAILED - consulter les logs de scan.' }
+        failure { echo 'Pipeline FAILED - consulter les logs.' }
         unstable { echo 'Pipeline UNSTABLE - problemes de securite detectes.' }
         success { echo 'Pipeline SUCCESS - tous les security gates sont passes.' }
     }
