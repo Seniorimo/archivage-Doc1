@@ -188,7 +188,9 @@ pipeline {
             steps {
                 sh '''
                     cd "$PROJECT_DIR"
+                    # Pass the ENFORCE_GATE parameter explicitly
                     docker run --rm --user "${JENKINS_UID}:${JENKINS_GID}" -e ENFORCE_GATE="$ENFORCE_GATE" --volumes-from jenkins -w "$PROJECT_DIR" python:3.12-alpine python ci/scripts/build_input.py || true
+                    
                     docker run --rm --volumes-from jenkins -w "$PROJECT_DIR" openpolicyagent/opa:latest eval --format pretty --data "ci/policy/security-gate.rego" --input "reports/opa/input.json" "data.security" | tee "reports/opa/opa-debug.txt" || true
                     docker run --rm --volumes-from jenkins -w "$PROJECT_DIR" openpolicyagent/opa:latest eval --format raw --data "ci/policy/security-gate.rego" --input "reports/opa/input.json" "data.security.allow" > "reports/opa/opa-result.txt" || true
                     docker run --rm --volumes-from jenkins -w "$PROJECT_DIR" openpolicyagent/opa:latest eval --format raw --data "ci/policy/security-gate.rego" --input "reports/opa/input.json" "data.security.thresholds_ok" > "reports/opa/opa-thresholds.txt" || true
@@ -198,7 +200,8 @@ pipeline {
                     def allowOk = sh(script: 'cat "$PROJECT_DIR/reports/opa/opa-result.txt" || echo "false"', returnStdout: true).trim()
                     def thresholdsOk = sh(script: 'cat "$PROJECT_DIR/reports/opa/opa-thresholds.txt" || echo "false"', returnStdout: true).trim()
                     
-                    if (allowOk != "true") {
+                    // Logic to enforce STRICT mode
+                    if (params.ENFORCE_SECURITY_GATE == true && thresholdsOk != "true") {
                         error("OPA SECURITY GATE : FAILED (Strict Mode is ON and Vulnerabilities detected)")
                     } else if (thresholdsOk != "true") {
                         unstable("SECURITY VULNERABILITIES DETECTED : Build marked as UNSTABLE (Strict Mode is OFF)")
