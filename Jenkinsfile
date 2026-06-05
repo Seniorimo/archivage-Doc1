@@ -87,7 +87,6 @@ pipeline {
                         catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
                             sh '''
                                 cd "$PROJECT_DIR"
-                                # Using AWS ECR public to bypass GitHub rate limits + Volume cache
                                 docker run --rm --user 0:0 -v trivy-cache-vol:/root/.cache/trivy --volumes-from jenkins -w "$PROJECT_DIR" \
                                     ghcr.io/aquasecurity/trivy:latest fs --no-progress --quiet \
                                     --db-repository public.ecr.aws/aquasecurity/trivy-db:2 \
@@ -176,19 +175,13 @@ pipeline {
                         TRACEFS_PATH="/sys/kernel/tracing"
                         [ -d "/sys/kernel/debug/tracing" ] && TRACEFS_PATH="/sys/kernel/debug/tracing"
                         
-                        # Fix: Create dummy file if custom rules don't exist yet to prevent Docker volume errors
-                        mkdir -p "$PROJECT_DIR/ci/falco"
-                        touch "$PROJECT_DIR/ci/falco/custom-rules.yaml"
-                        
-                        # Fix: Removed invalid Claude hallucination flag
                         docker run -d --name falco-runtime \
                             --privileged \
                             -v "${TRACEFS_PATH}:/sys/kernel/tracing:ro" \
                             -v /var/run/docker.sock:/host/var/run/docker.sock \
-                            -v "$PROJECT_DIR/ci/falco/custom-rules.yaml:/etc/falco/rules.d/custom-rules.yaml:ro" \
                             -v /proc:/host/proc:ro \
                             -v /etc:/host/etc:ro \
-                            falcosecurity/falco:0.44.0
+                            falcosecurity/falco:0.44.0 falco
                         
                         sleep 10
                     '''
@@ -230,9 +223,17 @@ pipeline {
             steps {
                 sh '''
                     cd "$PROJECT_DIR"
-                    docker logs falco-runtime 2>&1 | grep -E "Warning|Critical|Error" > reports/runtime/falco-alerts.txt || true
-                    echo "=== FALCO ALERTS DETECTED DURING ZAP SCAN ==="
-                    cat reports/runtime/falco-alerts.txt || echo "No alerts found"
+                    docker logs falco-runtime 2>&1 | grep -E "Warning|Critical|Error" | cut -d '|' -f 1 > reports/runtime/falco-alerts.txt || true
+                    
+                    echo "======================================================"
+                    echo "       FALCO ALERTS DETECTED DURING ZAP SCAN          "
+                    echo "======================================================"
+                    if [ -s reports/runtime/falco-alerts.txt ]; then
+                        cat reports/runtime/falco-alerts.txt | awk '{print "🛡️  " $0}'
+                    else
+                        echo "✅ Aucune alerte détectée."
+                    fi
+                    echo "======================================================"
                 '''
             }
         }
@@ -241,7 +242,15 @@ pipeline {
             steps {
                 sh '''
                     cd "$PROJECT_DIR"
+                    
+                    # 1. Generate Input (Python script)
                     docker run --rm --user "${JENKINS_UID}:${JENKINS_GID}" -e ENFORCE_GATE="true" --volumes-from jenkins -w "$PROJECT_DIR" python:3.12-alpine python ci/scripts/build_input.py || true
+                    
+                    # 2. FORCE Strict Evaluation: Overwrite the enforce_gate flag to true in the generated JSON
+                    # This bypasses any bug in the Python script and ensures OPA accurately fails on vulnerabilities
+                    docker run --rm --user "${JENKINS_UID}:${JENKINS_GID}" --volumes-from jenkins -w "$PROJECT_DIR" alpine:3.19 sh -c "sed -i 's/\"enforce_gate\": false/\"enforce_gate\": true/g; s/\"enforce_gate\":False/\"enforce_gate\":true/g' reports/opa/input.json 2>/dev/null || true"
+                    
+                    # 3. Evaluate Policy via OPA
                     docker run --rm --volumes-from jenkins -w "$PROJECT_DIR" openpolicyagent/opa:latest eval --format pretty --data "ci/policy/security-gate.rego" --input "reports/opa/input.json" "data.security" | tee "reports/opa/opa-debug.txt" || true
                     docker run --rm --volumes-from jenkins -w "$PROJECT_DIR" openpolicyagent/opa:latest eval --format raw --data "ci/policy/security-gate.rego" --input "reports/opa/input.json" "data.security.allow" > "reports/opa/opa-result.txt" || true
                 '''
@@ -251,12 +260,12 @@ pipeline {
                     
                     if (allowOk != "true") {
                         if (params.ENFORCE_SECURITY_GATE) {
-                            error("OPA SECURITY GATE : FAILED (Strict Mode is ON and Vulnerabilities detected)")
+                            error("OPA SECURITY GATE : FAILED (Strict Mode ON - Vulnerabilités trouvées)")
                         } else {
-                            unstable("SECURITY VULNERABILITIES DETECTED : Build marked as UNSTABLE (Strict Mode is OFF)")
+                            unstable("SECURITY VULNERABILITIES DETECTED : Build marqué UNSTABLE (Strict Mode OFF)")
                         }
                     } else {
-                        echo "OPA SECURITY GATE : PASSED (No critical vulnerabilities detected)"
+                        echo "OPA SECURITY GATE : PASSED (Aucune vulnérabilité bloquante)"
                     }
                 }
             }
@@ -320,8 +329,8 @@ pipeline {
             }
         }
 
-        failure { echo 'Pipeline FAILED - Please check the scan logs and reports.' }
-        unstable { echo 'Pipeline UNSTABLE - Security thresholds exceeded. Review the generated reports.' }
-        success { echo 'Pipeline SUCCESS - All security gates passed successfully.' }
+        failure { echo 'Pipeline FAILED - Veuillez vérifier les rapports de sécurité.' }
+        unstable { echo 'Pipeline UNSTABLE - Vulnérabilités tolérées en mode non-bloquant.' }
+        success { echo 'Pipeline SUCCESS - Toutes les barrières de sécurité sont passées.' }
     }
 }
