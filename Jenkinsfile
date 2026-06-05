@@ -12,7 +12,6 @@ pipeline {
     parameters {
         booleanParam(name: 'ENFORCE_SECURITY_GATE', defaultValue: false, description: 'Strict mode: fail the build if the OPA security gate does not pass')
         booleanParam(name: 'IGNORE_TEST_APP_FINDINGS', defaultValue: false, description: 'Demo mode: ignore findings from /api/test/devsecops/* endpoints')
-        booleanParam(name: 'DEMO_FALCO_TEST', defaultValue: false, description: 'Demo: inject suspicious activity in app-archivage to validate Falco custom rules')
     }
 
     environment {
@@ -166,114 +165,6 @@ pipeline {
             }
         }
 
-        stage('Runtime Security - Falco (Start)') {
-            steps {
-                catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
-                    sh '''
-                        cd "$PROJECT_DIR"
-                        docker rm -f falco-runtime 2>/dev/null || true
-
-                        TRACEFS_PATH="/sys/kernel/tracing"
-                        [ -d "/sys/kernel/debug/tracing" ] && TRACEFS_PATH="/sys/kernel/debug/tracing"
-
-                        KVER_MAJOR=$(uname -r | cut -d. -f1)
-                        KVER_MINOR=$(uname -r | cut -d. -f2 | cut -d- -f1)
-                        echo "[Falco] Pre-flight kernel: $(uname -r)"
-                        echo "[Falco] Pre-flight tracefs: ${TRACEFS_PATH}"
-
-                        FALCO_DRIVERS=""
-                        if [ "$KVER_MAJOR" -gt 5 ] || { [ "$KVER_MAJOR" -eq 5 ] && [ "$KVER_MINOR" -ge 8 ]; }; then
-                            if [ -d "$TRACEFS_PATH" ]; then
-                                FALCO_DRIVERS="modern_ebpf"
-                                echo "[Falco] Pre-flight: modern_ebpf eligible (kernel >= 5.8, tracefs present)"
-                            fi
-                        fi
-                        if [ -d "$TRACEFS_PATH" ]; then
-                            FALCO_DRIVERS="${FALCO_DRIVERS} bpf"
-                            echo "[Falco] Pre-flight: bpf eligible (tracefs present)"
-                        fi
-                        FALCO_DRIVERS="${FALCO_DRIVERS} kmod"
-                        echo "[Falco] Pre-flight: driver try order ->${FALCO_DRIVERS}"
-
-                        if [ ! -f "$PROJECT_DIR/ci/falco/custom-rules.yaml" ]; then
-                            echo "[WARN] custom-rules.yaml introuvable, Falco démarré sans règles custom"
-                            FALCO_RULES_MOUNT=""
-                        else
-                            FALCO_RULES_MOUNT="-v $PROJECT_DIR/ci/falco/custom-rules.yaml:/etc/falco/rules.d/custom-rules.yaml:ro"
-                        fi
-
-                        FALCO_STARTED=0
-                        for DRIVER in $FALCO_DRIVERS; do
-                            docker rm -f falco-runtime 2>/dev/null || true
-                            case "$DRIVER" in
-                                modern_ebpf) DRIVER_ARGS="--modern-bpf" ;;
-                                bpf)         DRIVER_ARGS="--bpf" ;;
-                                kmod)        DRIVER_ARGS="" ;;
-                            esac
-                            echo "[Falco] Starting with driver=${DRIVER} args='${DRIVER_ARGS}'"
-                            docker run -d --name falco-runtime \
-                                --privileged \
-                                -v "${TRACEFS_PATH}:/sys/kernel/tracing:ro" \
-                                -v /var/run/docker.sock:/var/run/docker.sock \
-                                -v /proc:/host/proc:ro \
-                                -v /etc:/host/etc:ro \
-                                ${FALCO_RULES_MOUNT} \
-                                falcosecurity/falco:0.44.0 falco ${DRIVER_ARGS} \
-                                --option "json_output=true" \
-                                --option "log_level=info" || true
-
-                            READY=0
-                            for i in $(seq 1 15); do
-                                if ! docker ps -q -f name=falco-runtime | grep -q .; then
-                                    echo "[WARN] Falco container died with driver ${DRIVER}"
-                                    break
-                                fi
-                                if docker logs falco-runtime 2>&1 | grep -qE "Falco initialized|Starting internal|inotify"; then
-                                    READY=1
-                                    break
-                                fi
-                                sleep 2
-                            done
-
-                            if [ "$READY" -eq 1 ]; then
-                                echo "[Falco] Ready with driver: ${DRIVER}"
-                                FALCO_STARTED=1
-                                break
-                            fi
-                            echo "[WARN] Driver ${DRIVER} failed readiness, trying next..."
-                        done
-
-                        if [ "$FALCO_STARTED" -eq 0 ]; then
-                            echo "[ERROR] Falco could not start with any driver (modern_ebpf / bpf / kmod)"
-                        fi
-
-                        echo "--- Falco startup logs (first 20 lines) ---"
-                        docker logs falco-runtime 2>&1 | head -20 || true
-                    '''
-                }
-            }
-        }
-
-        stage('Demo - Inject Suspicious Activity') {
-            when {
-                expression { return params.DEMO_FALCO_TEST }
-            }
-            steps {
-                sh '''
-                    set +e
-                    echo "======================================================"
-                    echo "  DEMO FALCO — Injecting suspicious activity in ${APP_CONTAINER}"
-                    echo "  (Falco is running — expect Sensitive File Read / Unexpected Shell alerts)"
-                    echo "======================================================"
-                    docker exec "$APP_CONTAINER" sh -c "cat /etc/passwd" || true
-                    docker exec "$APP_CONTAINER" bash -c "id && whoami" || true
-                    sleep 2
-                    echo "Demo commands completed."
-                    echo "======================================================"
-                '''
-            }
-        }
-
         stage('DAST - OWASP ZAP (Attack)') {
             steps {
                 catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
@@ -304,80 +195,29 @@ pipeline {
             }
         }
 
-        stage('Runtime Security - Falco (Resolve Target)') {
+        stage('Runtime Security - App Log Analysis') {
             steps {
                 sh '''
                     cd "$PROJECT_DIR"
                     mkdir -p reports/runtime
-                    docker inspect --format '{{.Id}}' "$APP_CONTAINER" 2>/dev/null \
-                        | sed 's/^sha256://' \
-                        | cut -c1-12 \
-                        > reports/runtime/app-container-id.txt || echo "" > reports/runtime/app-container-id.txt
-                    CID_SHORT=$(tr -d '\n' < reports/runtime/app-container-id.txt 2>/dev/null || true)
-                    echo "[Falco] Target container: ${APP_CONTAINER} (ID prefix: ${CID_SHORT:-unknown})"
-                '''
-            }
-        }
-
-        stage('Runtime Security - Falco (Collect)') {
-            steps {
-                sh '''
-                    cd "$PROJECT_DIR"
-                    mkdir -p reports/runtime
-
-                    docker logs falco-runtime 2>&1 | grep -E '^\\{' > reports/runtime/falco-raw.json || true
-                    touch reports/runtime/falco-raw.json
-
-                    echo "[DEBUG] Container IDs in falco-raw.json:"
-                    docker run --rm --user "${JENKINS_UID}:${JENKINS_GID}" --volumes-from jenkins -w "$PROJECT_DIR" python:3.12-alpine \
-                        python3 -c "
-import json, collections
-from pathlib import Path
-raw = Path('reports/runtime/falco-raw.json')
-events = []
-if raw.exists() and raw.stat().st_size > 0:
-    for line in raw.read_text(encoding='utf-8-sig', errors='replace').splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            events.append(json.loads(line))
-        except json.JSONDecodeError:
-            pass
-ids = collections.Counter(
-    (e.get('output_fields') or {}).get('container.id') or '<none>'
-    for e in events
-)
-print(f'[DEBUG] Total raw events: {len(events)}')
-for cid, cnt in ids.most_common():
-    print(f'  {cid}: {cnt} events')
-" || true
-
-                    echo "[DEBUG] app-archivage container ID (from docker inspect):"
-                    docker inspect --format '{{.Id}}' "$APP_CONTAINER" 2>/dev/null | cut -c1-12 || echo "  (inspect failed)"
-                    if [ -f reports/runtime/app-container-id.txt ]; then
-                        echo "[DEBUG] app-container-id.txt (saved at resolve stage):"
-                        cut -c1-12 reports/runtime/app-container-id.txt | sed 's/^/  /' || true
-                    fi
+                    docker logs "$APP_CONTAINER" > reports/runtime/app-logs-raw.txt 2>&1 || true
 
                     docker run --rm --user "${JENKINS_UID}:${JENKINS_GID}" --volumes-from jenkins -w "$PROJECT_DIR" python:3.12-alpine \
-                        python3 ci/scripts/parse_falco.py \
-                        reports/runtime/falco-raw.json \
-                        reports/runtime/falco-alerts.json \
-                        "${APP_CONTAINER}" \
-                        reports/runtime/app-container-id.txt || echo "[]" > reports/runtime/falco-alerts.json
+                        python3 ci/scripts/analyze_app_logs.py \
+                        reports/runtime/app-logs-raw.txt \
+                        reports/runtime/runtime-alerts.json || echo "[]" > reports/runtime/runtime-alerts.json
 
                     ALERT_COUNT=$(docker run --rm --user "${JENKINS_UID}:${JENKINS_GID}" --volumes-from jenkins -w "$PROJECT_DIR" python:3.12-alpine \
-                        python3 -c "import json; print(len(json.load(open('reports/runtime/falco-alerts.json', encoding='utf-8-sig'))))" 2>/dev/null || echo 0)
+                        python3 -c "import json; print(len(json.load(open('reports/runtime/runtime-alerts.json', encoding='utf-8-sig'))))" 2>/dev/null || echo 0)
 
                     echo "======================================================"
-                    echo "   FALCO RUNTIME SECURITY — ZAP PHASE SUMMARY"
+                    echo "   RUNTIME SECURITY — APP LOG ANALYSIS SUMMARY"
                     echo "======================================================"
-                    echo "Falco alerts on ${APP_CONTAINER}: ${ALERT_COUNT}"
+                    echo "Runtime alerts on ${APP_CONTAINER}: ${ALERT_COUNT}"
                     if [ "${ALERT_COUNT}" != "0" ]; then
-                        echo "Sample (first event output):"
+                        echo "Sample (first alert):"
                         docker run --rm --user "${JENKINS_UID}:${JENKINS_GID}" --volumes-from jenkins -w "$PROJECT_DIR" python:3.12-alpine \
-                            python3 -c "import json; evts=json.load(open('reports/runtime/falco-alerts.json', encoding='utf-8-sig')); print('  ' + (evts[0].get('output','')[:200] if evts else ''))" 2>/dev/null || true
+                            python3 -c "import json; evts=json.load(open('reports/runtime/runtime-alerts.json', encoding='utf-8-sig')); print('  ' + (evts[0].get('rule','') + ': ' + evts[0].get('output','')[:200] if evts else ''))" 2>/dev/null || true
                     fi
                     echo "======================================================"
                 '''
@@ -427,7 +267,7 @@ for cid, cnt in ids.most_common():
 
             sh '''
                 set +e
-                docker rm -f "$APP_CONTAINER" "$MYSQL_CONTAINER" falco-runtime >/dev/null 2>&1 || true
+                docker rm -f "$APP_CONTAINER" "$MYSQL_CONTAINER" >/dev/null 2>&1 || true
                 docker network rm "$NETWORK_NAME" >/dev/null 2>&1 || true
                 docker run --rm -u 0:0 -v "$WORKSPACE:/ws" alpine:3.19 sh -c "chown -R ${JENKINS_UID}:${JENKINS_GID} /ws 2>/dev/null || true"
             '''
@@ -454,10 +294,8 @@ for cid, cnt in ids.most_common():
                             'src/reports/zap/zap-report.html',
                             'src/reports/zap/zap-report.json',
                             'src/reports/zap/zap-report.filtered.json',
-                            'src/reports/runtime/app-container-id.txt',
-                            'src/reports/runtime/falco-raw.json',
-                            'src/reports/runtime/falco-alerts.json',
-                            'src/reports/runtime/falco-alerts.txt',
+                            'src/reports/runtime/app-logs-raw.txt',
+                            'src/reports/runtime/runtime-alerts.json',
                             'src/reports/opa/opa-result.txt',
                             'src/reports/opa/opa-thresholds.txt',
                             'src/reports/opa/opa-debug.txt',
