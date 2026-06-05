@@ -11,6 +11,7 @@ Briques couvertes :
   • OWASP ZAP  — alertes DAST           (zap-report.json)
   • CycloneDX  — inventaire SBOM        (bom.json)
   • OPA        — résultat security gate  (opa-result.txt + input.json)
+  • Falco      — alertes runtime        (falco-alerts.txt)
   • SonarQube  — qualité code           (API REST optionnelle)
 
 Usage :
@@ -22,6 +23,7 @@ Usage :
 """
 
 import argparse
+import html
 import json
 import os
 import sys
@@ -196,6 +198,19 @@ def parse_sbom(reports_dir: Path) -> dict:
     }
 
 
+def parse_falco(reports_dir: Path) -> dict:
+    path = reports_dir / "runtime" / "falco-alerts.txt"
+    alerts = []
+    exists = path.exists()
+    if exists and path.stat().st_size > 0:
+        try:
+            text = path.read_text(encoding="utf-8")
+            alerts = [line.strip() for line in text.splitlines() if line.strip()]
+        except Exception as e:
+            print(f"  [WARN] Impossible de lire {path}: {e}", file=sys.stderr)
+    return {"exists": exists, "count": len(alerts), "alerts": alerts}
+
+
 def parse_opa(reports_dir: Path) -> dict:
     result_file = reports_dir / "opa" / "opa-result.txt"
     input_file  = reports_dir / "opa" / "input.json"
@@ -344,9 +359,14 @@ def _stat_card(label: str, value, color: str = "var(--accent)", note: str = "") 
 # SECTION RENDERERS — full inline report display
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def render_overview(gitleaks, trivy, zap, sbom, opa) -> str:
+def render_overview(gitleaks, trivy, zap, sbom, opa, falco) -> str:
     opa_ok = opa["passed"]
-    if opa_ok is False or gitleaks["count"] > 0 or trivy["counts"].get("CRITICAL", 0) > 0:
+    if (
+        opa_ok is False
+        or gitleaks["count"] > 0
+        or trivy["counts"].get("CRITICAL", 0) > 0
+        or falco["count"] > 0
+    ):
         overall_color, overall_label, overall_icon = "#ef4444", "AT RISK", "🔴"
     elif trivy["counts"].get("HIGH", 0) > 0 or zap["counts"].get("HIGH", 0) > 0:
         overall_color, overall_label, overall_icon = "#f97316", "WARNING", "🟡"
@@ -385,6 +405,12 @@ def render_overview(gitleaks, trivy, zap, sbom, opa) -> str:
         _stat_card("CVE Low", c.get("LOW", 0), "#64748b") +
         _stat_card("ZAP High", z.get("HIGH", 0), "#ef4444" if z.get("HIGH",0) > 0 else "#22c55e") +
         _stat_card("ZAP Medium", z.get("MEDIUM", 0), "#f97316") +
+        _stat_card(
+            "Runtime (Falco)",
+            falco["count"],
+            "#ef4444" if falco["count"] > 0 else "#22c55e",
+            note="Alertes pendant l'attaque ZAP",
+        ) +
         _stat_card("Composants", sbom["total"], "#3b82f6")
     )
 
@@ -623,6 +649,44 @@ def render_sbom(sbom: dict) -> str:
 <tbody id="sbom-body">{rows}</tbody>
 </table>
 </div>"""
+
+
+def render_falco(falco: dict) -> str:
+    count = falco["count"]
+    status_color = "#22c55e" if count == 0 else "#ef4444"
+    status_label = "CLEAN ✓" if count == 0 else f"{count} ALERT(S)"
+    status_desc = (
+        "Aucune alerte runtime détectée pendant la phase d'attaque ZAP."
+        if count == 0 else
+        "Falco a détecté des événements suspects pendant l'exécution de l'application."
+    )
+
+    hero = f"""
+<div style="background:{status_color}11;border:1px solid {status_color}33;
+  border-radius:10px;padding:24px 28px;margin-bottom:24px;
+  display:flex;align-items:center;gap:20px">
+  <div style="font-size:48px;line-height:1">{"✅" if count == 0 else "🚨"}</div>
+  <div>
+    <div style="font-size:22px;font-weight:900;font-family:var(--mono);color:{status_color}">{status_label}</div>
+    <div style="font-size:13px;color:var(--text-muted);margin-top:4px">{status_desc}</div>
+  </div>
+</div>"""
+
+    if count == 0:
+        if not falco["exists"]:
+            return hero + _empty("Fichier falco-alerts.txt absent — aucune alerte runtime enregistrée")
+        return hero + _empty("Aucune alerte Falco détectée pendant la phase runtime ✓")
+
+    alert_text = html.escape("\n".join(falco["alerts"]))
+    return hero + f"""
+<div class="report-info-bar">
+  <span>⚡</span>
+  <span><strong>{count}</strong> alerte(s) runtime détectée(s) pendant l'attaque ZAP</span>
+  <span style="margin-left:auto;color:#ef4444;font-weight:700">⚠ Investigation requise</span>
+</div>
+<pre style="background:rgba(0,0,0,0.3);border:1px solid var(--border);border-radius:8px;
+  padding:16px;font-family:var(--mono);font-size:11px;overflow-x:auto;
+  color:#94a3b8;line-height:1.6;white-space:pre-wrap;word-break:break-word">{alert_text}</pre>"""
 
 
 def render_opa(opa: dict) -> str:
@@ -1048,7 +1112,7 @@ def nav_item(pane_id: str, icon: str, label: str, badge: str = "", badge_cls: st
 
 
 def build_html(
-    gitleaks, trivy, zap, sbom, opa,
+    gitleaks, trivy, zap, sbom, opa, falco,
     sonar=None,
     project_name: str = "archivage-Doc",
     generated_at: str = "",
@@ -1058,6 +1122,7 @@ def build_html(
     gl_cls = "red" if gitleaks["count"] > 0 else "green"
     tv_cls = "red" if trivy["counts"].get("CRITICAL",0) > 0 else ("orange" if trivy["counts"].get("HIGH",0) > 0 else "green")
     zp_cls = "red" if zap["counts"].get("HIGH",0) > 0 else ("orange" if zap["counts"].get("MEDIUM",0) > 0 else "green")
+    fc_cls = "red" if falco["count"] > 0 else "green"
 
     sidebar = f"""
 <aside class="sidebar">
@@ -1067,6 +1132,7 @@ def build_html(
   {nav_item("gitleaks",  "🔑", "Gitleaks",   str(gitleaks["count"]), gl_cls)}
   {nav_item("trivy",     "🛡️", "Trivy SCA",   str(trivy["total"]),   tv_cls)}
   {nav_item("zap",       "🌐", "OWASP ZAP",   str(zap["total"]),     zp_cls)}
+  {nav_item("falco",     "⚡", "Falco Runtime", str(falco["count"]), fc_cls)}
   <div class="nav-label">Artefacts</div>
   {nav_item("sbom",      "📦", "SBOM",        str(sbom["total"]),    "blue")}
   {nav_item("opa",       "⚖️", "OPA Gate",    "PASS" if opa["passed"] else ("FAIL" if opa["passed"] is False else "N/A"), "green" if opa["passed"] else "red")}
@@ -1079,10 +1145,11 @@ def build_html(
         return f'<div id="pane-{pid}" class="pane{active_cls}"><div style="max-width:1100px">{hdr}{content}</div></div>'
 
     content_panes = (
-        pane("overview",  "Vue d'ensemble", "📋", render_overview(gitleaks, trivy, zap, sbom, opa), active=True) +
+        pane("overview",  "Vue d'ensemble", "📋", render_overview(gitleaks, trivy, zap, sbom, opa, falco), active=True) +
         pane("gitleaks",  "Gitleaks — Secrets détectés", "🔑", render_gitleaks(gitleaks)) +
         pane("trivy",     "Trivy — Vulnérabilités SCA/FS", "🛡️", render_trivy(trivy)) +
         pane("zap",       "OWASP ZAP — Alertes DAST", "🌐", render_zap(zap)) +
+        pane("falco",     "Falco — Runtime Security", "⚡", render_falco(falco)) +
         pane("sbom",      "SBOM — Inventaire CycloneDX", "📦", render_sbom(sbom)) +
         pane("opa",       "OPA Security Gate", "⚖️", render_opa(opa)) +
         pane("sonar",     "SonarQube — Qualité du code", "🔬", render_sonar(sonar))
@@ -1154,28 +1221,32 @@ def main():
     print(f"  Sortie           : {output_path.resolve()}")
     print()
 
-    print("  [1/6] Gitleaks…")
+    print("  [1/7] Gitleaks…")
     gitleaks = parse_gitleaks(reports_dir)
     print(f"        {gitleaks['count']} secret(s)")
 
-    print("  [2/6] Trivy…")
+    print("  [2/7] Trivy…")
     trivy = parse_trivy(reports_dir)
     print(f"        {trivy['total']} CVE(s) — CRITICAL:{trivy['counts'].get('CRITICAL',0)} HIGH:{trivy['counts'].get('HIGH',0)}")
 
-    print("  [3/6] OWASP ZAP…")
+    print("  [3/7] OWASP ZAP…")
     zap = parse_zap(reports_dir)
     print(f"        {zap['total']} alerte(s) — HIGH:{zap['counts'].get('HIGH',0)}")
 
-    print("  [4/6] SBOM CycloneDX…")
+    print("  [4/7] Falco Runtime…")
+    falco = parse_falco(reports_dir)
+    print(f"        {falco['count']} alerte(s) runtime")
+
+    print("  [5/7] SBOM CycloneDX…")
     sbom = parse_sbom(reports_dir)
     print(f"        {sbom['total']} composant(s)")
 
-    print("  [5/6] OPA Gate…")
+    print("  [6/7] OPA Gate…")
     opa = parse_opa(reports_dir)
     print(f"        Gate : {'PASS' if opa['passed'] else ('FAIL' if opa['passed'] is False else 'N/A')}")
 
     sonar = None
-    print("  [6/6] SonarQube…")
+    print("  [7/7] SonarQube…")
     if args.sonar_url and args.sonar_project:
         sonar = fetch_sonarqube(args.sonar_url, args.sonar_token, args.sonar_project)
         print(f"        Gate : {sonar['gate_status'] if sonar else 'inaccessible'}")
@@ -1185,7 +1256,7 @@ def main():
     print()
     print("  Génération du HTML…")
     html = build_html(
-        gitleaks=gitleaks, trivy=trivy, zap=zap, sbom=sbom, opa=opa,
+        gitleaks=gitleaks, trivy=trivy, zap=zap, sbom=sbom, opa=opa, falco=falco,
         sonar=sonar, project_name=args.project,
     )
     output_path.write_text(html, encoding="utf-8")

@@ -240,32 +240,26 @@ pipeline {
 
         stage('Policy - OPA Gate') {
             steps {
-                sh '''
-                    cd "$PROJECT_DIR"
-                    
-                    # 1. Generate Input (Python script)
-                    docker run --rm --user "${JENKINS_UID}:${JENKINS_GID}" -e ENFORCE_GATE="true" --volumes-from jenkins -w "$PROJECT_DIR" python:3.12-alpine python ci/scripts/build_input.py || true
-                    
-                    # 2. FORCE Strict Evaluation: Overwrite the enforce_gate flag to true in the generated JSON
-                    # This bypasses any bug in the Python script and ensures OPA accurately fails on vulnerabilities
-                    docker run --rm --user "${JENKINS_UID}:${JENKINS_GID}" --volumes-from jenkins -w "$PROJECT_DIR" alpine:3.19 sh -c "sed -i 's/\"enforce_gate\": false/\"enforce_gate\": true/g; s/\"enforce_gate\":False/\"enforce_gate\":true/g' reports/opa/input.json 2>/dev/null || true"
-                    
-                    # 3. Evaluate Policy via OPA
-                    docker run --rm --volumes-from jenkins -w "$PROJECT_DIR" openpolicyagent/opa:latest eval --format pretty --data "ci/policy/security-gate.rego" --input "reports/opa/input.json" "data.security" | tee "reports/opa/opa-debug.txt" || true
-                    docker run --rm --volumes-from jenkins -w "$PROJECT_DIR" openpolicyagent/opa:latest eval --format raw --data "ci/policy/security-gate.rego" --input "reports/opa/input.json" "data.security.allow" > "reports/opa/opa-result.txt" || true
-                '''
-                
+                sh """
+                    cd "\$PROJECT_DIR"
+
+                    docker run --rm --user "\${JENKINS_UID}:\${JENKINS_GID}" -e ENFORCE_GATE="${params.ENFORCE_SECURITY_GATE}" --volumes-from jenkins -w "\$PROJECT_DIR" python:3.12-alpine python ci/scripts/build_input.py || true
+
+                    docker run --rm --volumes-from jenkins -w "\$PROJECT_DIR" openpolicyagent/opa:latest eval --format pretty --data "ci/policy/security-gate.rego" --input "reports/opa/input.json" "data.security" | tee "reports/opa/opa-debug.txt" || true
+                    docker run --rm --volumes-from jenkins -w "\$PROJECT_DIR" openpolicyagent/opa:latest eval --format raw --data "ci/policy/security-gate.rego" --input "reports/opa/input.json" "data.security.allow" > "reports/opa/opa-result.txt" || true
+                    docker run --rm --volumes-from jenkins -w "\$PROJECT_DIR" openpolicyagent/opa:latest eval --format raw --data "ci/policy/security-gate.rego" --input "reports/opa/input.json" "data.security.thresholds_ok" > "reports/opa/opa-thresholds.txt" || true
+                """
+
                 script {
                     def allowOk = sh(script: 'cat "$PROJECT_DIR/reports/opa/opa-result.txt" || echo "false"', returnStdout: true).trim()
-                    
+                    def thresholdsOk = sh(script: 'cat "$PROJECT_DIR/reports/opa/opa-thresholds.txt" || echo "false"', returnStdout: true).trim()
+
                     if (allowOk != "true") {
-                        if (params.ENFORCE_SECURITY_GATE) {
-                            error("OPA SECURITY GATE : FAILED (Strict Mode ON - Vulnerabilités trouvées)")
-                        } else {
-                            unstable("SECURITY VULNERABILITIES DETECTED : Build marqué UNSTABLE (Strict Mode OFF)")
-                        }
+                        error("OPA SECURITY GATE : FAILED (Strict Mode ON - Critical/High Vulnerabilities detected)")
+                    } else if (thresholdsOk != "true") {
+                        unstable("SECURITY VULNERABILITIES DETECTED : Build marked UNSTABLE (Strict Mode OFF - Demo Mode)")
                     } else {
-                        echo "OPA SECURITY GATE : PASSED (Aucune vulnérabilité bloquante)"
+                        echo "OPA SECURITY GATE : PASSED (No blocking vulnerabilities)"
                     }
                 }
             }
@@ -316,6 +310,7 @@ pipeline {
                             'src/reports/zap/zap-report.filtered.json',
                             'src/reports/runtime/falco-alerts.txt',
                             'src/reports/opa/opa-result.txt',
+                            'src/reports/opa/opa-thresholds.txt',
                             'src/reports/opa/opa-debug.txt',
                             'src/reports/opa/input.json',
                             'src/reports/sbom/bom.json',
