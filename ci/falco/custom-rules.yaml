@@ -1,13 +1,35 @@
-- rule: Unauthorized Shell in Archivage App
-  desc: Detect any shell execution inside the main archiving container
-  condition: container.name == "app-archivage" and spawned_process and proc.name in (shell_procs)
-  output: "CRITICAL: Unauthorized Shell Spawned inside %container.name (user=%user.name cmd=%proc.cmdline)"
-  priority: CRITICAL
-  tags: [runtime, pfe_policy]
-
-- rule: Sensitive File Access Detected
-  desc: Detect when non-trusted processes try to read shadow or passwd
-  condition: container.name == "app-archivage" and open_read and fd.name in (/etc/shadow, /etc/passwd)
-  output: "WARNING: Sensitive file read attempt in %container.name (file=%fd.name cmd=%proc.cmdline)"
+# ci/falco/falco-rules.yaml
+- rule: Suspicious HTTP Response in App Container
+  desc: Detects unusual syscalls in app-archivage during ZAP scan
+  condition: >
+    spawned_process and
+    container.name = "app-archivage"
+  output: >
+    Suspicious process in app container
+    (user=%user.name cmd=%proc.cmdline container=%container.name
+     image=%container.image.repository parent=%proc.pname)
   priority: WARNING
-  tags: [runtime, pfe_policy]
+  tags: [devsecops, zap]
+
+- rule: File Write in App Container
+  desc: Detects file writes inside app-archivage
+  condition: >
+    open_write and
+    container.name = "app-archivage" and
+    not fd.name startswith "/proc"
+  output: >
+    File write detected (file=%fd.name user=%user.name
+    cmd=%proc.cmdline container=%container.name)
+  priority: WARNING
+  tags: [devsecops, zap]
+
+- rule: Outbound Connection from App
+  desc: Detects unexpected outbound connections from app-archivage
+  condition: >
+    outbound and
+    container.name = "app-archivage"
+  output: >
+    Outbound connection (dest=%fd.rip:%fd.rport
+    cmd=%proc.cmdline container=%container.name)
+  priority: WARNING
+  tags: [devsecops, zap]

@@ -11,7 +11,7 @@ Briques couvertes :
   • OWASP ZAP  — alertes DAST           (zap-report.json)
   • CycloneDX  — inventaire SBOM        (bom.json)
   • OPA        — résultat security gate  (opa-result.txt + input.json)
-  • Falco      — alertes runtime        (falco-alerts.txt)
+  • Falco      — alertes runtime        (falco-alerts.json / falco-alerts.txt)
   • SonarQube  — qualité code           (API REST optionnelle)
 
 Usage :
@@ -220,6 +220,67 @@ def _normalize_falco_severity(value: str) -> str:
     return sev
 
 
+def _format_falco_output_fields(fields: dict) -> str:
+    if not fields:
+        return ""
+    priority_keys = (
+        "container.name",
+        "container.id",
+        "container.image.repository",
+        "proc.name",
+        "proc.cmdline",
+        "proc.pname",
+        "user.name",
+        "fd.name",
+        "fd.rip",
+        "fd.rport",
+    )
+    parts = []
+    seen = set()
+    for key in priority_keys:
+        if key in fields and fields[key] not in (None, ""):
+            parts.append(f"{key}={fields[key]}")
+            seen.add(key)
+    for key, value in sorted(fields.items()):
+        if key not in seen and value not in (None, ""):
+            parts.append(f"{key}={value}")
+    return " ".join(parts)
+
+
+def _parse_falco_json_event(evt: dict) -> dict:
+    """Parse one Falco JSON event from json_output=true logs."""
+    output = (evt.get("output") or "").strip()
+    fields = evt.get("output_fields") or {}
+    if not isinstance(fields, dict):
+        fields = {}
+
+    priority = evt.get("priority") or evt.get("severity") or "UNKNOWN"
+    severity = _normalize_falco_severity(str(priority))
+
+    rule = (evt.get("rule") or "").strip()
+    message = rule or output
+    metadata = _format_falco_output_fields(fields)
+    if not metadata and "(" in output:
+        open_idx = output.find("(")
+        message = output[:open_idx].strip() or message
+        metadata = output[open_idx:].strip()
+    elif output and rule and output not in message:
+        metadata = metadata or output
+
+    if not message:
+        message = output or rule or "Falco runtime alert"
+
+    raw = output or json.dumps(evt, ensure_ascii=False)
+    dedup_key = re.sub(r"\s+", " ", f"{severity}|{message}|{metadata}".lower()).strip()
+    return {
+        "severity": severity,
+        "message": message,
+        "metadata": metadata,
+        "raw": raw,
+        "dedup_key": dedup_key or raw.lower(),
+    }
+
+
 def _parse_falco_line(line: str) -> dict:
     """Parse one Falco log line; fall back gracefully on malformed input."""
     raw = line.strip()
@@ -277,25 +338,9 @@ def _parse_falco_line(line: str) -> dict:
     }
 
 
-def parse_falco(reports_dir: Path) -> dict:
-    path = reports_dir / "runtime" / "falco-alerts.txt"
-    exists = path.exists()
-    raw_lines: list[str] = []
-
-    if exists and path.stat().st_size > 0:
-        try:
-            text = path.read_text(encoding="utf-8-sig")
-            raw_lines = [
-                line.strip().lstrip("\ufeff")
-                for line in text.splitlines()
-                if line.strip()
-            ]
-        except Exception as e:
-            print(f"  [WARN] Impossible de lire {path}: {e}", file=sys.stderr)
-
+def _group_falco_parsed_events(parsed_events: list[dict]) -> dict:
     grouped: dict[str, dict] = {}
-    for line in raw_lines:
-        parsed = _parse_falco_line(line)
+    for parsed in parsed_events:
         key = parsed["dedup_key"]
         if key not in grouped:
             grouped[key] = {
@@ -311,15 +356,45 @@ def parse_falco(reports_dir: Path) -> dict:
             entry["sample"] = parsed["raw"]
 
     groups = sorted(grouped.values(), key=lambda g: (-g["count"], g["severity"], g["message"]))
-    total = len(raw_lines)
-    unique_count = len(groups)
-
     return {
-        "exists": exists,
-        "count": total,
-        "unique_count": unique_count,
+        "count": len(parsed_events),
+        "unique_count": len(groups),
         "groups": groups,
     }
+
+
+def parse_falco(reports_dir: Path) -> dict:
+    json_path = reports_dir / "runtime" / "falco-alerts.json"
+    txt_path = reports_dir / "runtime" / "falco-alerts.txt"
+    exists = json_path.exists() or txt_path.exists()
+    parsed_events: list[dict] = []
+
+    if json_path.exists() and json_path.stat().st_size > 0:
+        try:
+            data = json.loads(json_path.read_text(encoding="utf-8-sig"))
+        except Exception as e:
+            print(f"  [WARN] Impossible de lire {json_path}: {e}", file=sys.stderr)
+            data = []
+        if isinstance(data, list):
+            for evt in data:
+                if isinstance(evt, dict):
+                    parsed_events.append(_parse_falco_json_event(evt))
+        elif isinstance(data, dict):
+            parsed_events.append(_parse_falco_json_event(data))
+
+    if not parsed_events and txt_path.exists() and txt_path.stat().st_size > 0:
+        try:
+            text = txt_path.read_text(encoding="utf-8-sig")
+            for line in text.splitlines():
+                line = line.strip().lstrip("\ufeff")
+                if line:
+                    parsed_events.append(_parse_falco_line(line))
+        except Exception as e:
+            print(f"  [WARN] Impossible de lire {txt_path}: {e}", file=sys.stderr)
+
+    result = _group_falco_parsed_events(parsed_events)
+    result["exists"] = exists
+    return result
 
 
 def parse_opa(reports_dir: Path) -> dict:
@@ -799,7 +874,7 @@ def render_falco(falco: dict) -> str:
 
     if count == 0:
         if not falco["exists"]:
-            return hero + _empty("Fichier falco-alerts.txt absent — aucune alerte runtime enregistrée")
+            return hero + _empty("Fichier falco-alerts.json absent — aucune alerte runtime enregistrée")
         return hero + _empty("Aucune alerte Falco détectée pendant la phase runtime ✓")
 
     rows = ""

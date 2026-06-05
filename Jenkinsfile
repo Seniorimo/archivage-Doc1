@@ -171,19 +171,25 @@ pipeline {
                     sh '''
                         cd "$PROJECT_DIR"
                         docker rm -f falco-runtime 2>/dev/null || true
-                        
+
                         TRACEFS_PATH="/sys/kernel/tracing"
                         [ -d "/sys/kernel/debug/tracing" ] && TRACEFS_PATH="/sys/kernel/debug/tracing"
-                        
+
                         docker run -d --name falco-runtime \
                             --privileged \
                             -v "${TRACEFS_PATH}:/sys/kernel/tracing:ro" \
                             -v /var/run/docker.sock:/host/var/run/docker.sock \
                             -v /proc:/host/proc:ro \
                             -v /etc:/host/etc:ro \
-                            falcosecurity/falco:0.44.0 falco
-                        
-                        sleep 10
+                            -v "$PROJECT_DIR/ci/falco/custom-rules.yaml:/etc/falco/rules.d/custom-rules.yaml:ro" \
+                            falcosecurity/falco:0.44.0 falco \
+                            --option "json_output=true" \
+                            --option "log_level=info"
+
+                        for i in $(seq 1 15); do
+                            docker logs falco-runtime 2>&1 | grep -q "Falco initialized" && break
+                            sleep 2
+                        done
                     '''
                 }
             }
@@ -224,18 +230,33 @@ pipeline {
                 sh '''
                     cd "$PROJECT_DIR"
                     mkdir -p reports/runtime
-                    docker logs falco-runtime 2>&1 | grep -E "Warning|Critical|Error" > reports/runtime/falco-alerts.txt || true
 
+                    docker logs falco-runtime 2>&1 \
+                        | grep -E '^\\{' \
+                        | python3 -c "
+import sys, json
+target = '${APP_CONTAINER}'
+alerts = []
+for line in sys.stdin:
+    try:
+        evt = json.loads(line.strip())
+        output = evt.get('output', '')
+        fields = evt.get('output_fields', {}) or {}
+        if target in output or fields.get('container.name') == target:
+            alerts.append(evt)
+    except Exception:
+        pass
+print(json.dumps(alerts, indent=2))
+" > reports/runtime/falco-alerts.json || echo "[]" > reports/runtime/falco-alerts.json
+
+                    ALERT_COUNT=$(python3 -c "import json; print(len(json.load(open('reports/runtime/falco-alerts.json'))))" 2>/dev/null || echo 0)
                     echo "======================================================"
                     echo "   FALCO RUNTIME SECURITY — ZAP PHASE SUMMARY"
                     echo "======================================================"
-                    if [ -s reports/runtime/falco-alerts.txt ]; then
-                        ALERT_COUNT=$(wc -l < reports/runtime/falco-alerts.txt | tr -d ' ')
-                        echo "Total alerts captured (full metadata): ${ALERT_COUNT}"
-                        echo "Sample (first 5 lines):"
-                        head -n 5 reports/runtime/falco-alerts.txt | sed 's/^/  /'
-                    else
-                        echo "No runtime alerts detected."
+                    echo "Falco alerts on ${APP_CONTAINER}: ${ALERT_COUNT}"
+                    if [ "${ALERT_COUNT}" != "0" ]; then
+                        echo "Sample (first event output):"
+                        python3 -c "import json; evts=json.load(open('reports/runtime/falco-alerts.json')); print('  ' + (evts[0].get('output','')[:200] if evts else ''))" 2>/dev/null || true
                     fi
                     echo "======================================================"
                 '''
@@ -312,6 +333,7 @@ pipeline {
                             'src/reports/zap/zap-report.html',
                             'src/reports/zap/zap-report.json',
                             'src/reports/zap/zap-report.filtered.json',
+                            'src/reports/runtime/falco-alerts.json',
                             'src/reports/runtime/falco-alerts.txt',
                             'src/reports/opa/opa-result.txt',
                             'src/reports/opa/opa-thresholds.txt',
