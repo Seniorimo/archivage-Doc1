@@ -352,9 +352,11 @@ def _load_app_container_id_prefix(reports_dir: Path) -> str | None:
     id_file = reports_dir / "runtime" / "app-container-id.txt"
     if not id_file.exists() or id_file.stat().st_size == 0:
         return None
-    raw_id = id_file.read_text(encoding="utf-8-sig", errors="replace").strip()
-    raw_id = raw_id.removeprefix("sha256:")
-    return raw_id[:12].lower() if raw_id else None
+    raw_content = id_file.read_text(encoding="utf-8-sig", errors="replace").strip()
+    if raw_content.lower().startswith("sha256:"):
+        raw_content = raw_content[len("sha256:"):]
+    raw_content = raw_content.strip()
+    return raw_content[:12].lower() if raw_content else None
 
 
 def _falco_event_source(evt: dict, app_id_prefix: str | None) -> str:

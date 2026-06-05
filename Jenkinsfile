@@ -309,8 +309,11 @@ pipeline {
                 sh '''
                     cd "$PROJECT_DIR"
                     mkdir -p reports/runtime
-                    docker inspect --format '{{.Id}}' "$APP_CONTAINER" > reports/runtime/app-container-id.txt 2>/dev/null || echo "" > reports/runtime/app-container-id.txt
-                    CID_SHORT=$(head -c 12 reports/runtime/app-container-id.txt 2>/dev/null | tr -d '\n' || true)
+                    docker inspect --format '{{.Id}}' "$APP_CONTAINER" 2>/dev/null \
+                        | sed 's/^sha256://' \
+                        | cut -c1-12 \
+                        > reports/runtime/app-container-id.txt || echo "" > reports/runtime/app-container-id.txt
+                    CID_SHORT=$(tr -d '\n' < reports/runtime/app-container-id.txt 2>/dev/null || true)
                     echo "[Falco] Target container: ${APP_CONTAINER} (ID prefix: ${CID_SHORT:-unknown})"
                 '''
             }

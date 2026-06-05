@@ -19,11 +19,13 @@ INVALID_CONTAINER_IDS = {"", "<na>", "na", "null", "none", "host"}
 def load_container_id_prefix(id_file: Path) -> str | None:
     if not id_file.exists() or id_file.stat().st_size == 0:
         return None
-    raw_id = id_file.read_text(encoding="utf-8-sig", errors="replace").strip()
-    raw_id = raw_id.removeprefix("sha256:")
-    if not raw_id:
+    raw_content = id_file.read_text(encoding="utf-8-sig", errors="replace").strip()
+    if raw_content.lower().startswith("sha256:"):
+        raw_content = raw_content[len("sha256:"):]
+    raw_content = raw_content.strip()
+    if not raw_content:
         return None
-    return raw_id[:12].lower()
+    return raw_content[:12].lower()
 
 
 def _field_str(fields: dict, key: str) -> str:
@@ -146,14 +148,22 @@ def main() -> int:
     target = sys.argv[3]
     id_file = Path(sys.argv[4]) if len(sys.argv) > 4 else raw_file.parent / "app-container-id.txt"
 
+    raw_content = ""
+    if id_file.exists():
+        raw_content = id_file.read_text(encoding="utf-8-sig", errors="replace")
+    print(f"[DEBUG] app-container-id.txt raw content: {raw_content!r}")
+
     container_id_prefix = load_container_id_prefix(id_file)
+    app_id_prefix = container_id_prefix or ""
+    print(f"[DEBUG] app_id_prefix used for matching: {app_id_prefix!r}")
+    print(f"[DEBUG] App container ID prefix: {app_id_prefix}")
+
     if container_id_prefix:
         print(f"[Falco] Container ID prefix: {container_id_prefix} (match by container.id, any rule)")
     else:
         print("[Falco] No container ID file — using name/output/cmdline fallback")
 
-    alerts: list[dict] = []
-    suppressed = 0
+    raw_events: list[dict] = []
     if raw_file.exists() and raw_file.stat().st_size > 0:
         for line in raw_file.read_text(encoding="utf-8-sig", errors="replace").splitlines():
             line = line.strip()
@@ -163,14 +173,33 @@ def main() -> int:
                 evt = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if not isinstance(evt, dict):
-                continue
-            if not event_matches_target(evt, target, container_id_prefix):
-                continue
-            if is_ci_noise(evt, target):
-                suppressed += 1
-                continue
-            alerts.append(evt)
+            if isinstance(evt, dict):
+                raw_events.append(evt)
+
+    print(f"[DEBUG] Total raw events loaded: {len(raw_events)}")
+
+    after_whitelist = [evt for evt in raw_events if not is_ci_noise(evt, target)]
+    print(f"[DEBUG] Events after whitelist exclusion: {len(after_whitelist)}")
+
+    for evt in after_whitelist:
+        fields = evt.get("output_fields", {}) or {}
+        cid = fields.get("container.id", "<none>")
+        if cid is None:
+            cid = "<none>"
+        cid_str = str(cid)
+        matches = bool(app_id_prefix and cid_str.startswith(app_id_prefix))
+        rule = evt.get("rule", "?")
+        print(f"[DEBUG] Candidate: rule={rule} container.id={cid} matches={matches}")
+
+    alerts: list[dict] = []
+    suppressed = 0
+    for evt in raw_events:
+        if not event_matches_target(evt, target, container_id_prefix):
+            continue
+        if is_ci_noise(evt, target):
+            suppressed += 1
+            continue
+        alerts.append(evt)
 
     out_file.parent.mkdir(parents=True, exist_ok=True)
     out_file.write_text(json.dumps(alerts, indent=2), encoding="utf-8")
