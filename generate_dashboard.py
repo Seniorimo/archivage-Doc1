@@ -338,16 +338,61 @@ def _parse_falco_line(line: str) -> dict:
     }
 
 
-def _falco_event_row(evt: dict) -> dict:
-    """Normalize one Falco JSON alert for dashboard display."""
+def _falco_event_time(evt: dict) -> str:
     time_val = evt.get("time") or evt.get("timestamp") or evt.get("@timestamp") or "—"
     if isinstance(time_val, (int, float)):
         try:
-            time_val = datetime.fromtimestamp(time_val, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+            return datetime.fromtimestamp(time_val, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
         except Exception:
-            time_val = str(time_val)
+            return str(time_val)
+    return str(time_val)
+
+
+def _load_falco_raw_events(reports_dir: Path) -> list[dict]:
+    raw_path = reports_dir / "runtime" / "falco-raw.json"
+    events: list[dict] = []
+    if not raw_path.exists() or raw_path.stat().st_size == 0:
+        return events
+    try:
+        for line in raw_path.read_text(encoding="utf-8-sig", errors="replace").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                evt = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(evt, dict):
+                events.append(evt)
+    except Exception as e:
+        print(f"  [WARN] Impossible de lire {raw_path}: {e}", file=sys.stderr)
+    return events
+
+
+def _summarize_raw_falco_by_rule(events: list[dict]) -> list[dict]:
+    by_rule: dict[str, dict] = {}
+    for evt in events:
+        rule = (evt.get("rule") or "Unknown").strip() or "Unknown"
+        time_val = _falco_event_time(evt)
+        priority = evt.get("priority") or evt.get("severity") or "UNKNOWN"
+        if rule not in by_rule:
+            by_rule[rule] = {
+                "rule": rule,
+                "count": 0,
+                "priority": str(priority),
+                "first_seen": time_val,
+            }
+        entry = by_rule[rule]
+        entry["count"] += 1
+        if time_val != "—" and (entry["first_seen"] == "—" or time_val < entry["first_seen"]):
+            entry["first_seen"] = time_val
+    return sorted(by_rule.values(), key=lambda x: (-x["count"], x["rule"]))
+
+
+def _falco_event_row(evt: dict) -> dict:
+    """Normalize one Falco JSON alert for dashboard display."""
     return {
-        "time": str(time_val),
+        "time": _falco_event_time(evt),
         "output": (evt.get("output") or "").strip(),
         "rule": (evt.get("rule") or "").strip(),
         "severity": _normalize_falco_severity(str(evt.get("priority") or evt.get("severity") or "UNKNOWN")),
@@ -381,11 +426,14 @@ def _group_falco_parsed_events(parsed_events: list[dict]) -> dict:
 
 def parse_falco(reports_dir: Path) -> dict:
     json_path = reports_dir / "runtime" / "falco-alerts.json"
-    exists = json_path.exists()
+    raw_path = reports_dir / "runtime" / "falco-raw.json"
+    exists = json_path.exists() or raw_path.exists()
     parsed_events: list[dict] = []
     events: list[dict] = []
+    raw_events = _load_falco_raw_events(reports_dir)
+    raw_by_rule = _summarize_raw_falco_by_rule(raw_events)
 
-    if exists and json_path.stat().st_size > 0:
+    if json_path.exists() and json_path.stat().st_size > 0:
         try:
             data = json.loads(json_path.read_text(encoding="utf-8-sig"))
         except Exception as e:
@@ -404,6 +452,8 @@ def parse_falco(reports_dir: Path) -> dict:
     result = _group_falco_parsed_events(parsed_events)
     result["exists"] = exists
     result["events"] = events
+    result["raw_total"] = len(raw_events)
+    result["raw_by_rule"] = raw_by_rule
     return result
 
 
@@ -604,10 +654,10 @@ def render_overview(gitleaks, trivy, zap, sbom, opa, falco) -> str:
         _stat_card(
             "Runtime (Falco)",
             falco["count"],
-            "#ef4444" if falco["count"] > 0 else "#22c55e",
+            "#ef4444" if falco["count"] > 0 else ("#f97316" if falco.get("raw_total", 0) > 0 else "#22c55e"),
             note=(
-                f"{falco.get('unique_count', falco['count'])} signature(s) unique(s)"
-                if falco["count"] > 0 else "Alertes pendant l'attaque ZAP"
+                f"{falco.get('unique_count', falco['count'])} signature(s) · {falco.get('raw_total', 0)} bruts"
+                if falco.get("raw_total", 0) else "Alertes pendant l'attaque ZAP"
             ),
         ) +
         _stat_card("Composants", sbom["total"], "#3b82f6")
@@ -859,37 +909,94 @@ def _falco_hit_badge(count: int) -> str:
     )
 
 
+def _render_falco_raw_overview(falco: dict) -> str:
+    raw_total = falco.get("raw_total", 0)
+    raw_by_rule = falco.get("raw_by_rule", [])
+    if raw_total == 0:
+        return ""
+
+    rows = ""
+    for entry in raw_by_rule:
+        rule = html.escape(entry.get("rule", "Unknown"))
+        priority = _normalize_falco_severity(entry.get("priority", "UNKNOWN"))
+        first_seen = html.escape(entry.get("first_seen", "—"))
+        hits = entry.get("count", 0)
+        rows += f"""
+<tr>
+  <td style="font-family:var(--mono);font-size:11px">{rule}</td>
+  <td style="width:90px">{_falco_hit_badge(hits)}</td>
+  <td style="width:110px">{_sev_pill(priority)}</td>
+  <td style="font-family:var(--mono);font-size:11px;color:var(--text-muted);white-space:nowrap">{first_seen}</td>
+</tr>"""
+
+    return f"""
+<div style="margin-top:28px">
+  <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;
+    color:var(--text-muted);margin-bottom:14px">Vue globale Falco (falco-raw.json — phase ZAP)</div>
+  <div class="report-info-bar">
+    <span>📡</span>
+    <span><strong>{raw_total}</strong> événement(s) détecté(s) au total (tous conteneurs / hôte)</span>
+    <span style="margin-left:auto;color:var(--text-muted);font-size:11px">Utile si container.name est null (DinD)</span>
+  </div>
+  <div class="table-wrap">
+  <table>
+  <thead><tr>
+    <th>Règle</th><th>Occurrences</th><th>Priorité</th><th>Première détection</th>
+  </tr></thead>
+  <tbody>{rows}</tbody>
+  </table>
+  </div>
+</div>"""
+
+
 def render_falco(falco: dict) -> str:
     count = falco["count"]
+    raw_total = falco.get("raw_total", 0)
     unique_count = falco.get("unique_count", count)
     groups = falco.get("groups", [])
-    status_color = "#22c55e" if count == 0 else "#ef4444"
-    status_label = "CLEAN ✓" if count == 0 else f"{count} EVENT(S)"
+    if count > 0:
+        status_color, status_label = "#ef4444", f"{count} EVENT(S)"
+    elif raw_total > 0:
+        status_color, status_label = "#f97316", f"0 filtré / {raw_total} bruts"
+    else:
+        status_color, status_label = "#22c55e", "CLEAN ✓"
+
     status_desc = (
         "Aucune alerte runtime détectée pendant la phase d'attaque ZAP."
-        if count == 0 else
-        f"{unique_count} signature(s) unique(s) regroupée(s) à partir de {count} événement(s) Falco."
+        if count == 0 and raw_total == 0 else
+        (
+            f"{unique_count} signature(s) filtrée(s) pour app-archivage · {raw_total} événement(s) bruts dans falco-raw.json."
+            if raw_total > 0 else
+            f"{unique_count} signature(s) unique(s) regroupée(s) à partir de {count} événement(s) Falco."
+        )
     )
 
     hero = f"""
 <div style="background:{status_color}11;border:1px solid {status_color}33;
   border-radius:10px;padding:24px 28px;margin-bottom:24px;
   display:flex;align-items:center;gap:20px">
-  <div style="font-size:48px;line-height:1">{"✅" if count == 0 else "🚨"}</div>
+  <div style="font-size:48px;line-height:1">{"✅" if count == 0 and raw_total == 0 else ("🚨" if count > 0 else "⚠️")}</div>
   <div>
     <div style="font-size:22px;font-weight:900;font-family:var(--mono);color:{status_color}">{status_label}</div>
     <div style="font-size:13px;color:var(--text-muted);margin-top:4px">{status_desc}</div>
   </div>
 </div>"""
 
-    if count == 0:
+    if count == 0 and raw_total == 0:
         if not falco["exists"]:
             return hero + _empty("Fichier falco-alerts.json absent — aucune alerte runtime enregistrée")
         return hero + _empty("Aucune alerte Falco détectée pendant la phase runtime ✓")
 
     events = falco.get("events", [])
     rows = ""
-    if events:
+    filtered_section = ""
+    if count == 0 and raw_total > 0:
+        filtered_section = """
+<div class="report-info-bar" style="margin-bottom:16px">
+  <span>ℹ️</span>
+  <span>Aucun événement ne correspond aux critères app-archivage (container.id / output / cmdline). Consultez la vue globale ci-dessous.</span>
+</div>"""
+    elif events:
         for evt in events:
             time_str = html.escape(evt.get("time", "—"))
             sev = evt.get("severity", "UNKNOWN")
@@ -909,36 +1016,27 @@ def render_falco(falco: dict) -> str:
     <div style="font-family:var(--mono);font-size:11px;line-height:1.5;word-break:break-word;color:#94a3b8">{output}</div>
   </td>
 </tr>"""
-    else:
-        for group in groups:
-            sev = group.get("severity", "UNKNOWN")
-            hits = group.get("count", 1)
-            message = html.escape(group.get("message", "—"))
-            metadata = html.escape(group.get("metadata", "") or group.get("sample", ""))
-            rows += f"""
-<tr>
-  <td style="vertical-align:top">—</td>
-  <td style="vertical-align:top">{_sev_pill(sev)} {_falco_hit_badge(hits)}</td>
-  <td style="vertical-align:top">
-    <div style="font-size:13px;font-weight:600;color:var(--text)">{message}</div>
-    <div style="font-family:var(--mono);font-size:11px;color:#94a3b8;margin-top:4px">{metadata}</div>
-  </td>
-</tr>"""
 
-    return hero + f"""
-<div class="report-info-bar">
-  <span>⚡</span>
-  <span><strong>{count}</strong> événement(s) sur <strong>app-archivage</strong> · <strong>{unique_count}</strong> signature(s) unique(s)</span>
-  <span style="margin-left:auto;color:#ef4444;font-weight:700">⚠ Investigation requise</span>
-</div>
-<div class="table-wrap">
-<table>
-<thead><tr>
-  <th>Heure</th><th>Sévérité</th><th>Output (métadonnées runtime)</th>
-</tr></thead>
-<tbody>{rows}</tbody>
-</table>
+        filtered_section += f"""
+<div style="margin-top:8px">
+  <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;
+    color:var(--text-muted);margin-bottom:14px">Alertes filtrées (app-archivage)</div>
+  <div class="report-info-bar">
+    <span>⚡</span>
+    <span><strong>{count}</strong> événement(s) sur <strong>app-archivage</strong> · <strong>{unique_count}</strong> signature(s) unique(s)</span>
+    <span style="margin-left:auto;color:#ef4444;font-weight:700">⚠ Investigation requise</span>
+  </div>
+  <div class="table-wrap">
+  <table>
+  <thead><tr>
+    <th>Heure</th><th>Sévérité</th><th>Output (métadonnées runtime)</th>
+  </tr></thead>
+  <tbody>{rows}</tbody>
+  </table>
+  </div>
 </div>"""
+
+    return hero + filtered_section + _render_falco_raw_overview(falco)
 
 
 def render_opa(opa: dict) -> str:
@@ -1488,7 +1586,8 @@ def main():
     print("  [4/7] Falco Runtime…")
     falco = parse_falco(reports_dir)
     print(
-        f"        {falco['count']} événement(s) — "
+        f"        {falco['count']} filtré(s) — "
+        f"{falco.get('raw_total', 0)} brut(s) — "
         f"{falco.get('unique_count', falco['count'])} signature(s) unique(s)"
     )
 

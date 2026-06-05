@@ -283,6 +283,18 @@ pipeline {
             }
         }
 
+        stage('Runtime Security - Falco (Resolve Target)') {
+            steps {
+                sh '''
+                    cd "$PROJECT_DIR"
+                    mkdir -p reports/runtime
+                    docker inspect --format '{{.Id}}' "$APP_CONTAINER" > reports/runtime/app-container-id.txt 2>/dev/null || echo "" > reports/runtime/app-container-id.txt
+                    CID_SHORT=$(head -c 12 reports/runtime/app-container-id.txt 2>/dev/null | tr -d '\n' || true)
+                    echo "[Falco] Target container: ${APP_CONTAINER} (ID prefix: ${CID_SHORT:-unknown})"
+                '''
+            }
+        }
+
         stage('Runtime Security - Falco (Collect)') {
             steps {
                 sh '''
@@ -292,11 +304,44 @@ pipeline {
                     docker logs falco-runtime 2>&1 | grep -E '^\\{' > reports/runtime/falco-raw.json || true
                     touch reports/runtime/falco-raw.json
 
+                    echo "[DEBUG] Container IDs in falco-raw.json:"
+                    docker run --rm --user "${JENKINS_UID}:${JENKINS_GID}" --volumes-from jenkins -w "$PROJECT_DIR" python:3.12-alpine \
+                        python3 -c "
+import json, collections
+from pathlib import Path
+raw = Path('reports/runtime/falco-raw.json')
+events = []
+if raw.exists() and raw.stat().st_size > 0:
+    for line in raw.read_text(encoding='utf-8-sig', errors='replace').splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            events.append(json.loads(line))
+        except json.JSONDecodeError:
+            pass
+ids = collections.Counter(
+    (e.get('output_fields') or {}).get('container.id') or '<none>'
+    for e in events
+)
+print(f'[DEBUG] Total raw events: {len(events)}')
+for cid, cnt in ids.most_common():
+    print(f'  {cid}: {cnt} events')
+" || true
+
+                    echo "[DEBUG] app-archivage container ID (from docker inspect):"
+                    docker inspect --format '{{.Id}}' "$APP_CONTAINER" 2>/dev/null | cut -c1-12 || echo "  (inspect failed)"
+                    if [ -f reports/runtime/app-container-id.txt ]; then
+                        echo "[DEBUG] app-container-id.txt (saved at resolve stage):"
+                        cut -c1-12 reports/runtime/app-container-id.txt | sed 's/^/  /' || true
+                    fi
+
                     docker run --rm --user "${JENKINS_UID}:${JENKINS_GID}" --volumes-from jenkins -w "$PROJECT_DIR" python:3.12-alpine \
                         python3 ci/scripts/parse_falco.py \
                         reports/runtime/falco-raw.json \
                         reports/runtime/falco-alerts.json \
-                        "${APP_CONTAINER}" || echo "[]" > reports/runtime/falco-alerts.json
+                        "${APP_CONTAINER}" \
+                        reports/runtime/app-container-id.txt || echo "[]" > reports/runtime/falco-alerts.json
 
                     ALERT_COUNT=$(docker run --rm --user "${JENKINS_UID}:${JENKINS_GID}" --volumes-from jenkins -w "$PROJECT_DIR" python:3.12-alpine \
                         python3 -c "import json; print(len(json.load(open('reports/runtime/falco-alerts.json', encoding='utf-8-sig'))))" 2>/dev/null || echo 0)
@@ -385,6 +430,7 @@ pipeline {
                             'src/reports/zap/zap-report.html',
                             'src/reports/zap/zap-report.json',
                             'src/reports/zap/zap-report.filtered.json',
+                            'src/reports/runtime/app-container-id.txt',
                             'src/reports/runtime/falco-raw.json',
                             'src/reports/runtime/falco-alerts.json',
                             'src/reports/runtime/falco-alerts.txt',
