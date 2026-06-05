@@ -120,24 +120,78 @@ def _extract_cvss(v: dict) -> str:
     return "—"
 
 
+def _zap_sites(data: dict) -> list[dict]:
+    site = data.get("site") if isinstance(data, dict) else None
+    if site is None:
+        site = data.get("sites") if isinstance(data, dict) else None
+    if isinstance(site, dict):
+        return [site]
+    if isinstance(site, list):
+        return [entry for entry in site if isinstance(entry, dict)]
+    return []
+
+
+def _zap_riskcode(alert: dict) -> int:
+    raw = alert.get("riskcode", alert.get("riskCode", 0))
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        riskdesc = str(alert.get("riskdesc", alert.get("riskDesc", ""))).strip().upper()
+        return {"HIGH": 3, "MEDIUM": 2, "LOW": 1, "INFORMATIONAL": 0, "INFO": 0}.get(riskdesc, 0)
+
+
+def _zap_safe_count(value, instances: list) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return len(instances) or 1
+
+
+def _zap_report_data(reports_dir: Path) -> dict:
+    """Prefer the filtered report when it contains alerts; fall back to raw."""
+    candidates = (
+        reports_dir / "zap" / "zap-report.filtered.json",
+        reports_dir / "zap" / "zap-report.json",
+    )
+    fallback = {"site": [{"alerts": []}]}
+    best_data = fallback
+    best_total = -1
+    for path in candidates:
+        data = load_json(path, fallback)
+        if not isinstance(data, dict):
+            continue
+        total = sum(len(site.get("alerts") or []) for site in _zap_sites(data))
+        if total > best_total:
+            best_total = total
+            best_data = data
+    return best_data
+
+
 def parse_zap(reports_dir: Path) -> dict:
-    data = load_json(reports_dir / "zap" / "zap-report.json",
-                     {"site": [{"alerts": []}]})
+    data = _zap_report_data(reports_dir)
     risk_map = {3: "HIGH", 2: "MEDIUM", 1: "LOW", 0: "INFO"}
     counts = {"HIGH": 0, "MEDIUM": 0, "LOW": 0, "INFO": 0}
     alerts = []
     target = ""
     zap_version = data.get("@version", "")
     generated   = data.get("@generated", "")
-    for site in data.get("site", []) or []:
+    seen_keys: set[str] = set()
+    for site in _zap_sites(data):
         if not target:
             target = site.get("@name", site.get("name", ""))
         for a in site.get("alerts", []) or []:
-            rc = int(a.get("riskcode", 0))
+            if not isinstance(a, dict):
+                continue
+            dedup_key = str(a.get("pluginid") or a.get("alertRef") or a.get("name") or a.get("alert") or "")
+            if dedup_key and dedup_key in seen_keys:
+                continue
+            if dedup_key:
+                seen_keys.add(dedup_key)
+            rc = _zap_riskcode(a)
             label = risk_map.get(rc, "INFO")
             counts[label] = counts.get(label, 0) + 1
             instances = a.get("instances") or []
-            urls = [i.get("uri", "") for i in instances[:3]]
+            urls = [i.get("uri", "") for i in instances[:3] if isinstance(i, dict)]
             alerts.append({
                 "name":       a.get("alert", a.get("name", "?")),
                 "risk":       label,
@@ -148,14 +202,15 @@ def parse_zap(reports_dir: Path) -> dict:
                 "reference":  (a.get("reference") or "")[:200],
                 "cweid":      a.get("cweid", ""),
                 "wascid":     a.get("wascid", ""),
-                "count":      int(a.get("count", len(instances) or 1)),
+                "count":      _zap_safe_count(a.get("count", len(instances) or 1), instances),
                 "confidence": a.get("confidence", ""),
             })
     alerts.sort(key=lambda x: -x["riskcode"])
+    total = sum(counts.values())
     return {
         "target":      target,
         "counts":      counts,
-        "total":       sum(counts.values()),
+        "total":       total,
         "alerts":      alerts,
         "zap_version": zap_version,
         "generated":   generated,
@@ -600,11 +655,11 @@ def render_zap(zap: dict) -> str:
             meta += f'<span style="margin-left:auto;color:var(--text-muted)">ZAP {zap["zap_version"]}</span>'
         meta += '</div>'
 
-    if not zap["alerts"]:
+    if zap.get("total", 0) <= 0 and not zap.get("alerts"):
         return meta + _empty("Aucune alerte DAST détectée ✓")
 
     cards = ""
-    for a in zap["alerts"]:
+    for a in zap.get("alerts", []):
         risk_color = {"HIGH":"#ef4444","MEDIUM":"#f97316","LOW":"#22c55e","INFO":"#3b82f6"}.get(a["risk"], "#64748b")
         urls_html = "".join(
             f'<div style="font-family:var(--mono);font-size:10px;color:var(--text-muted);'
@@ -1322,11 +1377,11 @@ def main():
 
     print()
     print("  Génération du HTML…")
-    html = build_html(
+    dashboard_html = build_html(
         gitleaks=gitleaks, trivy=trivy, zap=zap, sbom=sbom, opa=opa, falco=falco,
         sonar=sonar, project_name=args.project,
     )
-    output_path.write_text(html, encoding="utf-8")
+    output_path.write_text(dashboard_html, encoding="utf-8")
     print(f"  ✅ Dashboard généré : {output_path.resolve()}")
     print(f"     Taille           : {output_path.stat().st_size // 1024} Ko")
 

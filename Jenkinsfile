@@ -200,7 +200,14 @@ pipeline {
                 sh '''
                     cd "$PROJECT_DIR"
                     mkdir -p reports/runtime
+
+                    if ! docker ps --format '{{.Names}}' | grep -qx "$APP_CONTAINER"; then
+                        echo "WARNING: Container $APP_CONTAINER is not running — log collection may fail"
+                    fi
+
                     docker logs "$APP_CONTAINER" > reports/runtime/app-logs-raw.txt 2>&1 || true
+                    LOG_LINES=$(wc -l < reports/runtime/app-logs-raw.txt 2>/dev/null | tr -d ' ' || echo 0)
+                    echo "app-logs-raw.txt line count: ${LOG_LINES}"
 
                     docker run --rm --user "${JENKINS_UID}:${JENKINS_GID}" --volumes-from jenkins -w "$PROJECT_DIR" python:3.12-alpine \
                         python3 ci/scripts/analyze_app_logs.py \

@@ -310,14 +310,24 @@ def main() -> int:
     log_file = Path(sys.argv[1])
     out_file = Path(sys.argv[2])
 
-    lines: list[str] = []
-    if log_file.exists() and log_file.stat().st_size > 0:
+    line_count = 0
+    if not log_file.exists() or log_file.stat().st_size == 0:
+        alerts = [
+            make_alert(
+                "Log Collection Failed",
+                "app-logs-raw.txt is missing or empty — docker logs may have failed or ran before the app container produced output",
+                datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+                "WARNING",
+            )
+        ]
+    else:
         lines = log_file.read_text(encoding="utf-8-sig", errors="replace").splitlines()
+        line_count = len(lines)
+        alerts = analyze_logs(lines)
 
-    alerts = analyze_logs(lines)
     out_file.parent.mkdir(parents=True, exist_ok=True)
     out_file.write_text(json.dumps(alerts, indent=2), encoding="utf-8")
-    print(f"[Runtime] {len(alerts)} alert(s) detected from {len(lines)} log line(s)")
+    print(f"[Runtime] {len(alerts)} alert(s) detected from {line_count} log line(s)")
     return 0
 
 
