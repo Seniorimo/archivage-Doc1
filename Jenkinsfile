@@ -218,9 +218,9 @@ pipeline {
                         python3 -c "import json; print(len(json.load(open('reports/runtime/runtime-alerts.json', encoding='utf-8-sig'))))" 2>/dev/null || echo 0)
 
                     echo "======================================================"
-                    echo "   RUNTIME SECURITY — APP LOG ANALYSIS SUMMARY"
+                    echo "   RUNTIME SECURITY — APP LOG ANALYSIS"
                     echo "======================================================"
-                    echo "Runtime alerts on ${APP_CONTAINER}: ${ALERT_COUNT}"
+                    echo "App log alerts on ${APP_CONTAINER}: ${ALERT_COUNT}"
                     if [ "${ALERT_COUNT}" != "0" ]; then
                         echo "Sample (first alert):"
                         docker run --rm --user "${JENKINS_UID}:${JENKINS_GID}" --volumes-from jenkins -w "$PROJECT_DIR" python:3.12-alpine \

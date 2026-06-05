@@ -281,12 +281,9 @@ def _falco_event_row(evt: dict) -> dict:
     }
 
 
-def parse_falco(reports_dir: Path) -> dict:
-    """Load runtime security alerts from Spring Boot log analysis."""
-    json_path = reports_dir / "runtime" / "runtime-alerts.json"
+def _load_runtime_alert_events(json_path: Path) -> tuple[bool, list[dict]]:
     exists = json_path.exists()
     events: list[dict] = []
-
     if exists and json_path.stat().st_size > 0:
         data = load_json(json_path, [])
         if isinstance(data, list):
@@ -295,8 +292,13 @@ def parse_falco(reports_dir: Path) -> dict:
                     events.append(_falco_event_row(evt))
         elif isinstance(data, dict):
             events.append(_falco_event_row(data))
-
     events.sort(key=lambda e: e.get("time", ""), reverse=True)
+    return exists, events
+
+
+def parse_falco(reports_dir: Path) -> dict:
+    """Load runtime security alerts from Spring Boot log analysis."""
+    exists, events = _load_runtime_alert_events(reports_dir / "runtime" / "runtime-alerts.json")
     unique_rules = len({evt.get("rule", "") for evt in events if evt.get("rule")})
     return {
         "exists": exists,
@@ -747,6 +749,45 @@ def render_sbom(sbom: dict) -> str:
 </div>"""
 
 
+def _render_runtime_alert_table(events: list[dict], count: int, unique_count: int) -> str:
+    if count == 0:
+        return ""
+    rows = ""
+    for evt in events:
+        time_str = html.escape(evt.get("time", "—"))
+        sev = evt.get("severity", "UNKNOWN")
+        output = html.escape(evt.get("output", "—"))
+        rule = evt.get("rule", "")
+        rule_html = (
+            f'<div style="font-size:10px;color:var(--text-muted);margin-bottom:4px;'
+            f'font-family:var(--mono)">{html.escape(rule)}</div>'
+            if rule else ""
+        )
+        rows += f"""
+<tr>
+  <td style="vertical-align:top;white-space:nowrap;font-family:var(--mono);font-size:11px;color:var(--text-muted)">{time_str}</td>
+  <td style="vertical-align:top;width:100px">{_sev_pill(sev)}</td>
+  <td style="vertical-align:top">
+    {rule_html}
+    <div style="font-family:var(--mono);font-size:11px;line-height:1.5;word-break:break-word;color:#94a3b8">{output}</div>
+  </td>
+</tr>"""
+    return f"""
+<div class="report-info-bar">
+  <span>📋</span>
+  <span><strong>{count}</strong> alerte(s) · <strong>{unique_count}</strong> règle(s) distincte(s)</span>
+  <span style="margin-left:auto;color:#ef4444;font-weight:700">⚠ Investigation requise</span>
+</div>
+<div class="table-wrap">
+<table>
+<thead><tr>
+  <th>Heure</th><th>Sévérité</th><th>Output</th>
+</tr></thead>
+<tbody>{rows}</tbody>
+</table>
+</div>"""
+
+
 def render_falco(falco: dict) -> str:
     count = falco["count"]
     unique_count = falco.get("unique_count", count)
@@ -774,41 +815,7 @@ def render_falco(falco: dict) -> str:
             return hero + _empty("Fichier runtime-alerts.json absent — aucune analyse runtime enregistrée")
         return hero + _empty("Aucune alerte runtime détectée dans les logs application ✓")
 
-    rows = ""
-    for evt in falco.get("events", []):
-        time_str = html.escape(evt.get("time", "—"))
-        sev = evt.get("severity", "UNKNOWN")
-        output = html.escape(evt.get("output", "—"))
-        rule = evt.get("rule", "")
-        rule_html = (
-            f'<div style="font-size:10px;color:var(--text-muted);margin-bottom:4px;'
-            f'font-family:var(--mono)">{html.escape(rule)}</div>'
-            if rule else ""
-        )
-        rows += f"""
-<tr>
-  <td style="vertical-align:top;white-space:nowrap;font-family:var(--mono);font-size:11px;color:var(--text-muted)">{time_str}</td>
-  <td style="vertical-align:top;width:100px">{_sev_pill(sev)}</td>
-  <td style="vertical-align:top">
-    {rule_html}
-    <div style="font-family:var(--mono);font-size:11px;line-height:1.5;word-break:break-word;color:#94a3b8">{output}</div>
-  </td>
-</tr>"""
-
-    return hero + f"""
-<div class="report-info-bar">
-  <span>📋</span>
-  <span><strong>{count}</strong> alerte(s) · <strong>{unique_count}</strong> règle(s) distincte(s)</span>
-  <span style="margin-left:auto;color:#ef4444;font-weight:700">⚠ Investigation requise</span>
-</div>
-<div class="table-wrap">
-<table>
-<thead><tr>
-  <th>Heure</th><th>Sévérité</th><th>Output</th>
-</tr></thead>
-<tbody>{rows}</tbody>
-</table>
-</div>"""
+    return hero + _render_runtime_alert_table(falco.get("events", []), count, unique_count)
 
 
 def render_opa(opa: dict) -> str:
