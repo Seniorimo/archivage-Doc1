@@ -130,6 +130,10 @@ pipeline {
                     set -eu
                     cd "$PROJECT_DIR"
                     docker rm -f "$MYSQL_CONTAINER" "$APP_CONTAINER" >/dev/null 2>&1 || true
+<<<<<<< HEAD
+=======
+                    
+>>>>>>> b463ce3672c06c0a7f1e6587b431d16974cfe55f
                     docker run -d --name "$MYSQL_CONTAINER" --network "$NETWORK_NAME" -e MYSQL_ROOT_PASSWORD=root -e MYSQL_DATABASE=archivage_doc -e MYSQL_USER=archivage_user -e MYSQL_PASSWORD=archivage_pass mysql:8.0 >/dev/null
                     
                     for i in $(seq 1 30); do
@@ -202,7 +206,13 @@ pipeline {
                         docker volume rm "$ZAP_VOL" >/dev/null 2>&1 || true
 
                         test -s "reports/zap/zap-report.json" || echo '{"site":[{"alerts":[]}]}' > "reports/zap/zap-report.json"
+<<<<<<< HEAD
                         docker run --rm --user "${JENKINS_UID}:${JENKINS_GID}" -e IGNORE_TEST_APP_FINDINGS="$IGNORE_FINDINGS" --volumes-from jenkins -w "$PROJECT_DIR" python:3.12-alpine python ci/scripts/filter_zap.py || true
+=======
+                        
+                        docker run --rm --user "${JENKINS_UID}:${JENKINS_GID}" -e IGNORE_TEST_APP_FINDINGS="$IGNORE_FINDINGS" --volumes-from jenkins -w "$PROJECT_DIR" python:3.12-alpine python ci/scripts/filter_zap.py || true
+                        
+>>>>>>> b463ce3672c06c0a7f1e6587b431d16974cfe55f
                         docker run --rm --volumes-from jenkins -w "$PROJECT_DIR" python:3.12-alpine python ci/scripts/print_zap_summary.py reports/zap/zap-report.filtered.json || true
                     '''
                 }
@@ -224,15 +234,25 @@ pipeline {
             steps {
                 sh '''
                     cd "$PROJECT_DIR"
+<<<<<<< HEAD
                     # Force strict assessment environment to verify against OPA policy engine rules
                     docker run --rm --user "${JENKINS_UID}:${JENKINS_GID}" -e ENFORCE_GATE="true" --volumes-from jenkins -w "$PROJECT_DIR" python:3.12-alpine python ci/scripts/build_input.py || true
                     docker run --rm --volumes-from jenkins -w "$PROJECT_DIR" openpolicyagent/opa:latest eval --format pretty --data "ci/policy/security-gate.rego" --input "reports/opa/input.json" "data.security" | tee "reports/opa/opa-debug.txt" || true
                     docker run --rm --volumes-from jenkins -w "$PROJECT_DIR" openpolicyagent/opa:latest eval --format raw --data "ci/policy/security-gate.rego" --input "reports/opa/input.json" "data.security.allow" > "reports/opa/opa-result.txt" || true
+=======
+                    # Pass the ENFORCE_GATE parameter explicitly
+                    docker run --rm --user "${JENKINS_UID}:${JENKINS_GID}" -e ENFORCE_GATE="$ENFORCE_GATE" --volumes-from jenkins -w "$PROJECT_DIR" python:3.12-alpine python ci/scripts/build_input.py || true
+                    
+                    docker run --rm --volumes-from jenkins -w "$PROJECT_DIR" openpolicyagent/opa:latest eval --format pretty --data "ci/policy/security-gate.rego" --input "reports/opa/input.json" "data.security" | tee "reports/opa/opa-debug.txt" || true
+                    docker run --rm --volumes-from jenkins -w "$PROJECT_DIR" openpolicyagent/opa:latest eval --format raw --data "ci/policy/security-gate.rego" --input "reports/opa/input.json" "data.security.allow" > "reports/opa/opa-result.txt" || true
+                    docker run --rm --volumes-from jenkins -w "$PROJECT_DIR" openpolicyagent/opa:latest eval --format raw --data "ci/policy/security-gate.rego" --input "reports/opa/input.json" "data.security.thresholds_ok" > "reports/opa/opa-thresholds.txt" || true
+>>>>>>> b463ce3672c06c0a7f1e6587b431d16974cfe55f
                 '''
                 
                 script {
                     def allowOk = sh(script: 'cat "$PROJECT_DIR/reports/opa/opa-result.txt" || echo "false"', returnStdout: true).trim()
                     
+<<<<<<< HEAD
                     // Core Fix: Evaluates allow status directly and applies failure/unstable status based on parameters
                     if (allowOk != "true") {
                         if (params.ENFORCE_SECURITY_GATE) {
@@ -240,6 +260,13 @@ pipeline {
                         } else {
                             unstable("SECURITY VULNERABILITIES DETECTED : Build marked as UNSTABLE (Strict Mode is OFF)")
                         }
+=======
+                    // Logic to enforce STRICT mode
+                    if (params.ENFORCE_SECURITY_GATE == true && thresholdsOk != "true") {
+                        error("OPA SECURITY GATE : FAILED (Strict Mode is ON and Vulnerabilities detected)")
+                    } else if (thresholdsOk != "true") {
+                        unstable("SECURITY VULNERABILITIES DETECTED : Build marked as UNSTABLE (Strict Mode is OFF)")
+>>>>>>> b463ce3672c06c0a7f1e6587b431d16974cfe55f
                     } else {
                         echo "OPA SECURITY GATE : PASSED (No critical vulnerabilities detected)"
                     }
@@ -263,7 +290,11 @@ pipeline {
 
             sh '''
                 set +e
+<<<<<<< HEAD
                 docker rm -f "$APP_CONTAINER" "$MYSQL_CONTAINER" falco-runtime >/dev/null 2>&1 || true
+=======
+                docker rm -f "$APP_CONTAINER" "$MYSQL_CONTAINER" >/dev/null 2>&1 || true
+>>>>>>> b463ce3672c06c0a7f1e6587b431d16974cfe55f
                 docker network rm "$NETWORK_NAME" >/dev/null 2>&1 || true
                 docker run --rm -u 0:0 -v "$WORKSPACE:/ws" alpine:3.19 sh -c "chown -R ${JENKINS_UID}:${JENKINS_GID} /ws 2>/dev/null || true"
             '''
