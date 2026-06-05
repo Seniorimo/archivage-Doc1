@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Filter Falco JSON log lines for alerts targeting the application container."""
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -11,6 +12,8 @@ DOCKER_PRINT_SCRIPTS = (
     "print_sonar",
     "print_gitleaks",
 )
+
+INVALID_CONTAINER_IDS = {"", "<na>", "na", "null", "none", "host"}
 
 
 def load_container_id_prefix(id_file: Path) -> str | None:
@@ -27,7 +30,49 @@ def _field_str(fields: dict, key: str) -> str:
     value = fields.get(key)
     if value is None:
         return ""
-    return str(value)
+    return str(value).strip()
+
+
+def normalize_container_id(value: str) -> str:
+    cid = (value or "").strip().lower().removeprefix("sha256:")
+    if cid in INVALID_CONTAINER_IDS:
+        return ""
+    return cid
+
+
+def event_container_ids(evt: dict) -> list[str]:
+    fields = evt.get("output_fields") or {}
+    if not isinstance(fields, dict):
+        fields = {}
+
+    ids: list[str] = []
+    for key in ("container.id", "container.full_id", "container_id"):
+        normalized = normalize_container_id(_field_str(fields, key))
+        if normalized and normalized not in ids:
+            ids.append(normalized)
+
+    output = evt.get("output") or ""
+    for match in re.findall(r"\b[a-f0-9]{12,64}\b", output.lower()):
+        normalized = normalize_container_id(match)
+        if normalized and normalized not in ids:
+            ids.append(normalized)
+
+    return ids
+
+
+def container_id_matches_prefix(evt: dict, prefix: str) -> bool:
+    if not prefix:
+        return False
+
+    for cid in event_container_ids(evt):
+        if cid.startswith(prefix) or prefix.startswith(cid[:12]):
+            return True
+
+    output = (evt.get("output") or "").lower()
+    if prefix in output:
+        return True
+
+    return False
 
 
 def is_ci_noise(evt: dict, target: str) -> bool:
@@ -60,24 +105,22 @@ def is_ci_noise(evt: dict, target: str) -> bool:
 
 
 def event_matches_target(evt: dict, target: str, container_id_prefix: str | None) -> bool:
-    """Match only genuine app-archivage events (strict when container ID is known)."""
-    output = evt.get("output") or ""
+    """Match app-archivage events by container ID prefix (DinD-safe)."""
     fields = evt.get("output_fields") or {}
     if not isinstance(fields, dict):
         fields = {}
 
     if container_id_prefix:
-        container_id = _field_str(fields, "container.id").lower()
-        if container_id and container_id.startswith(container_id_prefix):
+        if container_id_matches_prefix(evt, container_id_prefix):
             return True
-        if _field_str(fields, "container.name") == target:
+        if normalize_container_id(_field_str(fields, "container.name")) == target.lower():
             return True
         return False
 
-    output_lower = output.lower()
-    if _field_str(fields, "container.name") == target:
+    output_lower = (evt.get("output") or "").lower()
+    if normalize_container_id(_field_str(fields, "container.name")) == target.lower():
         return True
-    if target in output or f"container={target}" in output:
+    if target in output_lower or f"container={target}" in output_lower:
         return True
 
     cmdline_lower = _field_str(fields, "proc.cmdline").lower()
@@ -105,7 +148,7 @@ def main() -> int:
 
     container_id_prefix = load_container_id_prefix(id_file)
     if container_id_prefix:
-        print(f"[Falco] Container ID prefix: {container_id_prefix} (strict match only)")
+        print(f"[Falco] Container ID prefix: {container_id_prefix} (match by container.id, any rule)")
     else:
         print("[Falco] No container ID file — using name/output/cmdline fallback")
 
