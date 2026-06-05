@@ -3,17 +3,15 @@
 import json
 import re
 import sys
-from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
-SQL_PATTERNS = (
-    re.compile(r"sql syntax", re.I),
-    re.compile(r"syntax error", re.I),
-    re.compile(r"ORA-\d+", re.I),
-    re.compile(r"mysql error", re.I),
-    re.compile(r"SQLState", re.I),
-    re.compile(r"bad SQL grammar", re.I),
+SQL_INJECTION_PATTERNS = (
+    re.compile(r"OR\s+'1'\s*=\s*'1'", re.I),
+    re.compile(r"OR\s+1\s*=\s*1", re.I),
+    re.compile(r"UNION\s+SELECT", re.I),
+    re.compile(r"DROP\s+TABLE", re.I),
+    re.compile(r"';?\s*--", re.I),
 )
 
 PATH_TRAVERSAL_PATTERNS = (
@@ -23,11 +21,13 @@ PATH_TRAVERSAL_PATTERNS = (
     re.compile(r"/proc/"),
 )
 
-STACK_TRACE_PATTERNS = (
-    re.compile(r"\bat com\.sun\b", re.I),
-    re.compile(r"\bat java\.", re.I),
-    re.compile(r"NullPointerException", re.I),
-    re.compile(r"StackOverflowError", re.I),
+STACK_FRAME_RE = re.compile(
+    r"^\s*at\s+(?:java\.|com\.|javax\.|org\.|sun\.|jdk\.|[a-zA-Z0-9_.$]+)",
+    re.I,
+)
+
+EXCEPTION_CLASS_RE = re.compile(
+    r"(?:Caused by:\s*)?(?:[a-zA-Z0-9_$]+\.)*([A-Z][a-zA-Z0-9_$]*(?:Exception|Error))\b"
 )
 
 HTTP_PATH_RE = re.compile(
@@ -46,7 +46,48 @@ def extract_time(line: str) -> str:
     match = TIME_RE.match(line.strip())
     if match:
         return match.group(1)
+    return ""
+
+
+def extract_time_from_context(lines: list[str], idx: int) -> str:
+    for j in range(idx, max(-1, idx - 10), -1):
+        match = TIME_RE.match(lines[j].strip())
+        if match:
+            return match.group(1)
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def is_primary_log_line(line: str) -> bool:
+    stripped = line.strip()
+    if TIME_RE.match(stripped):
+        return True
+    return bool(re.search(r"\b(?:INFO|DEBUG|WARN|WARNING|ERROR|TRACE)\b", stripped))
+
+
+def is_sql_injection_error_response(lines: list[str], idx: int) -> bool:
+    line = lines[idx]
+    if not (
+        re.search(r"JdbcSQLSyntaxErrorException", line, re.I)
+        or re.search(r"SQLSyntaxError", line, re.I)
+    ):
+        return False
+    window_text = " ".join(
+        lines[j].strip() for j in range(idx, min(len(lines), idx + 3))
+    )
+    if not (
+        re.search(r"OR\s+'", window_text, re.I)
+        or re.search(r"UNION", window_text, re.I)
+        or re.search(r"'='", window_text, re.I)
+    ):
+        return False
+    context = " ".join(
+        lines[j].strip() for j in range(max(0, idx - 2), min(len(lines), idx + 3))
+    )
+    return bool(
+        re.search(r"\bERROR\b", context, re.I)
+        or re.search(r"JdbcSQLSyntaxErrorException", context, re.I)
+        or re.search(r"SQLSyntaxError", context, re.I)
+    )
 
 
 def extract_path(line: str) -> str | None:
@@ -54,10 +95,41 @@ def extract_path(line: str) -> str | None:
         path = match.group(1) or match.group(2)
         if path and path.startswith("/"):
             return path.split("?")[0]
-    uri_match = re.search(r'uri=([^\s,]+)|path=([^\s,]+)', line, re.I)
+    uri_match = re.search(r"uri=([^\s,]+)|path=([^\s,]+)", line, re.I)
     if uri_match:
         return (uri_match.group(1) or uri_match.group(2)).split("?")[0]
     return None
+
+
+def extract_exception_class(line: str) -> str | None:
+    match = EXCEPTION_CLASS_RE.search(line)
+    return match.group(1) if match else None
+
+
+def is_stack_frame(line: str) -> bool:
+    return bool(STACK_FRAME_RE.match(line))
+
+
+def detect_grouped_stack_traces(lines: list[str]) -> list[tuple[int, int, str, str]]:
+    """Return (start_idx, end_idx, time, exception_short_name) for each stack trace block."""
+    blocks: list[tuple[int, int, str, str]] = []
+    i = 0
+    while i < len(lines):
+        if not is_stack_frame(lines[i]):
+            i += 1
+            continue
+        start = i
+        while i < len(lines) and is_stack_frame(lines[i]):
+            i += 1
+        end = i - 1
+        exc_name = None
+        for j in range(start - 1, max(-1, start - 15), -1):
+            exc_name = extract_exception_class(lines[j])
+            if exc_name:
+                break
+        time_val = extract_time_from_context(lines, start)
+        blocks.append((start, end, time_val, exc_name or "UnknownException"))
+    return blocks
 
 
 def make_alert(rule: str, output: str, time: str, priority: str = "WARNING") -> dict:
@@ -73,36 +145,76 @@ def analyze_logs(lines: list[str]) -> list[dict]:
     alerts: list[dict] = []
     seen: set[tuple[str, str]] = set()
 
-    def add(rule: str, output: str, time: str) -> None:
+    def add(rule: str, output: str, time: str, priority: str = "WARNING") -> None:
         key = (rule, output[:200])
         if key in seen:
             return
         seen.add(key)
-        alerts.append(make_alert(rule, output, time))
+        alerts.append(make_alert(rule, output, time, priority))
+
+    stack_blocks = detect_grouped_stack_traces(lines)
+    stack_line_indices = set()
+    exception_line_indices = set()
+    for start, end, time_val, exc_name in stack_blocks:
+        for idx in range(start, end + 1):
+            stack_line_indices.add(idx)
+        for j in range(start - 1, max(-1, start - 15), -1):
+            if extract_exception_class(lines[j]):
+                exception_line_indices.add(j)
+                break
+        add(
+            "Stack Trace Detected",
+            f"Stack Trace Detected: {exc_name}",
+            time_val,
+        )
 
     error_count = 0
     denied_paths: dict[str, str] = {}
+    sql_error_handled: set[int] = set()
 
-    for line in lines:
+    for idx, line in enumerate(lines):
         stripped = line.strip()
         if not stripped:
             continue
-        time_val = extract_time(stripped)
+        time_val = extract_time_from_context(lines, idx) if not extract_time(stripped) else extract_time(stripped)
 
-        for pattern in SQL_PATTERNS:
-            if pattern.search(stripped):
-                add("SQL Error Detected", stripped, time_val)
-                break
+        if idx not in stack_line_indices:
+            if is_primary_log_line(stripped) and any(
+                pattern.search(stripped) for pattern in SQL_INJECTION_PATTERNS
+            ):
+                add("SQL Injection Attempt", stripped, time_val, "CRITICAL")
 
-        for pattern in PATH_TRAVERSAL_PATTERNS:
-            if pattern.search(stripped):
-                add("Path Traversal Attempt", stripped, time_val)
-                break
+            if idx not in sql_error_handled and is_sql_injection_error_response(lines, idx):
+                window_parts: list[str] = []
+                for j in range(idx, min(len(lines), idx + 3)):
+                    if is_stack_frame(lines[j]):
+                        break
+                    part = lines[j].strip()
+                    if part:
+                        window_parts.append(part)
+                output = " ".join(window_parts)[:500]
+                add("SQL Injection Error Response", output, time_val, "CRITICAL")
+                for j in range(idx, min(len(lines), idx + 3)):
+                    sql_error_handled.add(j)
 
-        for pattern in STACK_TRACE_PATTERNS:
-            if pattern.search(stripped):
-                add("Stack Trace Detected", stripped, time_val)
-                break
+            for pattern in PATH_TRAVERSAL_PATTERNS:
+                if pattern.search(stripped):
+                    add("Path Traversal Attempt", stripped, time_val)
+                    break
+
+            exc_name = extract_exception_class(stripped)
+            if (
+                exc_name
+                and not is_stack_frame(stripped)
+                and idx not in exception_line_indices
+            ):
+                next_is_frame = idx + 1 < len(lines) and is_stack_frame(lines[idx + 1])
+                if not next_is_frame:
+                    add(
+                        "Stack Trace Detected",
+                        f"Stack Trace Detected: {exc_name}",
+                        time_val,
+                    )
 
         if re.search(r"\bException\b", stripped) or re.search(r"\bERROR\b", stripped):
             error_count += 1
