@@ -26,6 +26,7 @@ import argparse
 import html
 import json
 import os
+import re
 import sys
 import webbrowser
 import http.server
@@ -198,17 +199,127 @@ def parse_sbom(reports_dir: Path) -> dict:
     }
 
 
+FALCO_TS_PREFIX = re.compile(
+    r"^(?:\d{4}-\d{2}-\d{2}[T\s][^\s]+\s+|\d{1,2}:\d{2}:\d{2}(?:\.\d+)?:\s*)",
+    re.IGNORECASE,
+)
+FALCO_SEVERITY_RE = re.compile(
+    r"^(Critical|Warning|Error|Notice|Informational|Debug|Emergency|Alert)\s*:?\s*",
+    re.IGNORECASE,
+)
+FALCO_KV_RE = re.compile(
+    r"\b([a-z][a-z0-9_.]*)\s*=\s*([^)\s|]+(?:\([^)]*\))?[^)\s|]*)",
+    re.IGNORECASE,
+)
+
+
+def _normalize_falco_severity(value: str) -> str:
+    sev = (value or "UNKNOWN").strip().upper()
+    if sev == "INFORMATIONAL":
+        return "INFO"
+    return sev
+
+
+def _parse_falco_line(line: str) -> dict:
+    """Parse one Falco log line; fall back gracefully on malformed input."""
+    raw = line.strip()
+    if not raw:
+        return {
+            "severity": "UNKNOWN",
+            "message": "",
+            "metadata": "",
+            "raw": raw,
+            "dedup_key": "",
+        }
+
+    body = FALCO_TS_PREFIX.sub("", raw, count=1).strip()
+    severity = "UNKNOWN"
+    match = FALCO_SEVERITY_RE.match(body)
+    if match:
+        severity = _normalize_falco_severity(match.group(1))
+        body = body[match.end():].strip()
+    else:
+        for token in ("Critical", "Warning", "Error", "Notice", "Emergency", "Alert"):
+            idx = body.lower().find(token.lower())
+            if idx != -1 and idx < 40:
+                severity = _normalize_falco_severity(token)
+                body = (body[:idx] + body[idx + len(token):]).lstrip(" :")
+                break
+
+    message = body
+    metadata = ""
+    if " | " in body:
+        message, metadata = [part.strip() for part in body.split(" | ", 1)]
+    elif "(" in body and ")" in body:
+        open_idx = body.find("(")
+        message = body[:open_idx].strip()
+        metadata = body[open_idx:].strip()
+    else:
+        kv_hits = FALCO_KV_RE.findall(body)
+        if kv_hits:
+            first_kv = body.find(f"{kv_hits[0][0]}=")
+            if first_kv > 0:
+                message = body[:first_kv].strip()
+                metadata = body[first_kv:].strip()
+
+    if not message:
+        message = raw
+    if not metadata and message != raw:
+        metadata = raw[len(message):].strip(" |()")
+
+    dedup_key = re.sub(r"\s+", " ", f"{severity}|{message}|{metadata}".lower()).strip()
+    return {
+        "severity": severity,
+        "message": message,
+        "metadata": metadata,
+        "raw": raw,
+        "dedup_key": dedup_key or raw.lower(),
+    }
+
+
 def parse_falco(reports_dir: Path) -> dict:
     path = reports_dir / "runtime" / "falco-alerts.txt"
-    alerts = []
     exists = path.exists()
+    raw_lines: list[str] = []
+
     if exists and path.stat().st_size > 0:
         try:
-            text = path.read_text(encoding="utf-8")
-            alerts = [line.strip() for line in text.splitlines() if line.strip()]
+            text = path.read_text(encoding="utf-8-sig")
+            raw_lines = [
+                line.strip().lstrip("\ufeff")
+                for line in text.splitlines()
+                if line.strip()
+            ]
         except Exception as e:
             print(f"  [WARN] Impossible de lire {path}: {e}", file=sys.stderr)
-    return {"exists": exists, "count": len(alerts), "alerts": alerts}
+
+    grouped: dict[str, dict] = {}
+    for line in raw_lines:
+        parsed = _parse_falco_line(line)
+        key = parsed["dedup_key"]
+        if key not in grouped:
+            grouped[key] = {
+                "severity": parsed["severity"],
+                "message": parsed["message"],
+                "metadata": parsed["metadata"],
+                "count": 0,
+                "sample": parsed["raw"],
+            }
+        entry = grouped[key]
+        entry["count"] += 1
+        if len(parsed["raw"]) > len(entry.get("sample", "")):
+            entry["sample"] = parsed["raw"]
+
+    groups = sorted(grouped.values(), key=lambda g: (-g["count"], g["severity"], g["message"]))
+    total = len(raw_lines)
+    unique_count = len(groups)
+
+    return {
+        "exists": exists,
+        "count": total,
+        "unique_count": unique_count,
+        "groups": groups,
+    }
 
 
 def parse_opa(reports_dir: Path) -> dict:
@@ -409,7 +520,10 @@ def render_overview(gitleaks, trivy, zap, sbom, opa, falco) -> str:
             "Runtime (Falco)",
             falco["count"],
             "#ef4444" if falco["count"] > 0 else "#22c55e",
-            note="Alertes pendant l'attaque ZAP",
+            note=(
+                f"{falco.get('unique_count', falco['count'])} signature(s) unique(s)"
+                if falco["count"] > 0 else "Alertes pendant l'attaque ZAP"
+            ),
         ) +
         _stat_card("Composants", sbom["total"], "#3b82f6")
     )
@@ -651,14 +765,25 @@ def render_sbom(sbom: dict) -> str:
 </div>"""
 
 
+def _falco_hit_badge(count: int) -> str:
+    return (
+        f'<span style="background:rgba(239,68,68,0.15);color:#f87171;'
+        f'border:1px solid rgba(239,68,68,0.35);padding:3px 10px;border-radius:999px;'
+        f'font-size:11px;font-weight:800;font-family:var(--mono);white-space:nowrap">'
+        f"×{count}</span>"
+    )
+
+
 def render_falco(falco: dict) -> str:
     count = falco["count"]
+    unique_count = falco.get("unique_count", count)
+    groups = falco.get("groups", [])
     status_color = "#22c55e" if count == 0 else "#ef4444"
-    status_label = "CLEAN ✓" if count == 0 else f"{count} ALERT(S)"
+    status_label = "CLEAN ✓" if count == 0 else f"{count} EVENT(S)"
     status_desc = (
         "Aucune alerte runtime détectée pendant la phase d'attaque ZAP."
         if count == 0 else
-        "Falco a détecté des événements suspects pendant l'exécution de l'application."
+        f"{unique_count} signature(s) unique(s) regroupée(s) à partir de {count} événement(s) Falco."
     )
 
     hero = f"""
@@ -677,16 +802,41 @@ def render_falco(falco: dict) -> str:
             return hero + _empty("Fichier falco-alerts.txt absent — aucune alerte runtime enregistrée")
         return hero + _empty("Aucune alerte Falco détectée pendant la phase runtime ✓")
 
-    alert_text = html.escape("\n".join(falco["alerts"]))
+    rows = ""
+    for group in groups:
+        sev = group.get("severity", "UNKNOWN")
+        hits = group.get("count", 1)
+        message = html.escape(group.get("message", "—"))
+        metadata = html.escape(group.get("metadata", "") or group.get("sample", ""))
+        metadata_html = (
+            f'<div style="font-family:var(--mono);font-size:11px;color:#94a3b8;'
+            f'margin-top:6px;line-height:1.5;word-break:break-word">{metadata}</div>'
+            if metadata else ""
+        )
+        rows += f"""
+<tr>
+  <td style="vertical-align:top;width:110px">{_sev_pill(sev)}</td>
+  <td style="vertical-align:top;width:72px">{_falco_hit_badge(hits)}</td>
+  <td style="vertical-align:top">
+    <div style="font-size:13px;font-weight:600;color:var(--text)">{message}</div>
+    {metadata_html}
+  </td>
+</tr>"""
+
     return hero + f"""
 <div class="report-info-bar">
   <span>⚡</span>
-  <span><strong>{count}</strong> alerte(s) runtime détectée(s) pendant l'attaque ZAP</span>
+  <span><strong>{count}</strong> événement(s) · <strong>{unique_count}</strong> signature(s) unique(s)</span>
   <span style="margin-left:auto;color:#ef4444;font-weight:700">⚠ Investigation requise</span>
 </div>
-<pre style="background:rgba(0,0,0,0.3);border:1px solid var(--border);border-radius:8px;
-  padding:16px;font-family:var(--mono);font-size:11px;overflow-x:auto;
-  color:#94a3b8;line-height:1.6;white-space:pre-wrap;word-break:break-word">{alert_text}</pre>"""
+<div class="table-wrap">
+<table>
+<thead><tr>
+  <th>Sévérité</th><th>Occurrences</th><th>Message &amp; métadonnées runtime</th>
+</tr></thead>
+<tbody>{rows}</tbody>
+</table>
+</div>"""
 
 
 def render_opa(opa: dict) -> str:
@@ -1235,7 +1385,10 @@ def main():
 
     print("  [4/7] Falco Runtime…")
     falco = parse_falco(reports_dir)
-    print(f"        {falco['count']} alerte(s) runtime")
+    print(
+        f"        {falco['count']} événement(s) — "
+        f"{falco.get('unique_count', falco['count'])} signature(s) unique(s)"
+    )
 
     print("  [5/7] SBOM CycloneDX…")
     sbom = parse_sbom(reports_dir)

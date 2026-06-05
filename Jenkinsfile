@@ -223,15 +223,19 @@ pipeline {
             steps {
                 sh '''
                     cd "$PROJECT_DIR"
-                    docker logs falco-runtime 2>&1 | grep -E "Warning|Critical|Error" | cut -d '|' -f 1 > reports/runtime/falco-alerts.txt || true
-                    
+                    mkdir -p reports/runtime
+                    docker logs falco-runtime 2>&1 | grep -E "Warning|Critical|Error" > reports/runtime/falco-alerts.txt || true
+
                     echo "======================================================"
-                    echo "       FALCO ALERTS DETECTED DURING ZAP SCAN          "
+                    echo "   FALCO RUNTIME SECURITY — ZAP PHASE SUMMARY"
                     echo "======================================================"
                     if [ -s reports/runtime/falco-alerts.txt ]; then
-                        cat reports/runtime/falco-alerts.txt | awk '{print "🛡️  " $0}'
+                        ALERT_COUNT=$(wc -l < reports/runtime/falco-alerts.txt | tr -d ' ')
+                        echo "Total alerts captured (full metadata): ${ALERT_COUNT}"
+                        echo "Sample (first 5 lines):"
+                        head -n 5 reports/runtime/falco-alerts.txt | sed 's/^/  /'
                     else
-                        echo "✅ Aucune alerte détectée."
+                        echo "No runtime alerts detected."
                     fi
                     echo "======================================================"
                 '''
