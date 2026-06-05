@@ -2,6 +2,7 @@ target/
 reports/
 uploads/
 .trivycache/
+__pycache__/
 
 .env
 .env.*
@@ -9,3 +10,4 @@ uploads/
 
 *.log
 *.tmp
+*.pyc
