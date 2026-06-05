@@ -1,35 +1,50 @@
-# ci/falco/falco-rules.yaml
-- rule: Suspicious HTTP Response in App Container
-  desc: Detects unusual syscalls in app-archivage during ZAP scan
+# Custom Falco rules — scoped to app-archivage (DevSecOps demo / ZAP phase)
+# Requires Docker socket mounted at /var/run/docker.sock for container.name enrichment.
+
+- rule: Spawned Process in App Container
+  desc: Detects process spawn inside app-archivage during runtime monitoring
   condition: >
     spawned_process and
     container.name = "app-archivage"
   output: >
-    Suspicious process in app container
-    (user=%user.name cmd=%proc.cmdline container=%container.name
-     image=%container.image.repository parent=%proc.pname)
+    Process spawned in app container
+    (user=%user.name cmd=%proc.cmdline proc=%proc.name
+     container=%container.name image=%container.image.repository parent=%proc.pname)
   priority: WARNING
-  tags: [devsecops, zap]
+  tags: [devsecops, runtime]
+
+- rule: Shell Execution in App Container
+  desc: Detects shell execution inside app-archivage
+  condition: >
+    spawned_process and
+    container.name = "app-archivage" and
+    proc.name in (bash, sh, dash, ash, zsh)
+  output: >
+    Shell execution in app container
+    (user=%user.name cmd=%proc.cmdline proc=%proc.name container=%container.name)
+  priority: WARNING
+  tags: [devsecops, runtime]
 
 - rule: File Write in App Container
-  desc: Detects file writes inside app-archivage
+  desc: Detects file writes inside app-archivage excluding /proc
   condition: >
     open_write and
     container.name = "app-archivage" and
     not fd.name startswith "/proc"
   output: >
-    File write detected (file=%fd.name user=%user.name
-    cmd=%proc.cmdline container=%container.name)
+    File write in app container
+    (file=%fd.name user=%user.name cmd=%proc.cmdline
+     proc=%proc.name container=%container.name)
   priority: WARNING
-  tags: [devsecops, zap]
+  tags: [devsecops, runtime]
 
-- rule: Outbound Connection from App
-  desc: Detects unexpected outbound connections from app-archivage
+- rule: Outbound Connection from App Container
+  desc: Detects outbound network connections from app-archivage
   condition: >
     outbound and
     container.name = "app-archivage"
   output: >
-    Outbound connection (dest=%fd.rip:%fd.rport
-    cmd=%proc.cmdline container=%container.name)
+    Outbound connection from app container
+    (dest=%fd.rip:%fd.rport cmd=%proc.cmdline proc=%proc.name container=%container.name)
   priority: WARNING
-  tags: [devsecops, zap]
+  tags: [devsecops, runtime]

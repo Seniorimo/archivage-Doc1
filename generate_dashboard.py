@@ -11,7 +11,7 @@ Briques couvertes :
   • OWASP ZAP  — alertes DAST           (zap-report.json)
   • CycloneDX  — inventaire SBOM        (bom.json)
   • OPA        — résultat security gate  (opa-result.txt + input.json)
-  • Falco      — alertes runtime        (falco-alerts.json / falco-alerts.txt)
+  • Falco      — alertes runtime        (falco-alerts.json)
   • SonarQube  — qualité code           (API REST optionnelle)
 
 Usage :
@@ -338,6 +338,22 @@ def _parse_falco_line(line: str) -> dict:
     }
 
 
+def _falco_event_row(evt: dict) -> dict:
+    """Normalize one Falco JSON alert for dashboard display."""
+    time_val = evt.get("time") or evt.get("timestamp") or evt.get("@timestamp") or "—"
+    if isinstance(time_val, (int, float)):
+        try:
+            time_val = datetime.fromtimestamp(time_val, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        except Exception:
+            time_val = str(time_val)
+    return {
+        "time": str(time_val),
+        "output": (evt.get("output") or "").strip(),
+        "rule": (evt.get("rule") or "").strip(),
+        "severity": _normalize_falco_severity(str(evt.get("priority") or evt.get("severity") or "UNKNOWN")),
+    }
+
+
 def _group_falco_parsed_events(parsed_events: list[dict]) -> dict:
     grouped: dict[str, dict] = {}
     for parsed in parsed_events:
@@ -365,11 +381,11 @@ def _group_falco_parsed_events(parsed_events: list[dict]) -> dict:
 
 def parse_falco(reports_dir: Path) -> dict:
     json_path = reports_dir / "runtime" / "falco-alerts.json"
-    txt_path = reports_dir / "runtime" / "falco-alerts.txt"
-    exists = json_path.exists() or txt_path.exists()
+    exists = json_path.exists()
     parsed_events: list[dict] = []
+    events: list[dict] = []
 
-    if json_path.exists() and json_path.stat().st_size > 0:
+    if exists and json_path.stat().st_size > 0:
         try:
             data = json.loads(json_path.read_text(encoding="utf-8-sig"))
         except Exception as e:
@@ -378,22 +394,16 @@ def parse_falco(reports_dir: Path) -> dict:
         if isinstance(data, list):
             for evt in data:
                 if isinstance(evt, dict):
+                    events.append(_falco_event_row(evt))
                     parsed_events.append(_parse_falco_json_event(evt))
         elif isinstance(data, dict):
+            events.append(_falco_event_row(data))
             parsed_events.append(_parse_falco_json_event(data))
 
-    if not parsed_events and txt_path.exists() and txt_path.stat().st_size > 0:
-        try:
-            text = txt_path.read_text(encoding="utf-8-sig")
-            for line in text.splitlines():
-                line = line.strip().lstrip("\ufeff")
-                if line:
-                    parsed_events.append(_parse_falco_line(line))
-        except Exception as e:
-            print(f"  [WARN] Impossible de lire {txt_path}: {e}", file=sys.stderr)
-
+    events.sort(key=lambda e: e.get("time", ""), reverse=True)
     result = _group_falco_parsed_events(parsed_events)
     result["exists"] = exists
+    result["events"] = events
     return result
 
 
@@ -877,37 +887,54 @@ def render_falco(falco: dict) -> str:
             return hero + _empty("Fichier falco-alerts.json absent — aucune alerte runtime enregistrée")
         return hero + _empty("Aucune alerte Falco détectée pendant la phase runtime ✓")
 
+    events = falco.get("events", [])
     rows = ""
-    for group in groups:
-        sev = group.get("severity", "UNKNOWN")
-        hits = group.get("count", 1)
-        message = html.escape(group.get("message", "—"))
-        metadata = html.escape(group.get("metadata", "") or group.get("sample", ""))
-        metadata_html = (
-            f'<div style="font-family:var(--mono);font-size:11px;color:#94a3b8;'
-            f'margin-top:6px;line-height:1.5;word-break:break-word">{metadata}</div>'
-            if metadata else ""
-        )
-        rows += f"""
+    if events:
+        for evt in events:
+            time_str = html.escape(evt.get("time", "—"))
+            sev = evt.get("severity", "UNKNOWN")
+            output = html.escape(evt.get("output", "—"))
+            rule = evt.get("rule", "")
+            rule_html = (
+                f'<div style="font-size:10px;color:var(--text-muted);margin-bottom:4px;'
+                f'font-family:var(--mono)">{html.escape(rule)}</div>'
+                if rule else ""
+            )
+            rows += f"""
 <tr>
-  <td style="vertical-align:top;width:110px">{_sev_pill(sev)}</td>
-  <td style="vertical-align:top;width:72px">{_falco_hit_badge(hits)}</td>
+  <td style="vertical-align:top;white-space:nowrap;font-family:var(--mono);font-size:11px;color:var(--text-muted)">{time_str}</td>
+  <td style="vertical-align:top;width:100px">{_sev_pill(sev)}</td>
+  <td style="vertical-align:top">
+    {rule_html}
+    <div style="font-family:var(--mono);font-size:11px;line-height:1.5;word-break:break-word;color:#94a3b8">{output}</div>
+  </td>
+</tr>"""
+    else:
+        for group in groups:
+            sev = group.get("severity", "UNKNOWN")
+            hits = group.get("count", 1)
+            message = html.escape(group.get("message", "—"))
+            metadata = html.escape(group.get("metadata", "") or group.get("sample", ""))
+            rows += f"""
+<tr>
+  <td style="vertical-align:top">—</td>
+  <td style="vertical-align:top">{_sev_pill(sev)} {_falco_hit_badge(hits)}</td>
   <td style="vertical-align:top">
     <div style="font-size:13px;font-weight:600;color:var(--text)">{message}</div>
-    {metadata_html}
+    <div style="font-family:var(--mono);font-size:11px;color:#94a3b8;margin-top:4px">{metadata}</div>
   </td>
 </tr>"""
 
     return hero + f"""
 <div class="report-info-bar">
   <span>⚡</span>
-  <span><strong>{count}</strong> événement(s) · <strong>{unique_count}</strong> signature(s) unique(s)</span>
+  <span><strong>{count}</strong> événement(s) sur <strong>app-archivage</strong> · <strong>{unique_count}</strong> signature(s) unique(s)</span>
   <span style="margin-left:auto;color:#ef4444;font-weight:700">⚠ Investigation requise</span>
 </div>
 <div class="table-wrap">
 <table>
 <thead><tr>
-  <th>Sévérité</th><th>Occurrences</th><th>Message &amp; métadonnées runtime</th>
+  <th>Heure</th><th>Sévérité</th><th>Output (métadonnées runtime)</th>
 </tr></thead>
 <tbody>{rows}</tbody>
 </table>
