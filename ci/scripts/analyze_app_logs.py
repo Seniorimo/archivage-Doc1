@@ -141,6 +141,64 @@ def make_alert(rule: str, output: str, time: str, priority: str = "WARNING") -> 
     }
 
 
+def parse_alert_time(time_str: str) -> datetime | None:
+    raw = time_str.strip()
+    if raw.endswith(" UTC"):
+        raw = raw[:-4].strip()
+    if raw.endswith("Z"):
+        raw = f"{raw[:-1]}+00:00"
+    try:
+        dt = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def extract_sql_payload(output: str) -> str:
+    normalized = re.sub(r"\s+", " ", output).strip()
+    select_match = re.search(
+        r"SELECT\b.+?(?:OR\s+'1'\s*=\s*'1'|OR\s+1\s*=\s*1|UNION\s+SELECT|DROP\s+TABLE|';?\s*--)",
+        normalized,
+        re.I,
+    )
+    if select_match:
+        return re.sub(r"\s+", " ", select_match.group(0)).lower()
+    markers = []
+    for pattern in SQL_INJECTION_PATTERNS:
+        match = pattern.search(normalized)
+        if match:
+            markers.append(re.sub(r"\s+", " ", match.group(0)).lower())
+    return "|".join(sorted(set(markers))) if markers else normalized[:120].lower()
+
+
+def dedupe_near_duplicate_alerts(alerts: list[dict]) -> list[dict]:
+    """Drop later alerts with same rule, payload, and timestamp within 1 second."""
+    kept: list[dict] = []
+    for alert in alerts:
+        is_duplicate = False
+        alert_time = parse_alert_time(alert.get("time", ""))
+        alert_payload = extract_sql_payload(alert.get("output", ""))
+        for prior in kept:
+            if prior.get("rule") != alert.get("rule"):
+                continue
+            prior_payload = extract_sql_payload(prior.get("output", ""))
+            if not alert_payload or alert_payload != prior_payload:
+                continue
+            prior_time = parse_alert_time(prior.get("time", ""))
+            if alert_time and prior_time:
+                if abs((alert_time - prior_time).total_seconds()) <= 1:
+                    is_duplicate = True
+                    break
+            elif alert_payload == prior_payload:
+                is_duplicate = True
+                break
+        if not is_duplicate:
+            kept.append(alert)
+    return kept
+
+
 def analyze_logs(lines: list[str]) -> list[dict]:
     alerts: list[dict] = []
     seen: set[tuple[str, str]] = set()
@@ -241,7 +299,7 @@ def analyze_logs(lines: list[str]) -> list[dict]:
             )
         )
 
-    return alerts
+    return dedupe_near_duplicate_alerts(alerts)
 
 
 def main() -> int:
