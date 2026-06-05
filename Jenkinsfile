@@ -12,6 +12,7 @@ pipeline {
     parameters {
         booleanParam(name: 'ENFORCE_SECURITY_GATE', defaultValue: false, description: 'Strict mode: fail the build if the OPA security gate does not pass')
         booleanParam(name: 'IGNORE_TEST_APP_FINDINGS', defaultValue: false, description: 'Demo mode: ignore findings from /api/test/devsecops/* endpoints')
+        booleanParam(name: 'DEMO_FALCO_TEST', defaultValue: false, description: 'Demo: inject suspicious activity in app-archivage to validate Falco custom rules')
     }
 
     environment {
@@ -250,6 +251,26 @@ pipeline {
                         docker logs falco-runtime 2>&1 | head -20 || true
                     '''
                 }
+            }
+        }
+
+        stage('Demo - Inject Suspicious Activity') {
+            when {
+                expression { return params.DEMO_FALCO_TEST }
+            }
+            steps {
+                sh '''
+                    set +e
+                    echo "======================================================"
+                    echo "  DEMO FALCO — Injecting suspicious activity in ${APP_CONTAINER}"
+                    echo "  (Falco is running — expect Sensitive File Read / Unexpected Shell alerts)"
+                    echo "======================================================"
+                    docker exec "$APP_CONTAINER" sh -c "cat /etc/passwd" || true
+                    docker exec "$APP_CONTAINER" bash -c "id && whoami" || true
+                    sleep 2
+                    echo "Demo commands completed."
+                    echo "======================================================"
+                '''
             }
         }
 

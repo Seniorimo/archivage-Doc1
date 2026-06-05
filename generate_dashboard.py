@@ -348,6 +348,66 @@ def _falco_event_time(evt: dict) -> str:
     return str(time_val)
 
 
+def _load_app_container_id_prefix(reports_dir: Path) -> str | None:
+    id_file = reports_dir / "runtime" / "app-container-id.txt"
+    if not id_file.exists() or id_file.stat().st_size == 0:
+        return None
+    raw_id = id_file.read_text(encoding="utf-8-sig", errors="replace").strip()
+    raw_id = raw_id.removeprefix("sha256:")
+    return raw_id[:12].lower() if raw_id else None
+
+
+def _falco_event_source(evt: dict, app_id_prefix: str | None) -> str:
+    fields = evt.get("output_fields") or {}
+    if not isinstance(fields, dict):
+        fields = {}
+    cmdline = (fields.get("proc.cmdline") or "").lower()
+    output = (evt.get("output") or "").lower()
+    cname = (fields.get("container.name") or "").lower()
+    cid = (fields.get("container.id") or "").lower()
+
+    if cname == "app-archivage" or (app_id_prefix and cid.startswith(app_id_prefix)):
+        return "App"
+
+    zap_markers = ("selenium", "zap-baseline", "zaproxy", "zap-report", "owasp")
+    if any(marker in cmdline or marker in output for marker in zap_markers):
+        return "ZAP"
+
+    jenkins_markers = (
+        "jenkins",
+        "docker inspect",
+        "filter_zap",
+        "print_zap",
+        "print_trivy",
+        "print_sonar",
+        "print_gitleaks",
+        "docker logs",
+        "build_input",
+        "parse_falco",
+    )
+    if any(marker in cmdline or marker in output or marker in cname for marker in jenkins_markers):
+        return "Jenkins"
+
+    if "ping" in cmdline and "-c" in cmdline:
+        return "Healthcheck"
+
+    return "Autre"
+
+
+def _format_falco_source_label(sources: dict[str, int]) -> str:
+    if not sources:
+        return "—"
+    ordered = sorted(sources.items(), key=lambda item: (-item[1], item[0]))
+    return ", ".join(f"{name} ({count})" for name, count in ordered)
+
+
+def _raw_is_pipeline_noise_only(raw_events: list[dict], app_id_prefix: str | None) -> bool:
+    if not raw_events:
+        return False
+    ci_sources = {"ZAP", "Jenkins", "Healthcheck", "Autre"}
+    return all(_falco_event_source(evt, app_id_prefix) in ci_sources for evt in raw_events)
+
+
 def _load_falco_raw_events(reports_dir: Path) -> list[dict]:
     raw_path = reports_dir / "runtime" / "falco-raw.json"
     events: list[dict] = []
@@ -369,24 +429,31 @@ def _load_falco_raw_events(reports_dir: Path) -> list[dict]:
     return events
 
 
-def _summarize_raw_falco_by_rule(events: list[dict]) -> list[dict]:
+def _summarize_raw_falco_by_rule(events: list[dict], app_id_prefix: str | None) -> list[dict]:
     by_rule: dict[str, dict] = {}
     for evt in events:
         rule = (evt.get("rule") or "Unknown").strip() or "Unknown"
         time_val = _falco_event_time(evt)
         priority = evt.get("priority") or evt.get("severity") or "UNKNOWN"
+        source = _falco_event_source(evt, app_id_prefix)
         if rule not in by_rule:
             by_rule[rule] = {
                 "rule": rule,
                 "count": 0,
                 "priority": str(priority),
                 "first_seen": time_val,
+                "sources": {},
             }
         entry = by_rule[rule]
         entry["count"] += 1
+        entry["sources"][source] = entry["sources"].get(source, 0) + 1
         if time_val != "—" and (entry["first_seen"] == "—" or time_val < entry["first_seen"]):
             entry["first_seen"] = time_val
-    return sorted(by_rule.values(), key=lambda x: (-x["count"], x["rule"]))
+    results = []
+    for entry in by_rule.values():
+        entry["source"] = _format_falco_source_label(entry["sources"])
+        results.append(entry)
+    return sorted(results, key=lambda x: (-x["count"], x["rule"]))
 
 
 def _falco_event_row(evt: dict) -> dict:
@@ -431,7 +498,8 @@ def parse_falco(reports_dir: Path) -> dict:
     parsed_events: list[dict] = []
     events: list[dict] = []
     raw_events = _load_falco_raw_events(reports_dir)
-    raw_by_rule = _summarize_raw_falco_by_rule(raw_events)
+    app_id_prefix = _load_app_container_id_prefix(reports_dir)
+    raw_by_rule = _summarize_raw_falco_by_rule(raw_events, app_id_prefix)
 
     if json_path.exists() and json_path.stat().st_size > 0:
         try:
@@ -454,6 +522,7 @@ def parse_falco(reports_dir: Path) -> dict:
     result["events"] = events
     result["raw_total"] = len(raw_events)
     result["raw_by_rule"] = raw_by_rule
+    result["raw_ci_only"] = _raw_is_pipeline_noise_only(raw_events, app_id_prefix)
     return result
 
 
@@ -654,10 +723,18 @@ def render_overview(gitleaks, trivy, zap, sbom, opa, falco) -> str:
         _stat_card(
             "Runtime (Falco)",
             falco["count"],
-            "#ef4444" if falco["count"] > 0 else ("#f97316" if falco.get("raw_total", 0) > 0 else "#22c55e"),
+            "#ef4444" if falco["count"] > 0 else (
+                "#22c55e" if falco.get("raw_ci_only") else (
+                    "#f97316" if falco.get("raw_total", 0) > 0 else "#22c55e"
+                )
+            ),
             note=(
-                f"{falco.get('unique_count', falco['count'])} signature(s) · {falco.get('raw_total', 0)} bruts"
-                if falco.get("raw_total", 0) else "Alertes pendant l'attaque ZAP"
+                f"CI only ({falco.get('raw_total', 0)} bruts)"
+                if falco.get("raw_ci_only") and falco["count"] == 0 else
+                (
+                    f"{falco.get('unique_count', falco['count'])} signature(s) · {falco.get('raw_total', 0)} bruts"
+                    if falco.get("raw_total", 0) else "Alertes pendant l'attaque ZAP"
+                )
             ),
         ) +
         _stat_card("Composants", sbom["total"], "#3b82f6")
@@ -909,6 +986,40 @@ def _falco_hit_badge(count: int) -> str:
     )
 
 
+def _falco_source_pill(source: str) -> str:
+    colors = {
+        "App":         ("rgba(34,197,94,0.15)",  "#4ade80",  "rgba(34,197,94,0.35)"),
+        "ZAP":         ("rgba(249,115,22,0.15)", "#fb923c",  "rgba(249,115,22,0.35)"),
+        "Jenkins":     ("rgba(96,165,250,0.15)",  "#60a5fa",  "rgba(96,165,250,0.35)"),
+        "Healthcheck": ("rgba(148,163,184,0.15)", "#94a3b8",  "rgba(148,163,184,0.35)"),
+        "Autre":       ("rgba(148,163,184,0.15)", "#94a3b8",  "rgba(148,163,184,0.35)"),
+    }
+    c = colors.get(source, colors["Autre"])
+    return (
+        f'<span style="background:{c[0]};color:{c[1]};border:1px solid {c[2]};'
+        f'padding:2px 8px;border-radius:4px;font-size:10px;font-weight:700;'
+        f'font-family:var(--mono);white-space:nowrap">{html.escape(source)}</span>'
+    )
+
+
+def _render_falco_ci_info_box(falco: dict) -> str:
+    raw_total = falco.get("raw_total", 0)
+    if not falco.get("raw_ci_only") or falco.get("count", 0) > 0 or raw_total == 0:
+        return ""
+    return f"""
+<div style="background:rgba(59,130,246,0.1);border:1px solid rgba(59,130,246,0.35);
+  border-radius:10px;padding:20px 24px;margin-bottom:20px;display:flex;gap:16px;align-items:flex-start">
+  <div style="font-size:28px;line-height:1">ℹ️</div>
+  <div>
+    <div style="font-size:14px;font-weight:700;color:#60a5fa;margin-bottom:6px">Aucune activité suspecte sur app-archivage</div>
+    <div style="font-size:13px;color:var(--text-muted);line-height:1.6">
+      Les <strong>{raw_total}</strong> événements bruts proviennent du pipeline CI (ZAP/Jenkins) et sont des faux positifs normaux.
+      Le conteneur Spring Boot n'a généré aucun syscall correspondant aux règles de sécurité runtime.
+    </div>
+  </div>
+</div>"""
+
+
 def _render_falco_raw_overview(falco: dict) -> str:
     raw_total = falco.get("raw_total", 0)
     raw_by_rule = falco.get("raw_by_rule", [])
@@ -921,9 +1032,15 @@ def _render_falco_raw_overview(falco: dict) -> str:
         priority = _normalize_falco_severity(entry.get("priority", "UNKNOWN"))
         first_seen = html.escape(entry.get("first_seen", "—"))
         hits = entry.get("count", 0)
+        source_label = html.escape(entry.get("source", "—"))
+        source_parts = [part.strip() for part in source_label.split(",") if part.strip()]
+        source_html = " ".join(
+            _falco_source_pill(part.split(" (")[0]) for part in source_parts[:3]
+        ) if source_parts else "—"
         rows += f"""
 <tr>
   <td style="font-family:var(--mono);font-size:11px">{rule}</td>
+  <td style="width:120px">{source_html}</td>
   <td style="width:90px">{_falco_hit_badge(hits)}</td>
   <td style="width:110px">{_sev_pill(priority)}</td>
   <td style="font-family:var(--mono);font-size:11px;color:var(--text-muted);white-space:nowrap">{first_seen}</td>
@@ -941,7 +1058,7 @@ def _render_falco_raw_overview(falco: dict) -> str:
   <div class="table-wrap">
   <table>
   <thead><tr>
-    <th>Règle</th><th>Occurrences</th><th>Priorité</th><th>Première détection</th>
+    <th>Règle</th><th>Source</th><th>Occurrences</th><th>Priorité</th><th>Première détection</th>
   </tr></thead>
   <tbody>{rows}</tbody>
   </table>
@@ -952,10 +1069,13 @@ def _render_falco_raw_overview(falco: dict) -> str:
 def render_falco(falco: dict) -> str:
     count = falco["count"]
     raw_total = falco.get("raw_total", 0)
+    raw_ci_only = falco.get("raw_ci_only", False)
     unique_count = falco.get("unique_count", count)
     groups = falco.get("groups", [])
     if count > 0:
         status_color, status_label = "#ef4444", f"{count} EVENT(S)"
+    elif raw_ci_only and raw_total > 0:
+        status_color, status_label = "#22c55e", "CLEAN ✓"
     elif raw_total > 0:
         status_color, status_label = "#f97316", f"0 filtré / {raw_total} bruts"
     else:
@@ -965,9 +1085,13 @@ def render_falco(falco: dict) -> str:
         "Aucune alerte runtime détectée pendant la phase d'attaque ZAP."
         if count == 0 and raw_total == 0 else
         (
-            f"{unique_count} signature(s) filtrée(s) pour app-archivage · {raw_total} événement(s) bruts dans falco-raw.json."
-            if raw_total > 0 else
-            f"{unique_count} signature(s) unique(s) regroupée(s) à partir de {count} événement(s) Falco."
+            f"Aucune menace sur app-archivage · {raw_total} événement(s) CI (ZAP/Jenkins) ignorés."
+            if raw_ci_only and count == 0 else
+            (
+                f"{unique_count} signature(s) filtrée(s) pour app-archivage · {raw_total} événement(s) bruts dans falco-raw.json."
+                if raw_total > 0 else
+                f"{unique_count} signature(s) unique(s) regroupée(s) à partir de {count} événement(s) Falco."
+            )
         )
     )
 
@@ -975,7 +1099,7 @@ def render_falco(falco: dict) -> str:
 <div style="background:{status_color}11;border:1px solid {status_color}33;
   border-radius:10px;padding:24px 28px;margin-bottom:24px;
   display:flex;align-items:center;gap:20px">
-  <div style="font-size:48px;line-height:1">{"✅" if count == 0 and raw_total == 0 else ("🚨" if count > 0 else "⚠️")}</div>
+  <div style="font-size:48px;line-height:1">{"✅" if count == 0 else "🚨"}</div>
   <div>
     <div style="font-size:22px;font-weight:900;font-family:var(--mono);color:{status_color}">{status_label}</div>
     <div style="font-size:13px;color:var(--text-muted);margin-top:4px">{status_desc}</div>
@@ -989,12 +1113,12 @@ def render_falco(falco: dict) -> str:
 
     events = falco.get("events", [])
     rows = ""
-    filtered_section = ""
-    if count == 0 and raw_total > 0:
-        filtered_section = """
+    filtered_section = _render_falco_ci_info_box(falco)
+    if count == 0 and raw_total > 0 and not raw_ci_only:
+        filtered_section += """
 <div class="report-info-bar" style="margin-bottom:16px">
   <span>ℹ️</span>
-  <span>Aucun événement ne correspond aux critères app-archivage (container.id / output / cmdline). Consultez la vue globale ci-dessous.</span>
+  <span>Aucun événement ne correspond aux critères app-archivage (container.id strict). Consultez la vue globale ci-dessous.</span>
 </div>"""
     elif events:
         for evt in events:

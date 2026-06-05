@@ -1,50 +1,76 @@
-# Custom Falco rules — scoped to app-archivage (DevSecOps demo / ZAP phase)
-# Requires Docker socket mounted at /var/run/docker.sock for container.name enrichment.
+# Custom Falco rules — app-archivage Spring Boot under ZAP attack
+# Requires Docker socket at /var/run/docker.sock for container.name enrichment.
 
-- rule: Spawned Process in App Container
-  desc: Detects process spawn inside app-archivage during runtime monitoring
+- macro: app_archivage
+  condition: container.name = "app-archivage"
+
+- macro: sensitive_app_paths
+  condition: >
+    (fd.name in (/etc/passwd, /etc/shadow) or fd.name glob "/proc/*/environ")
+
+- macro: allowed_app_write_prefixes
+  condition: >
+    (fd.name startswith /app/ or fd.name startswith /app/uploads or
+     fd.name startswith /proc or fd.name startswith /dev/null or
+     fd.name startswith /dev/urandom or fd.name startswith /dev/random)
+
+- rule: SQL Client Spawned in App Container
+  desc: Detects mysql/mysqldump client spawned inside app-archivage (SQLi attempt)
   condition: >
     spawned_process and
-    container.name = "app-archivage"
+    app_archivage and
+    proc.name in (mysql, mysqldump)
   output: >
-    Process spawned in app container
+    SQL client spawned in app container
     (user=%user.name cmd=%proc.cmdline proc=%proc.name
-     container=%container.name image=%container.image.repository parent=%proc.pname)
+     container=%container.name image=%container.image.repository)
   priority: WARNING
-  tags: [devsecops, runtime]
+  tags: [devsecops, runtime, sqli]
 
-- rule: Shell Execution in App Container
-  desc: Detects shell execution inside app-archivage
+- rule: Sensitive File Read in App Container
+  desc: Detects reads of /etc/passwd, /etc/shadow or /proc/*/environ from app-archivage
+  condition: >
+    open_read and
+    app_archivage and
+    sensitive_app_paths
+  output: >
+    Sensitive file read in app container
+    (file=%fd.name user=%user.name cmd=%proc.cmdline proc=%proc.name container=%container.name)
+  priority: WARNING
+  tags: [devsecops, runtime, sensitive]
+
+- rule: Unexpected Shell in App Container
+  desc: Detects shell spawn inside app-archivage (RCE / post-exploitation)
   condition: >
     spawned_process and
-    container.name = "app-archivage" and
+    app_archivage and
     proc.name in (bash, sh, dash, ash, zsh)
   output: >
-    Shell execution in app container
-    (user=%user.name cmd=%proc.cmdline proc=%proc.name container=%container.name)
+    Shell spawned in app container
+    (user=%user.name cmd=%proc.cmdline proc=%proc.name parent=%proc.pname container=%container.name)
   priority: WARNING
-  tags: [devsecops, runtime]
+  tags: [devsecops, runtime, shell]
 
-- rule: File Write in App Container
-  desc: Detects file writes inside app-archivage excluding /proc
+- rule: Unexpected File Write in App Container
+  desc: Detects writes to /tmp or outside /app and /app/uploads in app-archivage
   condition: >
     open_write and
-    container.name = "app-archivage" and
-    not fd.name startswith "/proc"
+    app_archivage and
+    (fd.name startswith /tmp or not allowed_app_write_prefixes)
   output: >
-    File write in app container
-    (file=%fd.name user=%user.name cmd=%proc.cmdline
-     proc=%proc.name container=%container.name)
+    Unexpected file write in app container
+    (file=%fd.name user=%user.name cmd=%proc.cmdline proc=%proc.name container=%container.name)
   priority: WARNING
-  tags: [devsecops, runtime]
+  tags: [devsecops, runtime, filesystem]
 
-- rule: Outbound Connection from App Container
-  desc: Detects outbound network connections from app-archivage
+- rule: Outbound Connection Burst in App Container
+  desc: Detects rapid outbound connections from app-archivage (ZAP scan / SSRF pattern)
   condition: >
     outbound and
-    container.name = "app-archivage"
+    app_archivage and
+    evt.num(container.id) >= 5
   output: >
-    Outbound connection from app container
-    (dest=%fd.rip:%fd.rport cmd=%proc.cmdline proc=%proc.name container=%container.name)
+    Outbound connection burst from app container
+    (hits=%evt.num dest=%fd.rip:%fd.rport cmd=%proc.cmdline proc=%proc.name container=%container.name)
   priority: WARNING
-  tags: [devsecops, runtime]
+  tags: [devsecops, runtime, network]
