@@ -1,0 +1,13 @@
+- rule: Unauthorized Shell in Archivage App
+  desc: Detect any shell execution inside the main archiving container
+  condition: container.name == "app-archivage" and spawned_process and proc.name in (shell_procs)
+  output: "CRITICAL: Unauthorized Shell Spawned inside %container.name (user=%user.name cmd=%proc.cmdline)"
+  priority: CRITICAL
+  tags: [runtime, pfe_policy]
+
+- rule: Sensitive File Access Detected
+  desc: Detect when non-trusted processes try to read shadow or passwd
+  condition: container.name == "app-archivage" and open_read and fd.name in (/etc/shadow, /etc/passwd)
+  output: "WARNING: Sensitive file read attempt in %container.name (file=%fd.name cmd=%proc.cmdline)"
+  priority: WARNING
+  tags: [runtime, pfe_policy]
