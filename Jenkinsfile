@@ -89,6 +89,7 @@ pipeline {
                                 cd "$PROJECT_DIR"
                                 docker run --rm --user 0:0 -v trivy-cache-vol:/root/.cache/trivy --volumes-from jenkins -w "$PROJECT_DIR" \
                                     ghcr.io/aquasecurity/trivy:latest fs --no-progress --quiet \
+                                    --skip-dirs "target,reports,.git" \
                                     --db-repository public.ecr.aws/aquasecurity/trivy-db:2 \
                                     --java-db-repository public.ecr.aws/aquasecurity/trivy-java-db:1 \
                                     --scanners vuln --severity CRITICAL,HIGH,MEDIUM,LOW --format json \
@@ -152,6 +153,9 @@ pipeline {
                         if docker exec "$MYSQL_CONTAINER" mysqladmin ping -h 127.0.0.1 -uroot -proot --silent >/dev/null 2>&1; then break; fi
                         sleep 3
                     done
+                    if ! docker exec "$MYSQL_CONTAINER" mysqladmin ping -h 127.0.0.1 -uroot -proot --silent >/dev/null 2>&1; then
+                        exit 1
+                    fi
 
                     mkdir -p "$PROJECT_DIR/uploads"
                     docker run -d --name "$APP_CONTAINER" --network "$NETWORK_NAME" --restart on-failure:5 -v "$PROJECT_DIR/uploads:/app/uploads" -e SPRING_PROFILES_ACTIVE=docker -e SPRING_DATASOURCE_URL="jdbc:mysql://$MYSQL_CONTAINER:3306/archivage_doc?useUnicode=true&allowPublicKeyRetrieval=true&useSSL=false&serverTimezone=UTC" -e SPRING_DATASOURCE_USERNAME="archivage_user" -e SPRING_DATASOURCE_PASSWORD="archivage_pass" -e GITHUB_OAUTH_SECRET="test-secret" -e JWT_SECRET="404E635266556A586E3272357538782F413F4428472B4B6250645367566B5970" "$DOCKER_IMAGE" >/dev/null
@@ -161,6 +165,7 @@ pipeline {
                         if echo "$CODE" | grep -qE "200|301|302|401|403|404"; then exit 0; fi
                         sleep 5
                     done
+                    exit 1
                 '''
             }
         }
@@ -275,6 +280,7 @@ pipeline {
             sh '''
                 set +e
                 docker rm -f "$APP_CONTAINER" "$MYSQL_CONTAINER" >/dev/null 2>&1 || true
+                docker images --format "{{.Repository}}:{{.Tag}}" | grep "^archivage-app:" | grep -v "compose" | sort -t: -k2 -n | head -n -5 | xargs docker rmi -f 2>/dev/null || true
                 docker network rm "$NETWORK_NAME" >/dev/null 2>&1 || true
                 docker run --rm -u 0:0 -v "$WORKSPACE:/ws" alpine:3.19 sh -c "chown -R ${JENKINS_UID}:${JENKINS_GID} /ws 2>/dev/null || true"
             '''
