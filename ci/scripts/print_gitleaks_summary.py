@@ -20,31 +20,41 @@ def print_gitleaks_summary(report_path):
         with open(report_file, 'r', encoding='utf-8') as f:
             data = json.load(f)
         
+        # Gitleaks v8 JSON is a flat list of findings with PascalCase keys:
+        # RuleID, Description, File, StartLine, EndLine, StartColumn, EndColumn,
+        # Match, Secret, Commit, Author, Email, Date, Message, Tags, Entropy, Fingerprint.
+        # There is no "severity" field in the native gitleaks schema; classification
+        # is done downstream by OWASP/SAST tooling, not by gitleaks itself.
         if isinstance(data, list):
             findings = data
         else:
             findings = data.get('findings', [])
-        
+
         print("=== GITLEAKS SUMMARY ===")
         print(f"Total findings: {len(findings)}")
-        
+
         if findings:
-            # Compter par sévérité
-            severity_counts = {}
+            # Compter par règle (proxy de sévérité dans le format gitleaks natif).
+            rule_counts: dict[str, int] = {}
             for finding in findings:
-                severity = finding.get('severity', 'UNKNOWN')
-                severity_counts[severity] = severity_counts.get(severity, 0) + 1
-            
-            print("\nPar sévérité:")
-            for severity in sorted(severity_counts.keys(), reverse=True):
-                print(f"  {severity}: {severity_counts[severity]}")
-            
-            # Afficher les 5 premiers
+                rule_id = finding.get('RuleID', 'UNKNOWN')
+                rule_counts[rule_id] = rule_counts.get(rule_id, 0) + 1
+
+            print("\nPar règle (trié par fréquence):")
+            for rule_id, count in sorted(rule_counts.items(), key=lambda kv: kv[1], reverse=True):
+                print(f"  {rule_id}: {count}")
+
+            # Afficher les 5 premiers findings avec les clés PascalCase correctes.
             print("\nTop 5 findings:")
             for i, finding in enumerate(findings[:5], 1):
-                print(f"  {i}. {finding.get('description', 'N/A')}")
-                print(f"     Fichier: {finding.get('file', 'N/A')}")
-                print(f"     Règle: {finding.get('ruleID', 'N/A')}")
+                print(f"  {i}. {finding.get('Description', 'N/A')}")
+                print(f"     Rule    : {finding.get('RuleID', 'N/A')}")
+                print(f"     File    : {finding.get('File', 'N/A')}")
+                print(f"     Line    : {finding.get('StartLine', '?')}")
+                secret = finding.get('Secret', '') or ''
+                if secret:
+                    snippet = secret.replace('\n', '\\n')[:60]
+                    print(f"     Secret  : {snippet}{'...' if len(secret) > 60 else ''}")
         else:
             print("Aucun secret détecté ✓")
             

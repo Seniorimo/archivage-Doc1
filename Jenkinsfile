@@ -72,10 +72,23 @@ pipeline {
                     steps {
                         catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
                             sh '''
+                                set -euo pipefail
                                 cd "$PROJECT_DIR"
-                                docker run --rm --volumes-from jenkins -w "$PROJECT_DIR" zricethezav/gitleaks:latest detect --source . --log-opts="--all" --report-format json --report-path reports/gitleaks/gitleaks-raw.json --exit-code 0 || true
-                                docker run --rm --user "${JENKINS_UID}:${JENKINS_GID}" -e IGNORE_TEST_APP_FINDINGS="$IGNORE_FINDINGS" --volumes-from jenkins -w "$PROJECT_DIR" python:3.12-alpine python ci/scripts/filter_gitleaks.py || true
+                                # HEAD~1..HEAD = delta incrémental (CI rapide). Le --all reste
+                                # réservé aux audits/forensique via un stage dédié hors PR.
+                                # Garde anti-écrasement: si HEAD~1 n'existe pas (premier commit
+                                # d'une nouvelle branche ou shallow clone), on scanne HEAD seul
+                                # plutôt que de laisser gitleaks échouer.
+                                if git rev-parse HEAD~1 >/dev/null 2>&1; then
+                                    LOG_OPTS="HEAD~1..HEAD"
+                                else
+                                    LOG_OPTS="HEAD"
+                                fi
+                                docker run --rm --volumes-from jenkins -w "$PROJECT_DIR" zricethezav/gitleaks:latest detect --source . --log-opts="$LOG_OPTS" --report-format json --report-path reports/gitleaks/gitleaks-raw.json --exit-code 0
+                                docker run --rm --user "${JENKINS_UID}:${JENKINS_GID}" -e IGNORE_TEST_APP_FINDINGS="$IGNORE_FINDINGS" --volumes-from jenkins -w "$PROJECT_DIR" python:3.12-alpine python ci/scripts/filter_gitleaks.py
                                 test -s reports/gitleaks/gitleaks-report.json || echo "[]" > reports/gitleaks/gitleaks-report.json
+                                # Le print summary reste cosmétique: on ne veut pas faire échouer
+                                # le stage à cause d'un problème d'affichage de résumé.
                                 docker run --rm --volumes-from jenkins -w "$PROJECT_DIR" python:3.12-alpine python ci/scripts/print_gitleaks_summary.py reports/gitleaks/gitleaks-report.json || true
                             '''
                         }
@@ -86,22 +99,28 @@ pipeline {
                     steps {
                         catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
                             sh '''
+                                set -euo pipefail
                                 cd "$PROJECT_DIR"
+                                # trivy fs et trivy image sont des scanners critiques:
+                                # on les laisse remonter un vrai exit code pour que
+                                # catchError transforme l'échec en UNSTABLE.
                                 docker run --rm --user 0:0 -v trivy-cache-vol:/root/.cache/trivy --volumes-from jenkins -w "$PROJECT_DIR" \
                                     ghcr.io/aquasecurity/trivy:latest fs --no-progress --quiet \
                                     --skip-dirs "target,reports,.git" \
                                     --db-repository public.ecr.aws/aquasecurity/trivy-db:2 \
                                     --java-db-repository public.ecr.aws/aquasecurity/trivy-java-db:1 \
                                     --scanners vuln --severity CRITICAL,HIGH,MEDIUM,LOW --format json \
-                                    --output reports/trivy/trivy-fs-report.json . 2> reports/trivy/trivy-fs.stderr.log || true
+                                    --output reports/trivy/trivy-fs-report.json . 2> reports/trivy/trivy-fs.stderr.log
                                 
                                 docker run --rm --user 0:0 -v /var/run/docker.sock:/var/run/docker.sock -v trivy-cache-vol:/root/.cache/trivy --volumes-from jenkins -w "$PROJECT_DIR" \
                                     ghcr.io/aquasecurity/trivy:latest image --no-progress --quiet \
                                     --db-repository public.ecr.aws/aquasecurity/trivy-db:2 \
                                     --java-db-repository public.ecr.aws/aquasecurity/trivy-java-db:1 \
                                     --scanners vuln --severity CRITICAL,HIGH,MEDIUM,LOW --format json \
-                                    --output reports/trivy/trivy-report.json "$DOCKER_IMAGE" 2> reports/trivy/trivy.stderr.log || true
+                                    --output reports/trivy/trivy-report.json "$DOCKER_IMAGE" 2> reports/trivy/trivy.stderr.log
                                 
+                                # Le chown, le fallback JSON vide et le print_summary restent
+                                # cosmétiques: ils ne doivent pas faire échouer le stage.
                                 chown -R "${JENKINS_UID}:${JENKINS_GID}" reports/trivy || true
                                 test -s reports/trivy/trivy-report.json || echo '{"Results":[]}' > reports/trivy/trivy-report.json
                                 docker run --rm --volumes-from jenkins -w "$PROJECT_DIR" python:3.12-alpine python ci/scripts/print_trivy_summary.py reports/trivy/trivy-report.json || true
@@ -115,9 +134,13 @@ pipeline {
                         catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
                             withSonarQubeEnv("sonar") {
                                 sh '''
+                                    set -euo pipefail
                                     cd "$PROJECT_DIR"
-                                    docker run --rm --user "${JENKINS_UID}:${JENKINS_GID}" --network "$NETWORK_NAME" --volumes-from jenkins --add-host=host.docker.internal:host-gateway -w "$PROJECT_DIR" maven:3.9.9-eclipse-temurin-17 mvn -B -f pom.xml -Dmaven.repo.local="$MAVEN_REPO" org.sonarsource.scanner.maven:sonar-maven-plugin:4.0.0.4121:sonar -DskipTests -Dsonar.projectKey="$APP_NAME" -Dsonar.host.url="$SONAR_DOCKER_URL" -Dsonar.login="$SONAR_AUTH_TOKEN" -Dsonar.java.binaries="target/classes" -Dsonar.qualitygate.wait=false || true
+                                    # Scanner critique: on laisse remonter l'échec du runner Maven/Sonar.
+                                    docker run --rm --user "${JENKINS_UID}:${JENKINS_GID}" --network "$NETWORK_NAME" --volumes-from jenkins --add-host=host.docker.internal:host-gateway -w "$PROJECT_DIR" maven:3.9.9-eclipse-temurin-17 mvn -B -f pom.xml -Dmaven.repo.local="$MAVEN_REPO" org.sonarsource.scanner.maven:sonar-maven-plugin:4.0.0.4121:sonar -DskipTests -Dsonar.projectKey="$APP_NAME" -Dsonar.host.url="$SONAR_DOCKER_URL" -Dsonar.login="$SONAR_AUTH_TOKEN" -Dsonar.java.binaries="target/classes" -Dsonar.qualitygate.wait=false
+                                    # Fallback JSON vide si l'API Sonar ne répond pas: cosmétique, protégé par ||.
                                     docker run --rm --network "$NETWORK_NAME" --volumes-from jenkins --add-host=host.docker.internal:host-gateway -w "$PROJECT_DIR" curlimages/curl:8.7.1 curl -sf -u "$SONAR_AUTH_TOKEN:" "$SONAR_DOCKER_URL/api/issues/search?componentKeys=$APP_NAME&types=VULNERABILITY&severities=BLOCKER,CRITICAL,MAJOR,MINOR,INFO&p=1&ps=100" -o "reports/sonar/sonar-vulnerabilities.json" || echo '{"issues":[],"total":0}' > "reports/sonar/sonar-vulnerabilities.json"
+                                    # Print summary cosmétique uniquement.
                                     docker run --rm --volumes-from jenkins -w "$PROJECT_DIR" python:3.12-alpine python ci/scripts/print_sonar_summary.py reports/sonar/sonar-vulnerabilities.json || true
                                 '''
                             }
@@ -129,8 +152,11 @@ pipeline {
                     steps {
                         catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
                             sh '''
+                                set -euo pipefail
                                 cd "$PROJECT_DIR"
-                                docker run --rm --user "${JENKINS_UID}:${JENKINS_GID}" --volumes-from jenkins -w "$PROJECT_DIR" maven:3.9.9-eclipse-temurin-17 mvn -B -f pom.xml -Dmaven.repo.local="$MAVEN_REPO" org.cyclonedx:cyclonedx-maven-plugin:2.7.11:makeAggregateBom -DoutputFormat=all || true
+                                # Génération du SBOM: critique, doit remonter un échec.
+                                docker run --rm --user "${JENKINS_UID}:${JENKINS_GID}" --volumes-from jenkins -w "$PROJECT_DIR" maven:3.9.9-eclipse-temurin-17 mvn -B -f pom.xml -Dmaven.repo.local="$MAVEN_REPO" org.cyclonedx:cyclonedx-maven-plugin:2.7.11:makeAggregateBom -DoutputFormat=all
+                                # Copies d'artefacts: si le bom n'existe pas, on accepte de continuer.
                                 cp -f target/bom.xml reports/sbom/bom.xml || true
                                 cp -f target/bom.json reports/sbom/bom.json || true
                             '''
@@ -174,26 +200,34 @@ pipeline {
             steps {
                 catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
                     sh '''
+                        set -euo pipefail
                         cd "$PROJECT_DIR"
+                        # Préparation du dossier: cosmétique, mkdir -p idempotent.
                         mkdir -p reports/zap
-                        chmod 777 reports/zap
+                        chmod 777 reports/zap || true
 
                         ZAP_VOL="zap-reports-$$"
                         docker volume create "$ZAP_VOL" >/dev/null
 
+                        # Scanner critique: on laisse remonter l'exit code de zap-baseline.py
+                        # (le || true à l'intérieur du bash sert uniquement pour le chown final).
                         docker run --rm --user root --network "$NETWORK_NAME" -e HOME=/zap -v "${ZAP_VOL}:/zap/wrk:rw" ghcr.io/zaproxy/zaproxy:stable bash -c '
                             set -o pipefail
                             umask 0002
                             zap-baseline.py -t "http://app-archivage:8090/" -J zap-report.json -r zap-report.html -a -I 2>&1 | tee /zap/wrk/zap-baseline.log
                             echo ${PIPESTATUS[0]} > /zap/wrk/zap-exit-code.txt
                             chown -R '"${JENKINS_UID}:${JENKINS_GID}"' /zap/wrk || true
-                        ' || true
+                        '
 
+                        # Copie d'artefacts depuis le volume: cosmétique (|| true à l'intérieur du sh).
                         docker run --rm --volumes-from jenkins -v "${ZAP_VOL}:/zap/wrk:ro" alpine:3.19 sh -c "cp -f /zap/wrk/* $PROJECT_DIR/reports/zap/ 2>/dev/null || true"
                         docker volume rm "$ZAP_VOL" >/dev/null 2>&1 || true
 
+                        # Fallback JSON vide: cosmétique, protégé par ||.
                         test -s "reports/zap/zap-report.json" || echo '{"site":[{"alerts":[]}]}' > "reports/zap/zap-report.json"
-                        docker run --rm --user "${JENKINS_UID}:${JENKINS_GID}" -e IGNORE_TEST_APP_FINDINGS="$IGNORE_FINDINGS" --volumes-from jenkins -w "$PROJECT_DIR" python:3.12-alpine python ci/scripts/filter_zap.py || true
+                        # filter_zap.py est critique: on le laisse faire échouer le stage.
+                        docker run --rm --user "${JENKINS_UID}:${JENKINS_GID}" -e IGNORE_TEST_APP_FINDINGS="$IGNORE_FINDINGS" --volumes-from jenkins -w "$PROJECT_DIR" python:3.12-alpine python ci/scripts/filter_zap.py
+                        # Print summary cosmétique uniquement.
                         docker run --rm --volumes-from jenkins -w "$PROJECT_DIR" python:3.12-alpine python ci/scripts/print_zap_summary.py reports/zap/zap-report.filtered.json || true
                     '''
                 }
@@ -271,7 +305,7 @@ pipeline {
                     sh '''
                         set +e
                         cd "$PROJECT_DIR"
-                        docker run --rm --user "${JENKINS_UID}:${JENKINS_GID}" --network "$NETWORK_NAME" --volumes-from jenkins --add-host=host.docker.internal:host-gateway -e SONAR_HOST_URL="$SONAR_DOCKER_URL" -e SONAR_AUTH_TOKEN="$SONAR_AUTH_TOKEN" -w "$PROJECT_DIR" python:3.12-alpine python ci/scripts/generate_dashboard.py --reports reports --output reports/dashboard/security-dashboard.html --project "$APP_NAME" --sonar-url "$SONAR_DOCKER_URL" --sonar-token "$SONAR_AUTH_TOKEN" --sonar-project "$APP_NAME" || true
+                        docker run --rm --user "${JENKINS_UID}:${JENKINS_GID}" --network "$NETWORK_NAME" --volumes-from jenkins --add-host=host.docker.internal:host-gateway -e SONAR_HOST_URL="$SONAR_DOCKER_URL" -e SONAR_AUTH_TOKEN="$SONAR_AUTH_TOKEN" -w "$PROJECT_DIR" python:3.12-alpine python generate_dashboard.py --reports reports --output reports/dashboard/security-dashboard.html --project "$APP_NAME" --sonar-url "$SONAR_DOCKER_URL" --sonar-token "$SONAR_AUTH_TOKEN" --sonar-project "$APP_NAME" || true
                         docker run --rm --user "${JENKINS_UID}:${JENKINS_GID}" --volumes-from jenkins -w "$PROJECT_DIR" python:3.12-alpine python ci/scripts/patch_csp.py reports/dashboard/security-dashboard.html || true
                     '''
                 }
