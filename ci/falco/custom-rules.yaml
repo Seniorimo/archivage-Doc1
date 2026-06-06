@@ -1,0 +1,80 @@
+# Custom Falco rules — runtime detection (container-scoped, DinD-safe)
+# container.name is often <NA> in DinD; app filtering is done in parse_falco.py via container.id.
+
+- macro: tracked_container
+  condition: container.id != ""
+
+- macro: sensitive_app_paths
+  condition: >
+    (fd.name in (/etc/passwd, /etc/shadow) or fd.name glob "/proc/*/environ")
+
+- macro: allowed_app_write_prefixes
+  condition: >
+    (fd.name startswith /app/ or fd.name startswith /app/uploads or
+     fd.name startswith /proc or fd.name startswith /dev/null or
+     fd.name startswith /dev/urandom or fd.name startswith /dev/random)
+
+- rule: SQL Client Spawned in App Container
+  desc: Detects mysql/mysqldump client spawned inside a container (SQLi attempt)
+  condition: >
+    spawned_process and
+    tracked_container and
+    proc.name in (mysql, mysqldump)
+  output: >
+    SQL client spawned in app container
+    (user=%user.name cmd=%proc.cmdline proc=%proc.name
+     container_id=%container.id container=%container.name image=%container.image.repository)
+  priority: WARNING
+  tags: [devsecops, runtime, sqli]
+
+- rule: Sensitive File Read in App Container
+  desc: Detects reads of /etc/passwd, /etc/shadow or /proc/*/environ from a container
+  condition: >
+    open_read and
+    tracked_container and
+    sensitive_app_paths
+  output: >
+    Sensitive file read in app container
+    (file=%fd.name user=%user.name cmd=%proc.cmdline proc=%proc.name
+     container_id=%container.id container=%container.name)
+  priority: WARNING
+  tags: [devsecops, runtime, sensitive]
+
+- rule: Unexpected Shell in App Container
+  desc: Detects shell spawn inside a container (RCE / post-exploitation)
+  condition: >
+    spawned_process and
+    tracked_container and
+    proc.name in (bash, sh, dash, ash, zsh)
+  output: >
+    Shell spawned in app container
+    (user=%user.name cmd=%proc.cmdline proc=%proc.name parent=%proc.pname
+     container_id=%container.id container=%container.name)
+  priority: WARNING
+  tags: [devsecops, runtime, shell]
+
+- rule: Unexpected File Write in App Container
+  desc: Detects writes to /tmp or outside /app and /app/uploads in a container
+  condition: >
+    open_write and
+    tracked_container and
+    (fd.name startswith /tmp or not allowed_app_write_prefixes)
+  output: >
+    Unexpected file write in app container
+    (file=%fd.name user=%user.name cmd=%proc.cmdline proc=%proc.name
+     container_id=%container.id container=%container.name)
+  priority: WARNING
+  tags: [devsecops, runtime, filesystem]
+
+- rule: Outbound Connection Burst in App Container
+  desc: Detects rapid outbound connections from a container (ZAP scan / SSRF pattern)
+  condition: >
+    outbound and
+    tracked_container and
+    evt.num(container.id) >= 5
+  output: >
+    Outbound connection burst from app container
+    (hits=%evt.num dest=%fd.rip:%fd.rport cmd=%proc.cmdline proc=%proc.name
+     container_id=%container.id container=%container.name)
+  priority: WARNING
+  tags: [devsecops, runtime, network]

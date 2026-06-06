@@ -7,23 +7,26 @@ produits par le pipeline DevSecOps (Jenkins / GitHub Actions).
 
 Briques couvertes :
   • Gitleaks   — secrets détectés        (gitleaks-report.json)
-  • Trivy      — vulnérabilités SCA/FS   (trivy-report.json)
+  • Trivy      — vulnérabilités SCA      (trivy-report.json + trivy-fs-report.json)
   • OWASP ZAP  — alertes DAST           (zap-report.json)
   • CycloneDX  — inventaire SBOM        (bom.json)
   • OPA        — résultat security gate  (opa-result.txt + input.json)
+  • Runtime    — analyse logs app     (runtime-alerts.json)
   • SonarQube  — qualité code           (API REST optionnelle)
 
 Usage :
-  python generate_dashboard.py
-  python generate_dashboard.py --reports ./my-reports
-  python generate_dashboard.py --reports ./r --sonar-url http://localhost:9000 \\
+  python ci/scripts/generate_dashboard.py
+  python ci/scripts/generate_dashboard.py --reports ./my-reports
+  python ci/scripts/generate_dashboard.py --reports ./r --sonar-url http://localhost:9000 \\
          --sonar-token squ_xxx --sonar-project archivage-Doc
-  python generate_dashboard.py --serve
+  python ci/scripts/generate_dashboard.py --serve
 """
 
 import argparse
+import html
 import json
 import os
+import re
 import sys
 import webbrowser
 import http.server
@@ -67,15 +70,14 @@ def parse_gitleaks(reports_dir: Path) -> dict:
     return {"count": len(findings), "findings": findings}
 
 
-def parse_trivy(reports_dir: Path) -> dict:
-    data = load_json(reports_dir / "trivy" / "trivy-report.json", {"Results": []})
+def _parse_trivy_data(data: dict) -> dict:
     sev_counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "UNKNOWN": 0}
     vulns = []
     targets_seen = set()
     targets = []
     for result in data.get("Results", []) or []:
         target = result.get("Target", "")
-        rtype  = result.get("Type", "")
+        rtype = result.get("Type", "")
         if target not in targets_seen:
             targets_seen.add(target)
             targets.append({"target": target, "type": rtype})
@@ -84,15 +86,15 @@ def parse_trivy(reports_dir: Path) -> dict:
             sev_counts[sev] = sev_counts.get(sev, 0) + 1
             refs = v.get("References", []) or []
             vulns.append({
-                "id":          v.get("VulnerabilityID", "?"),
-                "pkg":         v.get("PkgName", "?"),
-                "installed":   v.get("InstalledVersion", "?"),
-                "fixed":       v.get("FixedVersion", "—"),
-                "severity":    sev,
-                "title":       (v.get("Title") or v.get("Description") or "")[:160],
-                "target":      target,
-                "cvss":        _extract_cvss(v),
-                "refs":        refs[:2],
+                "id": v.get("VulnerabilityID", "?"),
+                "pkg": v.get("PkgName", "?"),
+                "installed": v.get("InstalledVersion", "?"),
+                "fixed": v.get("FixedVersion", "—"),
+                "severity": sev,
+                "title": (v.get("Title") or v.get("Description") or "")[:160],
+                "target": target,
+                "cvss": _extract_cvss(v),
+                "refs": refs[:2],
             })
     order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "UNKNOWN": 4}
     vulns.sort(key=lambda x: order.get(x["severity"], 9))
@@ -107,6 +109,37 @@ def parse_trivy(reports_dir: Path) -> dict:
     }
 
 
+def _empty_trivy_report() -> dict:
+    return {
+        "counts": {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "UNKNOWN": 0},
+        "total": 0,
+        "vulns": [],
+        "targets": [],
+        "schema_version": "",
+        "artifact_name": "",
+        "artifact_type": "",
+    }
+
+
+def parse_trivy(reports_dir: Path) -> dict:
+    image_path = reports_dir / "trivy" / "trivy-report.json"
+    data = load_json(image_path, {"Results": []})
+    result = _parse_trivy_data(data)
+
+    fs_path = reports_dir / "trivy" / "trivy-fs-report.json"
+    fs_available = fs_path.exists() and fs_path.stat().st_size > 0
+    if fs_available:
+        fs_data = load_json(fs_path, {"Results": []})
+        fs_result = _parse_trivy_data(fs_data)
+        fs_result["available"] = True
+    else:
+        fs_result = _empty_trivy_report()
+        fs_result["available"] = False
+
+    result["fs"] = fs_result
+    return result
+
+
 def _extract_cvss(v: dict) -> str:
     cvss = v.get("CVSS") or {}
     for src in ("nvd", "redhat", "ghsa"):
@@ -117,24 +150,78 @@ def _extract_cvss(v: dict) -> str:
     return "—"
 
 
+def _zap_sites(data: dict) -> list[dict]:
+    site = data.get("site") if isinstance(data, dict) else None
+    if site is None:
+        site = data.get("sites") if isinstance(data, dict) else None
+    if isinstance(site, dict):
+        return [site]
+    if isinstance(site, list):
+        return [entry for entry in site if isinstance(entry, dict)]
+    return []
+
+
+def _zap_riskcode(alert: dict) -> int:
+    raw = alert.get("riskcode", alert.get("riskCode", 0))
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        riskdesc = str(alert.get("riskdesc", alert.get("riskDesc", ""))).strip().upper()
+        return {"HIGH": 3, "MEDIUM": 2, "LOW": 1, "INFORMATIONAL": 0, "INFO": 0}.get(riskdesc, 0)
+
+
+def _zap_safe_count(value, instances: list) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return len(instances) or 1
+
+
+def _zap_report_data(reports_dir: Path) -> dict:
+    """Prefer the filtered report when it contains alerts; fall back to raw."""
+    candidates = (
+        reports_dir / "zap" / "zap-report.filtered.json",
+        reports_dir / "zap" / "zap-report.json",
+    )
+    fallback = {"site": [{"alerts": []}]}
+    best_data = fallback
+    best_total = -1
+    for path in candidates:
+        data = load_json(path, fallback)
+        if not isinstance(data, dict):
+            continue
+        total = sum(len(site.get("alerts") or []) for site in _zap_sites(data))
+        if total > best_total:
+            best_total = total
+            best_data = data
+    return best_data
+
+
 def parse_zap(reports_dir: Path) -> dict:
-    data = load_json(reports_dir / "zap" / "zap-report.json",
-                     {"site": [{"alerts": []}]})
+    data = _zap_report_data(reports_dir)
     risk_map = {3: "HIGH", 2: "MEDIUM", 1: "LOW", 0: "INFO"}
     counts = {"HIGH": 0, "MEDIUM": 0, "LOW": 0, "INFO": 0}
     alerts = []
     target = ""
     zap_version = data.get("@version", "")
     generated   = data.get("@generated", "")
-    for site in data.get("site", []) or []:
+    seen_keys: set[str] = set()
+    for site in _zap_sites(data):
         if not target:
             target = site.get("@name", site.get("name", ""))
         for a in site.get("alerts", []) or []:
-            rc = int(a.get("riskcode", 0))
+            if not isinstance(a, dict):
+                continue
+            dedup_key = str(a.get("pluginid") or a.get("alertRef") or a.get("name") or a.get("alert") or "")
+            if dedup_key and dedup_key in seen_keys:
+                continue
+            if dedup_key:
+                seen_keys.add(dedup_key)
+            rc = _zap_riskcode(a)
             label = risk_map.get(rc, "INFO")
             counts[label] = counts.get(label, 0) + 1
             instances = a.get("instances") or []
-            urls = [i.get("uri", "") for i in instances[:3]]
+            urls = [i.get("uri", "") for i in instances[:3] if isinstance(i, dict)]
             alerts.append({
                 "name":       a.get("alert", a.get("name", "?")),
                 "risk":       label,
@@ -145,14 +232,15 @@ def parse_zap(reports_dir: Path) -> dict:
                 "reference":  (a.get("reference") or "")[:200],
                 "cweid":      a.get("cweid", ""),
                 "wascid":     a.get("wascid", ""),
-                "count":      int(a.get("count", len(instances) or 1)),
+                "count":      _zap_safe_count(a.get("count", len(instances) or 1), instances),
                 "confidence": a.get("confidence", ""),
             })
     alerts.sort(key=lambda x: -x["riskcode"])
+    total = sum(counts.values())
     return {
         "target":      target,
         "counts":      counts,
-        "total":       sum(counts.values()),
+        "total":       total,
         "alerts":      alerts,
         "zap_version": zap_version,
         "generated":   generated,
@@ -193,6 +281,61 @@ def parse_sbom(reports_dir: Path) -> dict:
         "timestamp":    metadata.get("timestamp", ""),
         "component_name": (metadata.get("component") or {}).get("name", ""),
         "component_version": (metadata.get("component") or {}).get("version", ""),
+    }
+
+
+def _normalize_falco_severity(value: str) -> str:
+    sev = (value or "UNKNOWN").strip().upper()
+    if sev == "INFORMATIONAL":
+        return "INFO"
+    return sev
+
+
+def _falco_event_time(evt: dict) -> str:
+    time_val = evt.get("time") or evt.get("timestamp") or evt.get("@timestamp") or "—"
+    if isinstance(time_val, (int, float)):
+        try:
+            return datetime.fromtimestamp(time_val, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        except Exception:
+            return str(time_val)
+    return str(time_val)
+
+
+def _falco_event_row(evt: dict) -> dict:
+    """Normalize one runtime alert for dashboard display."""
+    return {
+        "time": _falco_event_time(evt),
+        "output": (evt.get("output") or "").strip(),
+        "rule": (evt.get("rule") or "").strip(),
+        "severity": _normalize_falco_severity(str(evt.get("priority") or evt.get("severity") or "UNKNOWN")),
+    }
+
+
+def _load_runtime_alert_events(json_path: Path) -> tuple[bool, list[dict]]:
+    exists = json_path.exists()
+    events: list[dict] = []
+    if exists and json_path.stat().st_size > 0:
+        data = load_json(json_path, [])
+        if isinstance(data, list):
+            for evt in data:
+                if isinstance(evt, dict):
+                    events.append(_falco_event_row(evt))
+        elif isinstance(data, dict):
+            events.append(_falco_event_row(data))
+    events.sort(key=lambda e: e.get("time", ""), reverse=True)
+    return exists, events
+
+
+def parse_falco(reports_dir: Path) -> dict:
+    """Load runtime security alerts from Spring Boot log analysis."""
+    exists, events = _load_runtime_alert_events(reports_dir / "runtime" / "runtime-alerts.json")
+    unique_rules = len({evt.get("rule", "") for evt in events if evt.get("rule")})
+    return {
+        "exists": exists,
+        "count": len(events),
+        "unique_count": unique_rules or len(events),
+        "events": events,
+        "groups": [],
     }
 
 
@@ -344,9 +487,14 @@ def _stat_card(label: str, value, color: str = "var(--accent)", note: str = "") 
 # SECTION RENDERERS — full inline report display
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def render_overview(gitleaks, trivy, zap, sbom, opa) -> str:
+def render_overview(gitleaks, trivy, zap, sbom, opa, falco) -> str:
     opa_ok = opa["passed"]
-    if opa_ok is False or gitleaks["count"] > 0 or trivy["counts"].get("CRITICAL", 0) > 0:
+    if (
+        opa_ok is False
+        or gitleaks["count"] > 0
+        or trivy["counts"].get("CRITICAL", 0) > 0
+        or falco["count"] > 0
+    ):
         overall_color, overall_label, overall_icon = "#ef4444", "AT RISK", "🔴"
     elif trivy["counts"].get("HIGH", 0) > 0 or zap["counts"].get("HIGH", 0) > 0:
         overall_color, overall_label, overall_icon = "#f97316", "WARNING", "🟡"
@@ -385,6 +533,12 @@ def render_overview(gitleaks, trivy, zap, sbom, opa) -> str:
         _stat_card("CVE Low", c.get("LOW", 0), "#64748b") +
         _stat_card("ZAP High", z.get("HIGH", 0), "#ef4444" if z.get("HIGH",0) > 0 else "#22c55e") +
         _stat_card("ZAP Medium", z.get("MEDIUM", 0), "#f97316") +
+        _stat_card(
+            "Runtime (Logs)",
+            falco["count"],
+            "#ef4444" if falco["count"] > 0 else "#22c55e",
+            note="Analyse logs Spring Boot (phase ZAP)",
+        ) +
         _stat_card("Composants", sbom["total"], "#3b82f6")
     )
 
@@ -464,13 +618,76 @@ def render_gitleaks(gl: dict) -> str:
 </div>"""
 
 
-def render_trivy(tv: dict) -> str:
+def _trivy_subsection_title(icon: str, title: str) -> str:
+    return (
+        f'<div style="display:flex;align-items:center;gap:10px;margin:0 0 16px;padding:10px 14px;'
+        f'background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:8px">'
+        f'<span style="font-size:18px">{icon}</span>'
+        f'<span style="font-size:13px;font-weight:700;letter-spacing:0.04em">{title}</span>'
+        f"</div>"
+    )
+
+
+def _trivy_info_box(msg: str) -> str:
+    return (
+        f'<div style="padding:14px 16px;border-radius:8px;background:rgba(100,116,139,0.12);'
+        f'border:1px solid rgba(100,116,139,0.25);color:var(--text-muted);font-size:12px">'
+        f"{msg}</div>"
+    )
+
+
+def _trivy_vuln_rows(vulns: list[dict]) -> str:
+    rows = ""
+    for v in vulns:
+        cvss_html = (
+            f'<span style="font-family:var(--mono);font-size:11px;color:#fbbf24">{v["cvss"]}</span>'
+            if v["cvss"] != "—"
+            else '<span style="color:var(--text-muted)">—</span>'
+        )
+        fix_color = "#4ade80" if v["fixed"] != "—" else "var(--text-muted)"
+        refs_html = ""
+        for ref in v["refs"]:
+            refs_html += (
+                f'<a href="{ref}" target="_blank" style="display:block;font-size:10px;color:var(--accent);'
+                f'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:200px">{ref}</a>'
+            )
+        rows += f"""
+<tr>
+  <td>{_sev_pill(v["severity"])}</td>
+  <td><a href="https://nvd.nist.gov/vuln/detail/{v["id"]}" target="_blank"
+      style="font-family:var(--mono);font-size:11px;color:var(--accent);text-decoration:none">{v["id"]}</a></td>
+  <td><span style="font-size:12px;font-weight:600">{v["pkg"]}</span></td>
+  <td><span style="font-family:var(--mono);font-size:11px;color:var(--text-muted)">{v["installed"]}</span></td>
+  <td><span style="font-family:var(--mono);font-size:11px;color:{fix_color}">{v["fixed"]}</span></td>
+  <td>{cvss_html}</td>
+  <td style="max-width:280px"><span style="font-size:11px;color:var(--text-muted)">{v["title"]}</span>{refs_html}</td>
+</tr>"""
+    return rows
+
+
+def _trivy_vuln_table(vulns: list[dict], tbody_id: str) -> str:
+    return f"""
+<div class="table-wrap">
+<table>
+<thead><tr>
+  <th>Sévérité</th><th>CVE</th><th>Package</th>
+  <th>Version installée</th><th>Version corrigée</th><th>CVSS</th><th>Description</th>
+</tr></thead>
+<tbody id="{tbody_id}">{_trivy_vuln_rows(vulns)}</tbody>
+</table>
+</div>"""
+
+
+def _trivy_image_meta(tv: dict) -> str:
     meta = ""
     if tv.get("artifact_name"):
-        meta += f'<div class="report-info-bar"><span>🐳</span><span>Artefact analysé&nbsp;: <strong style="font-family:var(--mono)">{tv["artifact_name"]}</strong></span>'
+        meta += (
+            f'<div class="report-info-bar"><span>🐳</span>'
+            f'<span>Artefact analysé&nbsp;: <strong style="font-family:var(--mono)">{tv["artifact_name"]}</strong></span>'
+        )
         if tv.get("artifact_type"):
             meta += f'<span style="margin-left:12px;color:var(--text-muted)">{tv["artifact_type"]}</span>'
-        meta += '</div>'
+        meta += "</div>"
 
     if tv["targets"]:
         tgt_list = "".join(
@@ -486,43 +703,42 @@ def render_trivy(tv: dict) -> str:
   </summary>
   <div style="padding:8px 0;border-top:1px solid var(--border);margin-top:4px">{tgt_list}</div>
 </details>"""
+    return meta
 
-    if not tv["vulns"]:
-        return meta + _empty("Aucune vulnérabilité détectée ✓")
 
-    rows = ""
-    for v in tv["vulns"]:
-        cvss_html = f'<span style="font-family:var(--mono);font-size:11px;color:#fbbf24">{v["cvss"]}</span>' if v["cvss"] != "—" else '<span style="color:var(--text-muted)">—</span>'
-        fix_color = "#4ade80" if v["fixed"] != "—" else "var(--text-muted)"
-        refs_html = ""
-        for ref in v["refs"]:
-            refs_html += f'<a href="{ref}" target="_blank" style="display:block;font-size:10px;color:var(--accent);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:200px">{ref}</a>'
-        rows += f"""
-<tr>
-  <td>{_sev_pill(v["severity"])}</td>
-  <td><a href="https://nvd.nist.gov/vuln/detail/{v["id"]}" target="_blank"
-      style="font-family:var(--mono);font-size:11px;color:var(--accent);text-decoration:none">{v["id"]}</a></td>
-  <td><span style="font-size:12px;font-weight:600">{v["pkg"]}</span></td>
-  <td><span style="font-family:var(--mono);font-size:11px;color:var(--text-muted)">{v["installed"]}</span></td>
-  <td><span style="font-family:var(--mono);font-size:11px;color:{fix_color}">{v["fixed"]}</span></td>
-  <td>{cvss_html}</td>
-  <td style="max-width:280px"><span style="font-size:11px;color:var(--text-muted)">{v["title"]}</span>{refs_html}</td>
-</tr>"""
+def render_trivy(tv: dict) -> str:
+    fs = tv.get("fs", {})
+    image_label = tv.get("artifact_name") or "image Docker"
+    has_image_table = bool(tv["vulns"])
+    has_fs_table = bool(fs.get("available") and fs.get("vulns"))
 
-    return meta + f"""
+    parts: list[str] = []
+    if has_image_table or has_fs_table:
+        parts.append("""
 <div class="table-filter-row">
   <input type="text" id="trivy-q" placeholder="Filtrer CVE, package, sévérité…"
-    oninput="filterRows('trivy-q','trivy-body')" class="filter-input">
-</div>
-<div class="table-wrap">
-<table>
-<thead><tr>
-  <th>Sév.</th><th>CVE</th><th>Package</th>
-  <th>Version installée</th><th>Version corrigée</th><th>CVSS</th><th>Description / Référence</th>
-</tr></thead>
-<tbody id="trivy-body">{rows}</tbody>
-</table>
-</div>"""
+    oninput="filterRows('trivy-q','trivy-body,trivy-fs-body')" class="filter-input">
+</div>""")
+
+    parts.append(_trivy_subsection_title("🐳", f"Scan Image — {image_label}"))
+    parts.append(_trivy_image_meta(tv))
+    if not tv["vulns"]:
+        parts.append(_empty("Aucune vulnérabilité détectée ✓"))
+    else:
+        parts.append(_trivy_vuln_table(tv["vulns"], "trivy-body"))
+
+    parts.append(
+        '<hr style="border:none;border-top:1px solid var(--border);margin:28px 0">'
+    )
+    parts.append(_trivy_subsection_title("📁", "Scan Filesystem — pom.xml"))
+    if not fs.get("available"):
+        parts.append(_trivy_info_box("Scan FS non disponible"))
+    elif not fs["vulns"]:
+        parts.append(_empty("Aucune vulnérabilité détectée ✓"))
+    else:
+        parts.append(_trivy_vuln_table(fs["vulns"], "trivy-fs-body"))
+
+    return "".join(parts)
 
 
 def render_zap(zap: dict) -> str:
@@ -533,11 +749,11 @@ def render_zap(zap: dict) -> str:
             meta += f'<span style="margin-left:auto;color:var(--text-muted)">ZAP {zap["zap_version"]}</span>'
         meta += '</div>'
 
-    if not zap["alerts"]:
+    if zap.get("total", 0) <= 0 and not zap.get("alerts"):
         return meta + _empty("Aucune alerte DAST détectée ✓")
 
     cards = ""
-    for a in zap["alerts"]:
+    for a in zap.get("alerts", []):
         risk_color = {"HIGH":"#ef4444","MEDIUM":"#f97316","LOW":"#22c55e","INFO":"#3b82f6"}.get(a["risk"], "#64748b")
         urls_html = "".join(
             f'<div style="font-family:var(--mono);font-size:10px;color:var(--text-muted);'
@@ -625,6 +841,75 @@ def render_sbom(sbom: dict) -> str:
 </div>"""
 
 
+def _render_runtime_alert_table(events: list[dict], count: int, unique_count: int) -> str:
+    if count == 0:
+        return ""
+    rows = ""
+    for evt in events:
+        time_str = html.escape(evt.get("time", "—"))
+        sev = evt.get("severity", "UNKNOWN")
+        output = html.escape(evt.get("output", "—"))
+        rule = evt.get("rule", "")
+        rule_html = (
+            f'<div style="font-size:10px;color:var(--text-muted);margin-bottom:4px;'
+            f'font-family:var(--mono)">{html.escape(rule)}</div>'
+            if rule else ""
+        )
+        rows += f"""
+<tr>
+  <td style="vertical-align:top;white-space:nowrap;font-family:var(--mono);font-size:11px;color:var(--text-muted)">{time_str}</td>
+  <td style="vertical-align:top;width:100px">{_sev_pill(sev)}</td>
+  <td style="vertical-align:top">
+    {rule_html}
+    <div style="font-family:var(--mono);font-size:11px;line-height:1.5;word-break:break-word;color:#94a3b8">{output}</div>
+  </td>
+</tr>"""
+    return f"""
+<div class="report-info-bar">
+  <span>📋</span>
+  <span><strong>{count}</strong> alerte(s) · <strong>{unique_count}</strong> règle(s) distincte(s)</span>
+  <span style="margin-left:auto;color:#ef4444;font-weight:700">⚠ Investigation requise</span>
+</div>
+<div class="table-wrap">
+<table>
+<thead><tr>
+  <th>Heure</th><th>Sévérité</th><th>Output</th>
+</tr></thead>
+<tbody>{rows}</tbody>
+</table>
+</div>"""
+
+
+def render_falco(falco: dict) -> str:
+    count = falco["count"]
+    unique_count = falco.get("unique_count", count)
+    status_color = "#22c55e" if count == 0 else "#ef4444"
+    status_label = "CLEAN ✓" if count == 0 else f"{count} ALERT(S)"
+    status_desc = (
+        "Aucune anomalie détectée dans les logs Spring Boot pendant la phase d'attaque ZAP."
+        if count == 0 else
+        f"{unique_count} type(s) d'alerte détecté(s) dans les logs de app-archivage."
+    )
+
+    hero = f"""
+<div style="background:{status_color}11;border:1px solid {status_color}33;
+  border-radius:10px;padding:24px 28px;margin-bottom:24px;
+  display:flex;align-items:center;gap:20px">
+  <div style="font-size:48px;line-height:1">{"✅" if count == 0 else "🚨"}</div>
+  <div>
+    <div style="font-size:22px;font-weight:900;font-family:var(--mono);color:{status_color}">{status_label}</div>
+    <div style="font-size:13px;color:var(--text-muted);margin-top:4px">{status_desc}</div>
+  </div>
+</div>"""
+
+    if count == 0:
+        if not falco["exists"]:
+            return hero + _empty("Fichier runtime-alerts.json absent — aucune analyse runtime enregistrée")
+        return hero + _empty("Aucune alerte runtime détectée dans les logs application ✓")
+
+    return hero + _render_runtime_alert_table(falco.get("events", []), count, unique_count)
+
+
 def render_opa(opa: dict) -> str:
     passed = opa["passed"]
     inp = opa.get("input", {}) or {}
@@ -700,7 +985,7 @@ def render_sonar(sonar: dict | None) -> str:
   <div style="font-size:14px;color:var(--text-muted);margin-bottom:8px">SonarQube non configuré</div>
   <div style="font-family:var(--mono);font-size:11px;background:rgba(0,0,0,0.3);
     display:inline-block;padding:8px 16px;border-radius:6px;color:#94a3b8">
-    python generate_dashboard.py --sonar-url http://host:9000 --sonar-token TOKEN --sonar-project KEY
+    python ci/scripts/generate_dashboard.py --sonar-url http://host:9000 --sonar-token TOKEN --sonar-project KEY
   </div>
 </div>"""
 
@@ -1015,8 +1300,10 @@ function showPane(id) {
 
 function filterRows(inputId, tbodyId) {
   const q = document.getElementById(inputId).value.toLowerCase();
-  document.querySelectorAll('#' + tbodyId + ' tr').forEach(tr => {
-    tr.style.display = tr.innerText.toLowerCase().includes(q) ? '' : 'none';
+  tbodyId.split(',').map(s => s.trim()).forEach(id => {
+    document.querySelectorAll('#' + id + ' tr').forEach(tr => {
+      tr.style.display = tr.innerText.toLowerCase().includes(q) ? '' : 'none';
+    });
   });
 }
 
@@ -1048,7 +1335,7 @@ def nav_item(pane_id: str, icon: str, label: str, badge: str = "", badge_cls: st
 
 
 def build_html(
-    gitleaks, trivy, zap, sbom, opa,
+    gitleaks, trivy, zap, sbom, opa, falco,
     sonar=None,
     project_name: str = "archivage-Doc",
     generated_at: str = "",
@@ -1056,8 +1343,14 @@ def build_html(
     now_str = generated_at or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
     gl_cls = "red" if gitleaks["count"] > 0 else "green"
-    tv_cls = "red" if trivy["counts"].get("CRITICAL",0) > 0 else ("orange" if trivy["counts"].get("HIGH",0) > 0 else "green")
+    fs_counts = trivy.get("fs", {}).get("counts", {})
+    trivy_crit = trivy["counts"].get("CRITICAL", 0) + fs_counts.get("CRITICAL", 0)
+    trivy_high = trivy["counts"].get("HIGH", 0) + fs_counts.get("HIGH", 0)
+    tv_cls = "red" if trivy_crit > 0 else ("orange" if trivy_high > 0 else "green")
+    fs_total = trivy.get("fs", {}).get("total", 0) if trivy.get("fs", {}).get("available") else None
+    trivy_badge = f"Image: {trivy['total']} | FS: {fs_total}" if fs_total is not None else f"Image: {trivy['total']}"
     zp_cls = "red" if zap["counts"].get("HIGH",0) > 0 else ("orange" if zap["counts"].get("MEDIUM",0) > 0 else "green")
+    fc_cls = "red" if falco["count"] > 0 else "green"
 
     sidebar = f"""
 <aside class="sidebar">
@@ -1065,8 +1358,9 @@ def build_html(
   {nav_item("overview",  "📋", "Vue d'ensemble", active=True)}
   <div class="nav-label">Sécurité</div>
   {nav_item("gitleaks",  "🔑", "Gitleaks",   str(gitleaks["count"]), gl_cls)}
-  {nav_item("trivy",     "🛡️", "Trivy SCA",   str(trivy["total"]),   tv_cls)}
+  {nav_item("trivy",     "🛡️", "Trivy SCA",   trivy_badge,   tv_cls)}
   {nav_item("zap",       "🌐", "OWASP ZAP",   str(zap["total"]),     zp_cls)}
+  {nav_item("falco",     "📋", "Runtime Logs", str(falco["count"]), fc_cls)}
   <div class="nav-label">Artefacts</div>
   {nav_item("sbom",      "📦", "SBOM",        str(sbom["total"]),    "blue")}
   {nav_item("opa",       "⚖️", "OPA Gate",    "PASS" if opa["passed"] else ("FAIL" if opa["passed"] is False else "N/A"), "green" if opa["passed"] else "red")}
@@ -1079,10 +1373,11 @@ def build_html(
         return f'<div id="pane-{pid}" class="pane{active_cls}"><div style="max-width:1100px">{hdr}{content}</div></div>'
 
     content_panes = (
-        pane("overview",  "Vue d'ensemble", "📋", render_overview(gitleaks, trivy, zap, sbom, opa), active=True) +
+        pane("overview",  "Vue d'ensemble", "📋", render_overview(gitleaks, trivy, zap, sbom, opa, falco), active=True) +
         pane("gitleaks",  "Gitleaks — Secrets détectés", "🔑", render_gitleaks(gitleaks)) +
         pane("trivy",     "Trivy — Vulnérabilités SCA/FS", "🛡️", render_trivy(trivy)) +
         pane("zap",       "OWASP ZAP — Alertes DAST", "🌐", render_zap(zap)) +
+        pane("falco",     "Runtime Security — App Log Analysis", "📋", render_falco(falco)) +
         pane("sbom",      "SBOM — Inventaire CycloneDX", "📦", render_sbom(sbom)) +
         pane("opa",       "OPA Security Gate", "⚖️", render_opa(opa)) +
         pane("sonar",     "SonarQube — Qualité du code", "🔬", render_sonar(sonar))
@@ -1154,28 +1449,37 @@ def main():
     print(f"  Sortie           : {output_path.resolve()}")
     print()
 
-    print("  [1/6] Gitleaks…")
+    print("  [1/7] Gitleaks…")
     gitleaks = parse_gitleaks(reports_dir)
     print(f"        {gitleaks['count']} secret(s)")
 
-    print("  [2/6] Trivy…")
+    print("  [2/7] Trivy…")
     trivy = parse_trivy(reports_dir)
-    print(f"        {trivy['total']} CVE(s) — CRITICAL:{trivy['counts'].get('CRITICAL',0)} HIGH:{trivy['counts'].get('HIGH',0)}")
+    fs = trivy.get("fs", {})
+    fs_line = f" | FS:{fs['total']}" if fs.get("available") else ""
+    print(
+        f"        Image:{trivy['total']}{fs_line} CVE(s) — "
+        f"CRITICAL:{trivy['counts'].get('CRITICAL', 0)} HIGH:{trivy['counts'].get('HIGH', 0)}"
+    )
 
-    print("  [3/6] OWASP ZAP…")
+    print("  [3/7] OWASP ZAP…")
     zap = parse_zap(reports_dir)
     print(f"        {zap['total']} alerte(s) — HIGH:{zap['counts'].get('HIGH',0)}")
 
-    print("  [4/6] SBOM CycloneDX…")
+    print("  [4/7] Runtime — App Log Analysis…")
+    falco = parse_falco(reports_dir)
+    print(f"        {falco['count']} alerte(s) — {falco.get('unique_count', falco['count'])} règle(s) distincte(s)")
+
+    print("  [5/7] SBOM CycloneDX…")
     sbom = parse_sbom(reports_dir)
     print(f"        {sbom['total']} composant(s)")
 
-    print("  [5/6] OPA Gate…")
+    print("  [6/7] OPA Gate…")
     opa = parse_opa(reports_dir)
     print(f"        Gate : {'PASS' if opa['passed'] else ('FAIL' if opa['passed'] is False else 'N/A')}")
 
     sonar = None
-    print("  [6/6] SonarQube…")
+    print("  [7/7] SonarQube…")
     if args.sonar_url and args.sonar_project:
         sonar = fetch_sonarqube(args.sonar_url, args.sonar_token, args.sonar_project)
         print(f"        Gate : {sonar['gate_status'] if sonar else 'inaccessible'}")
@@ -1184,11 +1488,11 @@ def main():
 
     print()
     print("  Génération du HTML…")
-    html = build_html(
-        gitleaks=gitleaks, trivy=trivy, zap=zap, sbom=sbom, opa=opa,
+    dashboard_html = build_html(
+        gitleaks=gitleaks, trivy=trivy, zap=zap, sbom=sbom, opa=opa, falco=falco,
         sonar=sonar, project_name=args.project,
     )
-    output_path.write_text(html, encoding="utf-8")
+    output_path.write_text(dashboard_html, encoding="utf-8")
     print(f"  ✅ Dashboard généré : {output_path.resolve()}")
     print(f"     Taille           : {output_path.stat().st_size // 1024} Ko")
 

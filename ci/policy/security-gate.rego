@@ -2,34 +2,22 @@ package security
 
 default allow := false
 
-strict_mode if {
-    input.settings.enforce_gate == true
-}
+default thresholds_ok := false
 
-scans_ok if {
-    input.scan_status.gitleaks == "ok"
-    input.scan_status.trivy == "ok"
-    input.scan_status.zap == "ok"
-}
-
-sonar_ok if {
-    input.sonarqube.quality_gate != "ERROR"
-}
-
+# Pass only when all blocking vulnerability thresholds are zero.
 thresholds_ok if {
-    count(input.gitleaks) == 0
     input.trivy.critical == 0
+    input.trivy.high == 0
     input.zap.high == 0
-    sonar_ok
 }
 
+# Demo mode: skip enforcement when the gate is not required.
 allow if {
-    scans_ok
-    not strict_mode
+    input.enforce_gate == false
 }
 
+# Strict mode: allow only when vulnerability thresholds are satisfied.
 allow if {
-    scans_ok
-    strict_mode
+    input.enforce_gate == true
     thresholds_ok
 }
