@@ -15,11 +15,11 @@ Briques couvertes :
   • SonarQube  — qualité code           (API REST optionnelle)
 
 Usage :
-  python generate_dashboard.py
-  python generate_dashboard.py --reports ./my-reports
-  python generate_dashboard.py --reports ./r --sonar-url http://localhost:9000 \\
+  python ci/scripts/generate_dashboard.py
+  python ci/scripts/generate_dashboard.py --reports ./my-reports
+  python ci/scripts/generate_dashboard.py --reports ./r --sonar-url http://localhost:9000 \\
          --sonar-token squ_xxx --sonar-project archivage-Doc
-  python generate_dashboard.py --serve
+  python ci/scripts/generate_dashboard.py --serve
 """
 
 import argparse
@@ -985,7 +985,7 @@ def render_sonar(sonar: dict | None) -> str:
   <div style="font-size:14px;color:var(--text-muted);margin-bottom:8px">SonarQube non configuré</div>
   <div style="font-family:var(--mono);font-size:11px;background:rgba(0,0,0,0.3);
     display:inline-block;padding:8px 16px;border-radius:6px;color:#94a3b8">
-    python generate_dashboard.py --sonar-url http://host:9000 --sonar-token TOKEN --sonar-project KEY
+    python ci/scripts/generate_dashboard.py --sonar-url http://host:9000 --sonar-token TOKEN --sonar-project KEY
   </div>
 </div>"""
 
