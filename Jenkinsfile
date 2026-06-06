@@ -72,14 +72,14 @@ pipeline {
                             sh '''
                                 set -euo pipefail
                                 cd "$PROJECT_DIR"
-                                if git rev-parse HEAD~1 >/dev/null 2>&1; then
-                                    LOG_OPTS="HEAD~1..HEAD"
-                                else
-                                    LOG_OPTS="HEAD"
-                                fi
-                                docker run --rm --volumes-from jenkins -w "$PROJECT_DIR" zricethezav/gitleaks:latest detect --source . --log-opts="$LOG_OPTS" --report-format json --report-path reports/gitleaks/gitleaks-raw.json --exit-code 0
+                                
+                                # استخدام --no-git باش نسكانيو الملفات الحالية مباشرة بلا ما نعتامدو على تاريخ الكوميتات
+                                docker run --rm --volumes-from jenkins -w "$PROJECT_DIR" zricethezav/gitleaks:latest detect --no-git --source . --report-format json --report-path reports/gitleaks/gitleaks-raw.json --exit-code 0
+                                
                                 docker run --rm --user "${JENKINS_UID}:${JENKINS_GID}" -e IGNORE_TEST_APP_FINDINGS="$IGNORE_FINDINGS" --volumes-from jenkins -w "$PROJECT_DIR" python:3.12-alpine python ci/scripts/filter_gitleaks.py
+                                
                                 test -s reports/gitleaks/gitleaks-report.json || echo "[]" > reports/gitleaks/gitleaks-report.json
+                                
                                 docker run --rm --volumes-from jenkins -w "$PROJECT_DIR" python:3.12-alpine python ci/scripts/print_gitleaks_summary.py reports/gitleaks/gitleaks-report.json || true
                             '''
                         }
