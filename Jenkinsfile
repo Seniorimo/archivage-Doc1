@@ -281,6 +281,7 @@ pipeline {
                 set +e
                 docker rm -f "$APP_CONTAINER" "$MYSQL_CONTAINER" >/dev/null 2>&1 || true
                 docker images --format "{{.Repository}}:{{.Tag}}" | grep "^archivage-app:" | grep -v "compose" | sort -t: -k2 -n | head -n -5 | xargs docker rmi -f 2>/dev/null || true
+                docker images --format "{{.Repository}}:{{.Tag}}" | grep "^imx0990/archivage-app:" | grep -v "compose" | sort -t: -k2 -n | head -n -5 | xargs docker rmi -f 2>/dev/null || true
                 docker network rm "$NETWORK_NAME" >/dev/null 2>&1 || true
                 docker run --rm -u 0:0 -v "$WORKSPACE:/ws" alpine:3.19 sh -c "chown -R ${JENKINS_UID}:${JENKINS_GID} /ws 2>/dev/null || true"
             '''
