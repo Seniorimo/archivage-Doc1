@@ -275,7 +275,7 @@ pipeline {
                 sh """
                     cd "\$PROJECT_DIR"
 
-                    docker run --rm --user "\${JENKINS_UID}:\${JENKINS_GID}" -e ENFORCE_GATE="${params.ENFORCE_SECURITY_GATE}" --volumes-from jenkins -w "\$PROJECT_DIR" python:3.12-alpine python ci/scripts/build_input.py || true
+                    docker run --rm --user "\${JENKINS_UID}:\${JENKINS_GID}" -e ENFORCE_GATE="${params.ENFORCE_SECURITY_GATE}" --volumes-from jenkins -w "\$PROJECT_DIR" python:3.12-alpine python ci/scripts/build_input.py
 
                     docker run --rm --volumes-from jenkins -w "\$PROJECT_DIR" openpolicyagent/opa:latest eval --format pretty --data "ci/policy/security-gate.rego" --input "reports/opa/input.json" "data.security" | tee "reports/opa/opa-debug.txt" || true
                     docker run --rm --volumes-from jenkins -w "\$PROJECT_DIR" openpolicyagent/opa:latest eval --format raw --data "ci/policy/security-gate.rego" --input "reports/opa/input.json" "data.security.allow" > "reports/opa/opa-result.txt" || true
