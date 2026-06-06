@@ -7,7 +7,7 @@ produits par le pipeline DevSecOps (Jenkins / GitHub Actions).
 
 Briques couvertes :
   • Gitleaks   — secrets détectés        (gitleaks-report.json)
-  • Trivy      — vulnérabilités SCA/FS   (trivy-report.json)
+  • Trivy      — vulnérabilités SCA      (trivy-report.json + trivy-fs-report.json)
   • OWASP ZAP  — alertes DAST           (zap-report.json)
   • CycloneDX  — inventaire SBOM        (bom.json)
   • OPA        — résultat security gate  (opa-result.txt + input.json)
@@ -70,15 +70,14 @@ def parse_gitleaks(reports_dir: Path) -> dict:
     return {"count": len(findings), "findings": findings}
 
 
-def parse_trivy(reports_dir: Path) -> dict:
-    data = load_json(reports_dir / "trivy" / "trivy-report.json", {"Results": []})
+def _parse_trivy_data(data: dict) -> dict:
     sev_counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "UNKNOWN": 0}
     vulns = []
     targets_seen = set()
     targets = []
     for result in data.get("Results", []) or []:
         target = result.get("Target", "")
-        rtype  = result.get("Type", "")
+        rtype = result.get("Type", "")
         if target not in targets_seen:
             targets_seen.add(target)
             targets.append({"target": target, "type": rtype})
@@ -87,15 +86,15 @@ def parse_trivy(reports_dir: Path) -> dict:
             sev_counts[sev] = sev_counts.get(sev, 0) + 1
             refs = v.get("References", []) or []
             vulns.append({
-                "id":          v.get("VulnerabilityID", "?"),
-                "pkg":         v.get("PkgName", "?"),
-                "installed":   v.get("InstalledVersion", "?"),
-                "fixed":       v.get("FixedVersion", "—"),
-                "severity":    sev,
-                "title":       (v.get("Title") or v.get("Description") or "")[:160],
-                "target":      target,
-                "cvss":        _extract_cvss(v),
-                "refs":        refs[:2],
+                "id": v.get("VulnerabilityID", "?"),
+                "pkg": v.get("PkgName", "?"),
+                "installed": v.get("InstalledVersion", "?"),
+                "fixed": v.get("FixedVersion", "—"),
+                "severity": sev,
+                "title": (v.get("Title") or v.get("Description") or "")[:160],
+                "target": target,
+                "cvss": _extract_cvss(v),
+                "refs": refs[:2],
             })
     order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "UNKNOWN": 4}
     vulns.sort(key=lambda x: order.get(x["severity"], 9))
@@ -108,6 +107,37 @@ def parse_trivy(reports_dir: Path) -> dict:
         "artifact_name": data.get("ArtifactName", ""),
         "artifact_type": data.get("ArtifactType", ""),
     }
+
+
+def _empty_trivy_report() -> dict:
+    return {
+        "counts": {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "UNKNOWN": 0},
+        "total": 0,
+        "vulns": [],
+        "targets": [],
+        "schema_version": "",
+        "artifact_name": "",
+        "artifact_type": "",
+    }
+
+
+def parse_trivy(reports_dir: Path) -> dict:
+    image_path = reports_dir / "trivy" / "trivy-report.json"
+    data = load_json(image_path, {"Results": []})
+    result = _parse_trivy_data(data)
+
+    fs_path = reports_dir / "trivy" / "trivy-fs-report.json"
+    fs_available = fs_path.exists() and fs_path.stat().st_size > 0
+    if fs_available:
+        fs_data = load_json(fs_path, {"Results": []})
+        fs_result = _parse_trivy_data(fs_data)
+        fs_result["available"] = True
+    else:
+        fs_result = _empty_trivy_report()
+        fs_result["available"] = False
+
+    result["fs"] = fs_result
+    return result
 
 
 def _extract_cvss(v: dict) -> str:
@@ -588,13 +618,76 @@ def render_gitleaks(gl: dict) -> str:
 </div>"""
 
 
-def render_trivy(tv: dict) -> str:
+def _trivy_subsection_title(icon: str, title: str) -> str:
+    return (
+        f'<div style="display:flex;align-items:center;gap:10px;margin:0 0 16px;padding:10px 14px;'
+        f'background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:8px">'
+        f'<span style="font-size:18px">{icon}</span>'
+        f'<span style="font-size:13px;font-weight:700;letter-spacing:0.04em">{title}</span>'
+        f"</div>"
+    )
+
+
+def _trivy_info_box(msg: str) -> str:
+    return (
+        f'<div style="padding:14px 16px;border-radius:8px;background:rgba(100,116,139,0.12);'
+        f'border:1px solid rgba(100,116,139,0.25);color:var(--text-muted);font-size:12px">'
+        f"{msg}</div>"
+    )
+
+
+def _trivy_vuln_rows(vulns: list[dict]) -> str:
+    rows = ""
+    for v in vulns:
+        cvss_html = (
+            f'<span style="font-family:var(--mono);font-size:11px;color:#fbbf24">{v["cvss"]}</span>'
+            if v["cvss"] != "—"
+            else '<span style="color:var(--text-muted)">—</span>'
+        )
+        fix_color = "#4ade80" if v["fixed"] != "—" else "var(--text-muted)"
+        refs_html = ""
+        for ref in v["refs"]:
+            refs_html += (
+                f'<a href="{ref}" target="_blank" style="display:block;font-size:10px;color:var(--accent);'
+                f'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:200px">{ref}</a>'
+            )
+        rows += f"""
+<tr>
+  <td>{_sev_pill(v["severity"])}</td>
+  <td><a href="https://nvd.nist.gov/vuln/detail/{v["id"]}" target="_blank"
+      style="font-family:var(--mono);font-size:11px;color:var(--accent);text-decoration:none">{v["id"]}</a></td>
+  <td><span style="font-size:12px;font-weight:600">{v["pkg"]}</span></td>
+  <td><span style="font-family:var(--mono);font-size:11px;color:var(--text-muted)">{v["installed"]}</span></td>
+  <td><span style="font-family:var(--mono);font-size:11px;color:{fix_color}">{v["fixed"]}</span></td>
+  <td>{cvss_html}</td>
+  <td style="max-width:280px"><span style="font-size:11px;color:var(--text-muted)">{v["title"]}</span>{refs_html}</td>
+</tr>"""
+    return rows
+
+
+def _trivy_vuln_table(vulns: list[dict], tbody_id: str) -> str:
+    return f"""
+<div class="table-wrap">
+<table>
+<thead><tr>
+  <th>Sévérité</th><th>CVE</th><th>Package</th>
+  <th>Version installée</th><th>Version corrigée</th><th>CVSS</th><th>Description</th>
+</tr></thead>
+<tbody id="{tbody_id}">{_trivy_vuln_rows(vulns)}</tbody>
+</table>
+</div>"""
+
+
+def _trivy_image_meta(tv: dict) -> str:
     meta = ""
     if tv.get("artifact_name"):
-        meta += f'<div class="report-info-bar"><span>🐳</span><span>Artefact analysé&nbsp;: <strong style="font-family:var(--mono)">{tv["artifact_name"]}</strong></span>'
+        meta += (
+            f'<div class="report-info-bar"><span>🐳</span>'
+            f'<span>Artefact analysé&nbsp;: <strong style="font-family:var(--mono)">{tv["artifact_name"]}</strong></span>'
+        )
         if tv.get("artifact_type"):
             meta += f'<span style="margin-left:12px;color:var(--text-muted)">{tv["artifact_type"]}</span>'
-        meta += '</div>'
+        meta += "</div>"
 
     if tv["targets"]:
         tgt_list = "".join(
@@ -610,43 +703,42 @@ def render_trivy(tv: dict) -> str:
   </summary>
   <div style="padding:8px 0;border-top:1px solid var(--border);margin-top:4px">{tgt_list}</div>
 </details>"""
+    return meta
 
-    if not tv["vulns"]:
-        return meta + _empty("Aucune vulnérabilité détectée ✓")
 
-    rows = ""
-    for v in tv["vulns"]:
-        cvss_html = f'<span style="font-family:var(--mono);font-size:11px;color:#fbbf24">{v["cvss"]}</span>' if v["cvss"] != "—" else '<span style="color:var(--text-muted)">—</span>'
-        fix_color = "#4ade80" if v["fixed"] != "—" else "var(--text-muted)"
-        refs_html = ""
-        for ref in v["refs"]:
-            refs_html += f'<a href="{ref}" target="_blank" style="display:block;font-size:10px;color:var(--accent);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:200px">{ref}</a>'
-        rows += f"""
-<tr>
-  <td>{_sev_pill(v["severity"])}</td>
-  <td><a href="https://nvd.nist.gov/vuln/detail/{v["id"]}" target="_blank"
-      style="font-family:var(--mono);font-size:11px;color:var(--accent);text-decoration:none">{v["id"]}</a></td>
-  <td><span style="font-size:12px;font-weight:600">{v["pkg"]}</span></td>
-  <td><span style="font-family:var(--mono);font-size:11px;color:var(--text-muted)">{v["installed"]}</span></td>
-  <td><span style="font-family:var(--mono);font-size:11px;color:{fix_color}">{v["fixed"]}</span></td>
-  <td>{cvss_html}</td>
-  <td style="max-width:280px"><span style="font-size:11px;color:var(--text-muted)">{v["title"]}</span>{refs_html}</td>
-</tr>"""
+def render_trivy(tv: dict) -> str:
+    fs = tv.get("fs", {})
+    image_label = tv.get("artifact_name") or "image Docker"
+    has_image_table = bool(tv["vulns"])
+    has_fs_table = bool(fs.get("available") and fs.get("vulns"))
 
-    return meta + f"""
+    parts: list[str] = []
+    if has_image_table or has_fs_table:
+        parts.append("""
 <div class="table-filter-row">
   <input type="text" id="trivy-q" placeholder="Filtrer CVE, package, sévérité…"
-    oninput="filterRows('trivy-q','trivy-body')" class="filter-input">
-</div>
-<div class="table-wrap">
-<table>
-<thead><tr>
-  <th>Sév.</th><th>CVE</th><th>Package</th>
-  <th>Version installée</th><th>Version corrigée</th><th>CVSS</th><th>Description / Référence</th>
-</tr></thead>
-<tbody id="trivy-body">{rows}</tbody>
-</table>
-</div>"""
+    oninput="filterRows('trivy-q','trivy-body,trivy-fs-body')" class="filter-input">
+</div>""")
+
+    parts.append(_trivy_subsection_title("🐳", f"Scan Image — {image_label}"))
+    parts.append(_trivy_image_meta(tv))
+    if not tv["vulns"]:
+        parts.append(_empty("Aucune vulnérabilité détectée ✓"))
+    else:
+        parts.append(_trivy_vuln_table(tv["vulns"], "trivy-body"))
+
+    parts.append(
+        '<hr style="border:none;border-top:1px solid var(--border);margin:28px 0">'
+    )
+    parts.append(_trivy_subsection_title("📁", "Scan Filesystem — pom.xml"))
+    if not fs.get("available"):
+        parts.append(_trivy_info_box("Scan FS non disponible"))
+    elif not fs["vulns"]:
+        parts.append(_empty("Aucune vulnérabilité détectée ✓"))
+    else:
+        parts.append(_trivy_vuln_table(fs["vulns"], "trivy-fs-body"))
+
+    return "".join(parts)
 
 
 def render_zap(zap: dict) -> str:
@@ -1208,8 +1300,10 @@ function showPane(id) {
 
 function filterRows(inputId, tbodyId) {
   const q = document.getElementById(inputId).value.toLowerCase();
-  document.querySelectorAll('#' + tbodyId + ' tr').forEach(tr => {
-    tr.style.display = tr.innerText.toLowerCase().includes(q) ? '' : 'none';
+  tbodyId.split(',').map(s => s.trim()).forEach(id => {
+    document.querySelectorAll('#' + id + ' tr').forEach(tr => {
+      tr.style.display = tr.innerText.toLowerCase().includes(q) ? '' : 'none';
+    });
   });
 }
 
@@ -1249,7 +1343,12 @@ def build_html(
     now_str = generated_at or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
     gl_cls = "red" if gitleaks["count"] > 0 else "green"
-    tv_cls = "red" if trivy["counts"].get("CRITICAL",0) > 0 else ("orange" if trivy["counts"].get("HIGH",0) > 0 else "green")
+    fs_counts = trivy.get("fs", {}).get("counts", {})
+    trivy_crit = trivy["counts"].get("CRITICAL", 0) + fs_counts.get("CRITICAL", 0)
+    trivy_high = trivy["counts"].get("HIGH", 0) + fs_counts.get("HIGH", 0)
+    tv_cls = "red" if trivy_crit > 0 else ("orange" if trivy_high > 0 else "green")
+    fs_total = trivy.get("fs", {}).get("total", 0) if trivy.get("fs", {}).get("available") else None
+    trivy_badge = f"Image: {trivy['total']} | FS: {fs_total}" if fs_total is not None else f"Image: {trivy['total']}"
     zp_cls = "red" if zap["counts"].get("HIGH",0) > 0 else ("orange" if zap["counts"].get("MEDIUM",0) > 0 else "green")
     fc_cls = "red" if falco["count"] > 0 else "green"
 
@@ -1259,7 +1358,7 @@ def build_html(
   {nav_item("overview",  "📋", "Vue d'ensemble", active=True)}
   <div class="nav-label">Sécurité</div>
   {nav_item("gitleaks",  "🔑", "Gitleaks",   str(gitleaks["count"]), gl_cls)}
-  {nav_item("trivy",     "🛡️", "Trivy SCA",   str(trivy["total"]),   tv_cls)}
+  {nav_item("trivy",     "🛡️", "Trivy SCA",   trivy_badge,   tv_cls)}
   {nav_item("zap",       "🌐", "OWASP ZAP",   str(zap["total"]),     zp_cls)}
   {nav_item("falco",     "📋", "Runtime Logs", str(falco["count"]), fc_cls)}
   <div class="nav-label">Artefacts</div>
@@ -1356,7 +1455,12 @@ def main():
 
     print("  [2/7] Trivy…")
     trivy = parse_trivy(reports_dir)
-    print(f"        {trivy['total']} CVE(s) — CRITICAL:{trivy['counts'].get('CRITICAL',0)} HIGH:{trivy['counts'].get('HIGH',0)}")
+    fs = trivy.get("fs", {})
+    fs_line = f" | FS:{fs['total']}" if fs.get("available") else ""
+    print(
+        f"        Image:{trivy['total']}{fs_line} CVE(s) — "
+        f"CRITICAL:{trivy['counts'].get('CRITICAL', 0)} HIGH:{trivy['counts'].get('HIGH', 0)}"
+    )
 
     print("  [3/7] OWASP ZAP…")
     zap = parse_zap(reports_dir)
